@@ -11,15 +11,18 @@ def client_signup():
     db = get_db()
     cur = db.cursor()
 
-    try:
-        cur.execute(
-            "INSERT INTO clients (name, email, password) VALUES (?, ?, ?)",
-            (data["name"], data["email"], data["password"])
-        )
-        db.commit()
-        return jsonify({"message": "Client registered successfully"})
-    except:
-        return jsonify({"message": "Client already exists"})
+    # Check if user already exists
+    cur.execute("SELECT * FROM clients WHERE email=?", (data["email"],))
+    if cur.fetchone():
+        return jsonify({"success": False, "message": "Client already exists"})
+
+    cur.execute(
+        "INSERT INTO clients (name, email, password) VALUES (?, ?, ?)",
+        (data["name"], data["email"], data["password"])
+    )
+    db.commit()
+    return jsonify({"success": True, "message": "Client registered successfully"})
+
 
 # ---------------- CLIENT LOGIN ----------------
 @app.route("/client/login", methods=["POST"])
@@ -35,8 +38,9 @@ def client_login():
 
     user = cur.fetchone()
     if user:
-        return jsonify({"message": "Client login successful", "client_id": user[0]})
-    return jsonify({"message": "Invalid credentials"})
+        return jsonify({"success": True, "message": "Client login successful", "client_id": user[0]})
+    return jsonify({"success": False, "message": "Account not found. Please sign up first."})
+
 
 # ---------------- CLIENT PROFILE ----------------
 @app.route("/client/profile", methods=["POST"])
@@ -47,18 +51,18 @@ def client_profile():
 
     cur.execute("""
         INSERT OR REPLACE INTO client_profile
-        (client_id, company_name, phone, location, bio)
-        VALUES (?, ?, ?, ?, ?)
+        (client_id, phone, location, bio)
+        VALUES (?, ?, ?, ?)
     """, (
         data["client_id"],
-        data["company_name"],
         data["phone"],
         data["location"],
         data["bio"]
     ))
 
     db.commit()
-    return jsonify({"message": "Client profile saved"})
+    return jsonify({"success": True, "message": "Client profile saved"})
+
 
 # ---------------- FREELANCER SIGNUP ----------------
 @app.route("/freelancer/signup", methods=["POST"])
@@ -67,15 +71,17 @@ def freelancer_signup():
     db = get_db()
     cur = db.cursor()
 
-    try:
-        cur.execute(
-            "INSERT INTO freelancers (name, email, password) VALUES (?, ?, ?)",
-            (data["name"], data["email"], data["password"])
-        )
-        db.commit()
-        return jsonify({"message": "Freelancer registered successfully"})
-    except:
-        return jsonify({"message": "Freelancer already exists"})
+    cur.execute("SELECT * FROM freelancers WHERE email=?", (data["email"],))
+    if cur.fetchone():
+        return jsonify({"success": False, "message": "Freelancer already exists"})
+
+    cur.execute(
+        "INSERT INTO freelancers (name, email, password) VALUES (?, ?, ?)",
+        (data["name"], data["email"], data["password"])
+    )
+    db.commit()
+    return jsonify({"success": True, "message": "Freelancer registered successfully"})
+
 
 # ---------------- FREELANCER LOGIN ----------------
 @app.route("/freelancer/login", methods=["POST"])
@@ -91,8 +97,9 @@ def freelancer_login():
 
     user = cur.fetchone()
     if user:
-        return jsonify({"message": "Freelancer login successful", "freelancer_id": user[0]})
-    return jsonify({"message": "Invalid credentials"})
+        return jsonify({"success": True, "message": "Freelancer login successful", "freelancer_id": user[0]})
+    return jsonify({"success": False, "message": "Account not found. Please sign up first."})
+
 
 # ---------------- FREELANCER PROFILE ----------------
 @app.route("/freelancer/profile", methods=["POST"])
@@ -116,7 +123,8 @@ def freelancer_profile():
     ))
 
     db.commit()
-    return jsonify({"message": "Freelancer profile saved"})
+    return jsonify({"success": True, "message": "Freelancer profile saved"})
+
 
 # ---------------- SEARCH FREELANCERS ----------------
 @app.route("/freelancers/search", methods=["GET"])
@@ -147,10 +155,11 @@ def search_freelancers():
             "experience": f[3],
             "budget_range": f"{f[4]} - {f[5]}",
             "rating": f[6],
-            "bio": f[8]
+            "bio": f[7]
         })
 
     return jsonify(freelancers)
+
 
 # ---------------- RUN SERVER ----------------
 if __name__ == "__main__":
