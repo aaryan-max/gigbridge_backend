@@ -19,7 +19,7 @@ def init_db():
     )
     """)
 
-    # CLIENT PROFILE (company_name REMOVED)
+    # CLIENT PROFILE
     cur.execute("""
     CREATE TABLE IF NOT EXISTS client_profile (
         client_id INTEGER PRIMARY KEY,

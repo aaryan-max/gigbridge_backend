@@ -6,89 +6,102 @@ current_client_id = None
 current_freelancer_id = None
 
 
-# ---------- AUTH ----------
+# ---------- VALIDATORS ----------
+def valid_email(email):
+    return "@" in email and "." in email
+
+def valid_phone(phone):
+    return phone.isdigit() and len(phone) == 10
+
+
+# ---------- SIGNUP ----------
 def signup():
     global current_client_id, current_freelancer_id
 
-    role = input("Sign up as (client/freelancer): ").lower()
+    while True:
+        role = input("Sign up as (client/freelancer): ").lower()
+        if role in ["client", "freelancer"]:
+            break
+        print("❌ Enter only client or freelancer")
 
     name = input("Name: ")
-    email = input("Email: ")
+
+    while True:
+        email = input("Email: ")
+        if valid_email(email):
+            break
+        print("❌ Invalid email format")
+
     password = input("Password: ")
 
-    data = {
-        "name": name,
-        "email": email,
-        "password": password
-    }
+    data = {"name": name, "email": email, "password": password}
 
     if role == "client":
         res = requests.post(f"{BASE_URL}/client/signup", json=data)
-    elif role == "freelancer":
+        response = res.json()
+        print(response)
+
+        if response.get("success"):
+            login(role="client", email=email, password=password, auto=True)
+
+    else:
         res = requests.post(f"{BASE_URL}/freelancer/signup", json=data)
-    else:
-        print("❌ Invalid role")
-        return
+        response = res.json()
+        print(response)
 
-    response = res.json()
-    print(response)
-
-    # Auto-login after signup
-    if response.get("success"):
-        print("✅ Signup Successful! Logging you in automatically...")
-        login(auto=True, role=role, email=email, password=password)
-    else:
-        print("❌ Signup failed. Try again.")
+        if response.get("success"):
+            login(role="freelancer", email=email, password=password, auto=True)
 
 
+# ---------- LOGIN ----------
 def login(auto=False, role=None, email=None, password=None):
     global current_client_id, current_freelancer_id
 
     if not auto:
-        role = input("Login as (client/freelancer): ").lower()
-        email = input("Email: ")
+        while True:
+            role = input("Login as (client/freelancer): ").lower()
+            if role in ["client", "freelancer"]:
+                break
+            print("❌ Enter only client or freelancer")
+
+        while True:
+            email = input("Email: ")
+            if valid_email(email):
+                break
+            print("❌ Invalid email format")
+
         password = input("Password: ")
 
-    data = {
-        "email": email,
-        "password": password
-    }
-
     if role == "client":
-        res = requests.post(f"{BASE_URL}/client/login", json=data)
-        response = res.json()
+        res = requests.post(f"{BASE_URL}/client/login", json={
+            "email": email, "password": password
+        })
+        data = res.json()
 
-        if not response.get("client_id"):
-            print("❌ Account not found. Please Sign Up first.")
-            return False
-
-        print("✅ Login Successful")
-        current_client_id = response.get("client_id")
-        return True
-
-    elif role == "freelancer":
-        res = requests.post(f"{BASE_URL}/freelancer/login", json=data)
-        response = res.json()
-
-        if not response.get("freelancer_id"):
-            print("❌ Account not found. Please Sign Up first.")
-            return False
-
-        print("✅ Login Successful")
-        current_freelancer_id = response.get("freelancer_id")
-        return True
+        if data.get("client_id"):
+            current_client_id = data["client_id"]
+            print("✅ Client login successful")
+            client_flow()
+        else:
+            print("❌ Account not found. Please sign up first.")
 
     else:
-        print("❌ Invalid role")
-        return False
+        res = requests.post(f"{BASE_URL}/freelancer/login", json={
+            "email": email, "password": password
+        })
+        data = res.json()
+
+        if data.get("freelancer_id"):
+            current_freelancer_id = data["freelancer_id"]
+            print("✅ Freelancer login successful")
+            freelancer_flow()
+        else:
+            print("❌ Account not found. Please sign up first.")
 
 
 # ---------- CLIENT FLOW ----------
 def client_flow():
-    global current_client_id
-
     if not current_client_id:
-        print("❌ Please login/signup first")
         login_or_signup()
         return
 
@@ -101,17 +114,22 @@ def client_flow():
         choice = input("Choose: ")
 
         if choice == "1":
-            data = {
+            while True:
+                phone = input("Phone (10 digits): ")
+                if valid_phone(phone):
+                    break
+                print("❌ Phone must be exactly 10 digits")
+
+            res = requests.post(f"{BASE_URL}/client/profile", json={
                 "client_id": current_client_id,
-                "phone": input("Phone: "),
+                "phone": phone,
                 "location": input("Location: "),
                 "bio": input("Bio: ")
-            }
-            res = requests.post(f"{BASE_URL}/client/profile", json=data)
+            })
             print(res.json())
 
         elif choice == "2":
-            skill = input("Required Skill: ")
+            skill = input("Required Skill: ").lower()
             budget = input("Max Budget: ")
 
             res = requests.get(
@@ -133,6 +151,7 @@ def client_flow():
                     print("Rating:", f["rating"])
 
         elif choice == "3":
+            print("⬅️ Exiting Client Dashboard")
             break
 
         else:
@@ -141,10 +160,7 @@ def client_flow():
 
 # ---------- FREELANCER FLOW ----------
 def freelancer_flow():
-    global current_freelancer_id
-
     if not current_freelancer_id:
-        print("❌ Please login/signup first")
         login_or_signup()
         return
 
@@ -156,20 +172,19 @@ def freelancer_flow():
         choice = input("Choose: ")
 
         if choice == "1":
-            data = {
+            res = requests.post(f"{BASE_URL}/freelancer/profile", json={
                 "freelancer_id": current_freelancer_id,
-                "title": input("Professional Title: "),
+                "title": input("Title: "),
                 "skills": input("Skills (comma separated): "),
                 "experience": int(input("Experience (years): ")),
                 "min_budget": float(input("Min Budget: ")),
                 "max_budget": float(input("Max Budget: ")),
                 "bio": input("Bio: ")
-            }
-
-            res = requests.post(f"{BASE_URL}/freelancer/profile", json=data)
+            })
             print(res.json())
 
         elif choice == "2":
+            print("⬅️ Exiting Freelancer Dashboard")
             break
 
         else:
@@ -178,9 +193,9 @@ def freelancer_flow():
 
 # ---------- LOGIN OR SIGNUP ----------
 def login_or_signup():
-    print("\n1️⃣ Login")
-    print("2️⃣ Signup")
-    choice = input("Choose option: ")
+    print("1. Login")
+    print("2. Signup")
+    choice = input("Choose: ")
 
     if choice == "1":
         login()
@@ -193,11 +208,11 @@ def login_or_signup():
 # ---------- MAIN MENU ----------
 while True:
     print("\n====== GIGBRIDGE ======")
-    print("1️⃣ Login")
-    print("2️⃣ Sign Up")
-    print("3️⃣ Continue as Client")
-    print("4️⃣ Continue as Freelancer")
-    print("5️⃣ Exit")
+    print("1. Login")
+    print("2. Sign Up")
+    print("3. Continue as Client")
+    print("4. Continue as Freelancer")
+    print("5. Exit")
 
     option = input("Choose option: ")
 

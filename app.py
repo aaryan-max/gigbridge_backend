@@ -11,7 +11,6 @@ def client_signup():
     db = get_db()
     cur = db.cursor()
 
-    # Check if user already exists
     cur.execute("SELECT * FROM clients WHERE email=?", (data["email"],))
     if cur.fetchone():
         return jsonify({"success": False, "message": "Client already exists"})
@@ -38,7 +37,8 @@ def client_login():
 
     user = cur.fetchone()
     if user:
-        return jsonify({"success": True, "message": "Client login successful", "client_id": user[0]})
+        return jsonify({"success": True, "client_id": user[0]})
+
     return jsonify({"success": False, "message": "Account not found. Please sign up first."})
 
 
@@ -97,7 +97,8 @@ def freelancer_login():
 
     user = cur.fetchone()
     if user:
-        return jsonify({"success": True, "message": "Freelancer login successful", "freelancer_id": user[0]})
+        return jsonify({"success": True, "freelancer_id": user[0]})
+
     return jsonify({"success": False, "message": "Account not found. Please sign up first."})
 
 
@@ -115,7 +116,7 @@ def freelancer_profile():
     """, (
         data["freelancer_id"],
         data["title"],
-        data["skills"],
+        data["skills"].lower(),   # normalize skills
         data["experience"],
         data["min_budget"],
         data["max_budget"],
@@ -126,27 +127,25 @@ def freelancer_profile():
     return jsonify({"success": True, "message": "Freelancer profile saved"})
 
 
-# ---------------- SEARCH FREELANCERS ----------------
+# ---------------- SEARCH FREELANCERS (FIXED) ----------------
 @app.route("/freelancers/search", methods=["GET"])
 def search_freelancers():
-    skill = request.args.get("skill")
+    skill = request.args.get("skill", "").lower()
     budget = request.args.get("budget")
 
     db = get_db()
     cur = db.cursor()
 
-    query = """
+    cur.execute("""
         SELECT * FROM freelancer_profile
-        WHERE skills LIKE ?
+        WHERE LOWER(skills) LIKE ?
         AND min_budget <= ?
-        AND availability='available'
         ORDER BY rating DESC
-    """
+    """, (f"%{skill}%", budget))
 
-    cur.execute(query, (f"%{skill}%", budget))
     results = cur.fetchall()
-
     freelancers = []
+
     for f in results:
         freelancers.append({
             "freelancer_id": f[0],
@@ -155,12 +154,11 @@ def search_freelancers():
             "experience": f[3],
             "budget_range": f"{f[4]} - {f[5]}",
             "rating": f[6],
-            "bio": f[7]
+            "bio": f[8]
         })
 
     return jsonify(freelancers)
 
 
-# ---------------- RUN SERVER ----------------
 if __name__ == "__main__":
     app.run(debug=True)
