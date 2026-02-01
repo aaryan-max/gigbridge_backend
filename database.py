@@ -1,17 +1,24 @@
 import sqlite3
 
-DB_NAME = "gigbridge.db"
+# ---------- CONNECTIONS ----------
+def client_db():
+    return sqlite3.connect("client.db")
 
-def get_db():
-    return sqlite3.connect(DB_NAME)
+def freelancer_db():
+    return sqlite3.connect("freelancer.db")
 
-def init_db():
-    db = get_db()
-    cur = db.cursor()
 
-    # CLIENT AUTH
-    cur.execute("""
-    CREATE TABLE IF NOT EXISTS clients (
+# ---------- TABLE CREATION ----------
+def create_tables():
+    cdb = client_db()
+    fdb = freelancer_db()
+
+    ccur = cdb.cursor()
+    fcur = fdb.cursor()
+
+    # CLIENT TABLE
+    ccur.execute("""
+    CREATE TABLE IF NOT EXISTS client (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         name TEXT,
         email TEXT UNIQUE,
@@ -19,20 +26,18 @@ def init_db():
     )
     """)
 
-    # CLIENT PROFILE
-    cur.execute("""
+    ccur.execute("""
     CREATE TABLE IF NOT EXISTS client_profile (
         client_id INTEGER PRIMARY KEY,
         phone TEXT,
         location TEXT,
-        bio TEXT,
-        FOREIGN KEY (client_id) REFERENCES clients(id)
+        bio TEXT
     )
     """)
 
-    # FREELANCER AUTH
-    cur.execute("""
-    CREATE TABLE IF NOT EXISTS freelancers (
+    # FREELANCER TABLE
+    fcur.execute("""
+    CREATE TABLE IF NOT EXISTS freelancer (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         name TEXT,
         email TEXT UNIQUE,
@@ -40,8 +45,7 @@ def init_db():
     )
     """)
 
-    # FREELANCER PROFILE
-    cur.execute("""
+    fcur.execute("""
     CREATE TABLE IF NOT EXISTS freelancer_profile (
         freelancer_id INTEGER PRIMARY KEY,
         title TEXT,
@@ -49,13 +53,12 @@ def init_db():
         experience INTEGER,
         min_budget REAL,
         max_budget REAL,
-        rating REAL DEFAULT 0,
-        total_projects INTEGER DEFAULT 0,
         bio TEXT,
-        availability TEXT DEFAULT 'available',
-        FOREIGN KEY (freelancer_id) REFERENCES freelancers(id)
+        rating REAL DEFAULT 0
     )
     """)
 
-    db.commit()
-    db.close()
+    cdb.commit()
+    fdb.commit()
+    cdb.close()
+    fdb.close()

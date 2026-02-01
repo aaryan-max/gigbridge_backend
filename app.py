@@ -1,163 +1,136 @@
 from flask import Flask, request, jsonify
-from database import get_db, init_db
+import sqlite3
+from database import create_tables
 
 app = Flask(__name__)
-init_db()
+create_tables()
 
-# ---------------- CLIENT SIGNUP ----------------
+# ---------- CLIENT ----------
 @app.route("/client/signup", methods=["POST"])
 def client_signup():
     data = request.json
-    db = get_db()
-    cur = db.cursor()
-
-    cur.execute("SELECT * FROM clients WHERE email=?", (data["email"],))
-    if cur.fetchone():
-        return jsonify({"success": False, "message": "Client already exists"})
-
-    cur.execute(
-        "INSERT INTO clients (name, email, password) VALUES (?, ?, ?)",
-        (data["name"], data["email"], data["password"])
-    )
-    db.commit()
-    return jsonify({"success": True, "message": "Client registered successfully"})
+    try:
+        conn = sqlite3.connect("client.db")
+        cur = conn.cursor()
+        cur.execute(
+            "INSERT INTO client (name,email,password) VALUES (?,?,?)",
+            (data["name"], data["email"], data["password"])
+        )
+        conn.commit()
+        return jsonify({"success": True})
+    except Exception as e:
+        return jsonify({"success": False, "message": str(e)})
 
 
-# ---------------- CLIENT LOGIN ----------------
 @app.route("/client/login", methods=["POST"])
 def client_login():
     data = request.json
-    db = get_db()
-    cur = db.cursor()
-
+    conn = sqlite3.connect("client.db")
+    cur = conn.cursor()
     cur.execute(
-        "SELECT * FROM clients WHERE email=? AND password=?",
+        "SELECT id FROM client WHERE email=? AND password=?",
         (data["email"], data["password"])
     )
-
-    user = cur.fetchone()
-    if user:
-        return jsonify({"success": True, "client_id": user[0]})
-
-    return jsonify({"success": False, "message": "Account not found. Please sign up first."})
+    row = cur.fetchone()
+    return jsonify({"client_id": row[0]}) if row else jsonify({})
 
 
-# ---------------- CLIENT PROFILE ----------------
 @app.route("/client/profile", methods=["POST"])
 def client_profile():
-    data = request.json
-    db = get_db()
-    cur = db.cursor()
-
-    cur.execute("""
-        INSERT OR REPLACE INTO client_profile
-        (client_id, phone, location, bio)
-        VALUES (?, ?, ?, ?)
-    """, (
-        data["client_id"],
-        data["phone"],
-        data["location"],
-        data["bio"]
-    ))
-
-    db.commit()
-    return jsonify({"success": True, "message": "Client profile saved"})
+    d = request.json
+    try:
+        conn = sqlite3.connect("client.db")
+        cur = conn.cursor()
+        cur.execute("""
+            INSERT OR REPLACE INTO client_profile
+            VALUES (?,?,?,?)
+        """, (d["client_id"], d["phone"], d["location"], d["bio"]))
+        conn.commit()
+        return jsonify({"success": True, "msg": "Profile updated"})
+    except Exception as e:
+        return jsonify({"success": False, "msg": str(e)})
 
 
-# ---------------- FREELANCER SIGNUP ----------------
+# ---------- FREELANCER ----------
 @app.route("/freelancer/signup", methods=["POST"])
 def freelancer_signup():
     data = request.json
-    db = get_db()
-    cur = db.cursor()
-
-    cur.execute("SELECT * FROM freelancers WHERE email=?", (data["email"],))
-    if cur.fetchone():
-        return jsonify({"success": False, "message": "Freelancer already exists"})
-
-    cur.execute(
-        "INSERT INTO freelancers (name, email, password) VALUES (?, ?, ?)",
-        (data["name"], data["email"], data["password"])
-    )
-    db.commit()
-    return jsonify({"success": True, "message": "Freelancer registered successfully"})
+    try:
+        conn = sqlite3.connect("freelancer.db")
+        cur = conn.cursor()
+        cur.execute(
+            "INSERT INTO freelancer (name,email,password) VALUES (?,?,?)",
+            (data["name"], data["email"], data["password"])
+        )
+        conn.commit()
+        return jsonify({"success": True})
+    except Exception as e:
+        return jsonify({"success": False, "msg": str(e)})
 
 
-# ---------------- FREELANCER LOGIN ----------------
 @app.route("/freelancer/login", methods=["POST"])
 def freelancer_login():
     data = request.json
-    db = get_db()
-    cur = db.cursor()
-
+    conn = sqlite3.connect("freelancer.db")
+    cur = conn.cursor()
     cur.execute(
-        "SELECT * FROM freelancers WHERE email=? AND password=?",
+        "SELECT id FROM freelancer WHERE email=? AND password=?",
         (data["email"], data["password"])
     )
-
-    user = cur.fetchone()
-    if user:
-        return jsonify({"success": True, "freelancer_id": user[0]})
-
-    return jsonify({"success": False, "message": "Account not found. Please sign up first."})
+    row = cur.fetchone()
+    return jsonify({"freelancer_id": row[0]}) if row else jsonify({})
 
 
-# ---------------- FREELANCER PROFILE ----------------
 @app.route("/freelancer/profile", methods=["POST"])
 def freelancer_profile():
-    data = request.json
-    db = get_db()
-    cur = db.cursor()
-
-    cur.execute("""
-        INSERT OR REPLACE INTO freelancer_profile
-        (freelancer_id, title, skills, experience, min_budget, max_budget, bio)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
-    """, (
-        data["freelancer_id"],
-        data["title"],
-        data["skills"].lower(),   # normalize skills
-        data["experience"],
-        data["min_budget"],
-        data["max_budget"],
-        data["bio"]
-    ))
-
-    db.commit()
-    return jsonify({"success": True, "message": "Freelancer profile saved"})
+    d = request.json
+    try:
+        conn = sqlite3.connect("freelancer.db")
+        cur = conn.cursor()
+        cur.execute("""
+            INSERT OR REPLACE INTO freelancer_profile
+            VALUES (?,?,?,?,?,?,?,?)
+        """, (
+            d["freelancer_id"], d["title"], d["skills"],
+            d["experience"], d["min_budget"], d["max_budget"],
+            d["bio"], 0
+        ))
+        conn.commit()
+        return jsonify({"success": True, "msg": "Profile updated"})
+    except Exception as e:
+        return jsonify({"success": False, "msg": str(e)})
 
 
-# ---------------- SEARCH FREELANCERS (FIXED) ----------------
+# ---------- SEARCH ----------
 @app.route("/freelancers/search", methods=["GET"])
 def search_freelancers():
     skill = request.args.get("skill", "").lower()
-    budget = request.args.get("budget")
+    budget = float(request.args.get("budget", 0))
 
-    db = get_db()
-    cur = db.cursor()
+    conn = sqlite3.connect("freelancer.db")
+    cur = conn.cursor()
 
     cur.execute("""
-        SELECT * FROM freelancer_profile
-        WHERE LOWER(skills) LIKE ?
+        SELECT freelancer_id,title,skills,experience,min_budget,max_budget,rating
+        FROM freelancer_profile
+        WHERE lower(skills) LIKE ?
         AND min_budget <= ?
-        ORDER BY rating DESC
     """, (f"%{skill}%", budget))
 
-    results = cur.fetchall()
-    freelancers = []
+    rows = cur.fetchall()
+    result = []
 
-    for f in results:
-        freelancers.append({
-            "freelancer_id": f[0],
-            "title": f[1],
-            "skills": f[2],
-            "experience": f[3],
-            "budget_range": f"{f[4]} - {f[5]}",
-            "rating": f[6],
-            "bio": f[8]
+    for r in rows:
+        result.append({
+            "freelancer_id": r[0],
+            "title": r[1],
+            "skills": r[2],
+            "experience": r[3],
+            "budget_range": f"{r[4]} - {r[5]}",
+            "rating": r[6]
         })
 
-    return jsonify(freelancers)
+    return jsonify(result)
 
 
 if __name__ == "__main__":
