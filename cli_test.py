@@ -78,7 +78,7 @@ def login(auto=False, role=None, email=None, password=None):
             print("❌ Account not found. Please sign up first.")
 
 
-# ---------- LOGIN OR SIGNUP (ROLE AWARE) ----------
+# ---------- LOGIN OR SIGNUP ----------
 def login_or_signup(role):
     print("1. Login")
     print("2. Signup")
@@ -167,6 +167,15 @@ def freelancer_flow():
         choice = input("Choose: ")
 
         if choice == "1":
+            print("\nAllowed Categories:")
+            print("- Graphic Designer")
+            print("- Video Editor")
+            print("- Photographer")
+            print("- Singer / Musician")
+            print("- Dancer / Performer")
+            print("- Illustrator / Digital Artist")
+            print("- Content Creator")
+
             res = requests.post(f"{BASE_URL}/freelancer/profile", json={
                 "freelancer_id": current_freelancer_id,
                 "title": input("Title: "),
@@ -174,8 +183,10 @@ def freelancer_flow():
                 "experience": int(input("Experience: ")),
                 "min_budget": float(input("Min Budget: ")),
                 "max_budget": float(input("Max Budget: ")),
-                "bio": input("Bio: ")
+                "bio": input("Bio: "),
+                "category": input("Category (choose from above): ")
             })
+
             print(res.json())
 
         elif choice == "2":
@@ -200,9 +211,9 @@ while True:
         r = input("Choose: ")
 
         if r == "1":
-            login("client")
+            login(role="client")
         elif r == "2":
-            login("freelancer")
+            login(role="freelancer")
 
     elif option == "2":
         print("Choose role to signup:")

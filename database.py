@@ -1,23 +1,17 @@
 import sqlite3
 
-# ---------- CONNECTIONS ----------
 def client_db():
     return sqlite3.connect("client.db")
 
 def freelancer_db():
     return sqlite3.connect("freelancer.db")
 
-
-# ---------- TABLE CREATION ----------
 def create_tables():
-    cdb = client_db()
-    fdb = freelancer_db()
+    # ---------- CLIENT ----------
+    db = client_db()
+    cur = db.cursor()
 
-    ccur = cdb.cursor()
-    fcur = fdb.cursor()
-
-    # CLIENT TABLE
-    ccur.execute("""
+    cur.execute("""
     CREATE TABLE IF NOT EXISTS client (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         name TEXT,
@@ -26,7 +20,7 @@ def create_tables():
     )
     """)
 
-    ccur.execute("""
+    cur.execute("""
     CREATE TABLE IF NOT EXISTS client_profile (
         client_id INTEGER PRIMARY KEY,
         phone TEXT,
@@ -35,8 +29,14 @@ def create_tables():
     )
     """)
 
-    # FREELANCER TABLE
-    fcur.execute("""
+    db.commit()
+    db.close()
+
+    # ---------- FREELANCER ----------
+    db = freelancer_db()
+    cur = db.cursor()
+
+    cur.execute("""
     CREATE TABLE IF NOT EXISTS freelancer (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         name TEXT,
@@ -45,7 +45,7 @@ def create_tables():
     )
     """)
 
-    fcur.execute("""
+    cur.execute("""
     CREATE TABLE IF NOT EXISTS freelancer_profile (
         freelancer_id INTEGER PRIMARY KEY,
         title TEXT,
@@ -53,12 +53,11 @@ def create_tables():
         experience INTEGER,
         min_budget REAL,
         max_budget REAL,
+        rating REAL DEFAULT 0,
         bio TEXT,
-        rating REAL DEFAULT 0
+        category TEXT
     )
     """)
 
-    cdb.commit()
-    fdb.commit()
-    cdb.close()
-    fdb.close()
+    db.commit()
+    db.close()
