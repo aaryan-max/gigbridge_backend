@@ -8,8 +8,8 @@ CATEGORIES = [
     "Content Creator"
 ]
 
-def normalize(text: str):
+def normalize(text):
     return text.strip().lower()
 
-def is_valid_category(cat: str):
+def is_valid_category(cat):
     return normalize(cat) in [normalize(c) for c in CATEGORIES]

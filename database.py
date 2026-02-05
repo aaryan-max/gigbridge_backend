@@ -1,4 +1,5 @@
 import sqlite3
+import time
 
 def client_db():
     return sqlite3.connect("client.db")
@@ -29,6 +30,15 @@ def create_tables():
     )
     """)
 
+    # OTP TABLE (CLIENT)
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS client_otp (
+        email TEXT PRIMARY KEY,
+        otp TEXT,
+        expires_at INTEGER
+    )
+    """)
+
     db.commit()
     db.close()
 
@@ -54,8 +64,18 @@ def create_tables():
         min_budget REAL,
         max_budget REAL,
         rating REAL DEFAULT 0,
+        total_projects INTEGER DEFAULT 0,
         bio TEXT,
         category TEXT
+    )
+    """)
+
+    # OTP TABLE (FREELANCER)
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS freelancer_otp (
+        email TEXT PRIMARY KEY,
+        otp TEXT,
+        expires_at INTEGER
     )
     """)
 

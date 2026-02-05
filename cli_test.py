@@ -10,11 +10,12 @@ current_freelancer_id = None
 def valid_email(email):
     return "@" in email and "." in email
 
+
 def valid_phone(phone):
     return phone.isdigit() and len(phone) == 10
 
 
-# ---------- SIGNUP WITH ROLE ----------
+# ---------- SIGNUP WITH OTP ----------
 def signup_with_role(role):
     name = input("Name: ")
 
@@ -26,18 +27,41 @@ def signup_with_role(role):
 
     password = input("Password: ")
 
-    data = {"name": name, "email": email, "password": password}
+    # STEP 1: SEND OTP
+    if role == "client":
+        requests.post(f"{BASE_URL}/client/send-otp", json={"email": email})
+    else:
+        requests.post(f"{BASE_URL}/freelancer/send-otp", json={"email": email})
+
+    print("📩 OTP sent to your email")
+
+    # STEP 2: VERIFY OTP
+    otp = input("Enter OTP: ")
 
     if role == "client":
-        res = requests.post(f"{BASE_URL}/client/signup", json=data)
+        res = requests.post(f"{BASE_URL}/client/verify-otp", json={
+            "name": name,
+            "email": email,
+            "password": password,
+            "otp": otp
+        })
     else:
-        res = requests.post(f"{BASE_URL}/freelancer/signup", json=data)
+        res = requests.post(f"{BASE_URL}/freelancer/verify-otp", json={
+            "name": name,
+            "email": email,
+            "password": password,
+            "otp": otp
+        })
 
     response = res.json()
     print(response)
 
     if response.get("success"):
-        login(role=role, email=email, password=password, auto=True)
+        print("✅ Signup successful. You can now login.")
+    else:
+        print("❌ Signup failed:", response.get("msg"))
+
+    return  # 🔴 VERY IMPORTANT (stops duplicate signup)
 
 
 # ---------- LOGIN ----------
@@ -187,7 +211,11 @@ def freelancer_flow():
                 "category": input("Category (choose from above): ")
             })
 
-            print(res.json())
+            try:
+                print(res.json())
+            except:
+                print("❌ Server error")
+                print(res.text)
 
         elif choice == "2":
             break
