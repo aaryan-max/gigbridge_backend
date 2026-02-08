@@ -1,6 +1,7 @@
 from flask import Flask, request, jsonify
 import sqlite3
 import random
+import time
 from werkzeug.security import generate_password_hash, check_password_hash
 import smtplib
 from email.message import EmailMessage
@@ -15,7 +16,8 @@ SENDER_EMAIL = "gigbridgee@gmail.com"
 APP_PASSWORD = "tvtp lklb vcnr wmzt"
 
 # ---------- OTP STORE ----------
-otp_store = {}   # { email: otp }
+# { email: { "otp": "123456", "time": 1720000000 } }
+otp_store = {}
 
 # ---------- EMAIL HELPERS ----------
 def send_email(to_email, subject, body):
@@ -48,12 +50,13 @@ Welcome to GigBridge 🚀
 def send_otp_email(to_email, otp):
     send_email(
         to_email,
-        "🔐 GigBridge OTP Verification",
+        f"🔐 GigBridge OTP - {otp}",
         f"""
 Your OTP for GigBridge signup is:
 
-OTP: {otp}
+🔢 OTP: {otp}
 
+This OTP is valid for 5 minutes.
 Do NOT share it with anyone.
 """
     )
@@ -68,15 +71,48 @@ def get_json_or_400():
 
 # ================= OTP APIs =================
 
+def generate_and_store_otp(email):
+    otp = str(random.randint(100000, 999999))
+    otp_store[email] = {
+        "otp": otp,
+        "time": time.time()
+    }
+    send_otp_email(email, otp)
+
+
+def verify_otp(email, user_otp):
+    record = otp_store.get(email)
+    if not record:
+        return False, "OTP expired or not requested"
+
+    if time.time() - record["time"] > 300:
+        del otp_store[email]
+        return False, "OTP expired"
+
+    if str(record["otp"]) != str(user_otp):
+        return False, "Invalid OTP"
+
+    del otp_store[email]
+    return True, None
+
+
 @app.route("/client/send-otp", methods=["POST"])
 def client_send_otp():
     d, err = get_json_or_400()
     if err:
         return err
     email = d.get("email")
-    otp = str(random.randint(100000, 999999))
-    otp_store[email] = otp
-    send_otp_email(email, otp)
+    generate_and_store_otp(email)
+    return jsonify({"success": True})
+
+
+@app.route("/freelancer/send-otp", methods=["POST"])
+def freelancer_send_otp():
+    d, err = get_json_or_400()
+    if err:
+        return err
+    email = d.get("email")
+    generate_and_store_otp(email)
     return jsonify({"success": True})
 
 
@@ -86,36 +122,23 @@ def client_verify_otp():
     if err:
         return err
 
-    email = d["email"]
-    if otp_store.get(email) != d["otp"]:
-        return jsonify({"success": False, "msg": "Invalid OTP"})
+    ok, msg = verify_otp(d["email"], d["otp"])
+    if not ok:
+        return jsonify({"success": False, "msg": msg})
 
     try:
         conn = sqlite3.connect("client.db")
         cur = conn.cursor()
         cur.execute(
             "INSERT INTO client (name,email,password) VALUES (?,?,?)",
-            (d["name"], email, generate_password_hash(d["password"]))
+            (d["name"], d["email"], generate_password_hash(d["password"]))
         )
         conn.commit()
         conn.close()
-        del otp_store[email]
-        send_login_email(email, d["name"], "Client", "signup")
+        send_login_email(d["email"], d["name"], "Client", "signup")
         return jsonify({"success": True})
     except sqlite3.IntegrityError:
         return jsonify({"success": False, "msg": "Client exists"})
-
-
-@app.route("/freelancer/send-otp", methods=["POST"])
-def freelancer_send_otp():
-    d, err = get_json_or_400()
-    if err:
-        return err
-    email = d.get("email")
-    otp = str(random.randint(100000, 999999))
-    otp_store[email] = otp
-    send_otp_email(email, otp)
-    return jsonify({"success": True})
 
 
 @app.route("/freelancer/verify-otp", methods=["POST"])
@@ -124,27 +147,26 @@ def freelancer_verify_otp():
     if err:
         return err
 
-    email = d["email"]
-    if otp_store.get(email) != d["otp"]:
-        return jsonify({"success": False, "msg": "Invalid OTP"})
+    ok, msg = verify_otp(d["email"], d["otp"])
+    if not ok:
+        return jsonify({"success": False, "msg": msg})
 
     try:
         conn = sqlite3.connect("freelancer.db")
         cur = conn.cursor()
         cur.execute(
             "INSERT INTO freelancer (name,email,password) VALUES (?,?,?)",
-            (d["name"], email, generate_password_hash(d["password"]))
+            (d["name"], d["email"], generate_password_hash(d["password"]))
         )
         conn.commit()
         conn.close()
-        del otp_store[email]
-        send_login_email(email, d["name"], "Freelancer", "signup")
+        send_login_email(d["email"], d["name"], "Freelancer", "signup")
         return jsonify({"success": True})
     except sqlite3.IntegrityError:
         return jsonify({"success": False, "msg": "Freelancer exists"})
 
 
-# ================= LOGIN APIs =================
+# ================= LOGIN APIs (UNCHANGED) =================
 
 @app.route("/client/login", methods=["POST"])
 def client_login():
@@ -154,6 +176,7 @@ def client_login():
     cur.execute("SELECT id,password,name FROM client WHERE email=?", (d["email"],))
     row = cur.fetchone()
     conn.close()
+
     if row and check_password_hash(row[1], d["password"]):
         send_login_email(d["email"], row[2], "Client", "login")
         return jsonify({"client_id": row[0]})
@@ -168,38 +191,36 @@ def freelancer_login():
     cur.execute("SELECT id,password,name FROM freelancer WHERE email=?", (d["email"],))
     row = cur.fetchone()
     conn.close()
+
     if row and check_password_hash(row[1], d["password"]):
         send_login_email(d["email"], row[2], "Freelancer", "login")
         return jsonify({"freelancer_id": row[0]})
     return jsonify({})
+
 
 # ---------- FREELANCER PROFILE ----------
 @app.route("/freelancer/profile", methods=["POST"])
 def freelancer_profile():
     d = request.get_json()
 
-    if not d or "freelancer_id" not in d:
-        return jsonify({"success": False, "msg": "freelancer_id required"}), 400
-
     if not is_valid_category(d.get("category", "")):
-        return jsonify({"success": False, "msg": "Invalid category"}), 400
+        return jsonify({"success": False, "msg": "Invalid category"})
 
     conn = sqlite3.connect("freelancer.db")
     cur = conn.cursor()
 
     cur.execute("""
         INSERT INTO freelancer_profile
-        (freelancer_id, title, skills, experience,
-         min_budget, max_budget, rating, total_projects, bio, category)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        (freelancer_id,title,skills,experience,min_budget,max_budget,rating,total_projects,bio,category)
+        VALUES (?,?,?,?,?,?,?,?,?,?)
         ON CONFLICT(freelancer_id) DO UPDATE SET
-            title=excluded.title,
-            skills=excluded.skills,
-            experience=excluded.experience,
-            min_budget=excluded.min_budget,
-            max_budget=excluded.max_budget,
-            bio=excluded.bio,
-            category=excluded.category
+        title=excluded.title,
+        skills=excluded.skills,
+        experience=excluded.experience,
+        min_budget=excluded.min_budget,
+        max_budget=excluded.max_budget,
+        bio=excluded.bio,
+        category=excluded.category
     """, (
         d["freelancer_id"],
         d.get("title", ""),
@@ -215,11 +236,10 @@ def freelancer_profile():
 
     conn.commit()
     conn.close()
-
     return jsonify({"success": True, "msg": "Profile updated"})
 
-# ================= SEARCH (FIXED) =================
 
+# ---------- SEARCH ----------
 @app.route("/freelancers/search", methods=["GET"])
 def freelancers_search():
     skill = request.args.get("skill", "").lower()
@@ -232,19 +252,10 @@ def freelancers_search():
 
     conn = sqlite3.connect("freelancer.db")
     cur = conn.cursor()
-
     cur.execute("""
-        SELECT 
-            freelancer_id,
-            title,
-            skills,
-            experience,
-            min_budget,
-            max_budget,
-            IFNULL(rating, 0)
+        SELECT freelancer_id,title,skills,experience,min_budget,max_budget,IFNULL(rating,0)
         FROM freelancer_profile
     """)
-
     rows = cur.fetchall()
     conn.close()
 
