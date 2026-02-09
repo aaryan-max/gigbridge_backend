@@ -1,5 +1,4 @@
 import sqlite3
-import time
 
 def client_db():
     return sqlite3.connect("client.db")
@@ -8,6 +7,7 @@ def freelancer_db():
     return sqlite3.connect("freelancer.db")
 
 def create_tables():
+
     # ---------- CLIENT ----------
     db = client_db()
     cur = db.cursor()
@@ -30,7 +30,6 @@ def create_tables():
     )
     """)
 
-    # OTP TABLE (CLIENT)
     cur.execute("""
     CREATE TABLE IF NOT EXISTS client_otp (
         email TEXT PRIMARY KEY,
@@ -70,12 +69,56 @@ def create_tables():
     )
     """)
 
-    # OTP TABLE (FREELANCER)
     cur.execute("""
     CREATE TABLE IF NOT EXISTS freelancer_otp (
         email TEXT PRIMARY KEY,
         otp TEXT,
         expires_at INTEGER
+    )
+    """)
+
+    # ---------- CHAT ----------
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS message (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        sender_role TEXT,
+        sender_id INTEGER,
+        receiver_id INTEGER,
+        text TEXT,
+        timestamp INTEGER
+    )
+    """)
+
+    # ---------- HIRE / JOB ----------
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS hire_request (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        client_id INTEGER,
+        freelancer_id INTEGER,
+        job_title TEXT DEFAULT '',
+        proposed_budget REAL,
+        note TEXT,
+        status TEXT DEFAULT 'PENDING',
+        created_at INTEGER
+    )
+    """)
+
+    # ---------- SAVED FREELANCERS ----------
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS saved_freelancer (
+        client_id INTEGER,
+        freelancer_id INTEGER,
+        UNIQUE(client_id, freelancer_id)
+    )
+    """)
+
+    # ---------- NOTIFICATIONS ----------
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS notification (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        client_id INTEGER,
+        message TEXT,
+        created_at INTEGER
     )
     """)
 
