@@ -1,4 +1,7 @@
 import requests
+import time
+import sqlite3
+from datetime import datetime
 
 BASE_URL = "http://127.0.0.1:5000"
 
@@ -106,106 +109,279 @@ def login_or_signup(role):
     else:
         print("❌ Invalid choice")
 
+# ---------- CHAT HELPERS ----------
+def format_timestamp(ts):
+    """Convert Unix timestamp to readable time"""
+    try:
+        dt = datetime.fromtimestamp(ts)
+        return dt.strftime("%I:%M %p")  # 12-hour format like WhatsApp
+    except:
+        return ""
+
+def display_message(text, is_sent, sender_name="", timestamp=None):
+    """Display message in WhatsApp-like format"""
+    time_str = format_timestamp(timestamp) if timestamp else ""
+    max_width = 60  # Max message width
+    
+    if is_sent:
+        # Your messages aligned to right (like WhatsApp)
+        # Wrap long messages
+        words = text.split()
+        lines = []
+        current_line = ""
+        for word in words:
+            if len(current_line + word) < max_width:
+                current_line += word + " "
+            else:
+                if current_line:
+                    lines.append(current_line.strip())
+                current_line = word + " "
+        if current_line:
+            lines.append(current_line.strip())
+        
+        for line in lines:
+            padding = 70 - len(line) - 6  # 6 for "[You] "
+            print(f"{' ' * max(0, padding)}[You] {line}")
+        if time_str:
+            print(f"{' ' * (70 - len(time_str) - 2)}{time_str} ✓")
+    else:
+        # Received messages aligned to left
+        sender_label = sender_name if sender_name else "Freelancer"
+        words = text.split()
+        lines = []
+        current_line = ""
+        for word in words:
+            if len(current_line + word) < max_width:
+                current_line += word + " "
+            else:
+                if current_line:
+                    lines.append(current_line.strip())
+                current_line = word + " "
+        if current_line:
+            lines.append(current_line.strip())
+        
+        for i, line in enumerate(lines):
+            prefix = f"[{sender_label}]" if i == 0 else " " * (len(sender_label) + 2)
+            print(f"{prefix} {line}")
+        if time_str:
+            print(f"{' ' * (len(sender_label) + 2)}{time_str}")
+
+def clear_chat_display():
+    """Clear screen for better chat experience"""
+    import os
+    os.system('cls' if os.name == 'nt' else 'clear')
+
+def show_chat_header(contact_name):
+    """Show WhatsApp-like header"""
+    print("\n" + "=" * 70)
+    print(f"💬 Chat with {contact_name}")
+    print("=" * 70)
+    print("Type your message and press Enter. Type 'exit' to leave chat.")
+    print("-" * 70)
+
 # ---------- CHAT ----------
 def open_chat_with_freelancer(freelancer_id):
-    print("\n--- CHAT (type 'exit' to stop) ---")
+    # Get freelancer name
+    try:
+        res = requests.get(f"{BASE_URL}/freelancers/{freelancer_id}")
+        freelancer_data = res.json()
+        freelancer_name = freelancer_data.get("name", "Freelancer")
+    except:
+        freelancer_name = "Freelancer"
     
-    # Load and display existing chat history once
+    show_chat_header(freelancer_name)
+    
+    # Load and display existing chat history
     res = requests.get(f"{BASE_URL}/message/history", params={
         "client_id": current_client_id,
         "freelancer_id": freelancer_id
     })
     
+    displayed_messages = set()  # Track displayed message timestamps to avoid duplicates
+    
     try:
         messages = res.json()
-        last_timestamp = 0
         if messages:
+            print("\n📜 Chat History:")
+            print("-" * 70)
             for m in messages:
-                role = "You" if m["sender_role"] == "client" else "Freelancer"
-                print(f"{role}: {m['text']}")
-                last_timestamp = max(last_timestamp, m.get("timestamp", 0))
+                is_sent = m["sender_role"] == "client"
+                display_message(m['text'], is_sent, freelancer_name, m.get("timestamp"))
+                displayed_messages.add(m.get("timestamp", 0))
     except:
         pass
     
-    # Now handle new messages
+    print("\n" + "-" * 70)
+    last_timestamp = max(displayed_messages) if displayed_messages else 0
+    
+    # Main chat loop
     while True:
-        msg = input("\nYou: ")
+        # Get user input
+        msg = input("\n💬 You: ")
         if msg.lower() == "exit":
+            print("\n👋 Left chat")
             break
+        if msg.lower() == "refresh" or msg.lower() == "r":
+            # Manual refresh to check for new messages
+            res = requests.get(f"{BASE_URL}/message/history", params={
+                "client_id": current_client_id,
+                "freelancer_id": freelancer_id
+            })
+            try:
+                messages = res.json()
+                new_found = False
+                for m in messages:
+                    msg_timestamp = m.get("timestamp", 0)
+                    if msg_timestamp > last_timestamp and msg_timestamp not in displayed_messages:
+                        is_sent = m["sender_role"] == "client"
+                        display_message(m['text'], is_sent, freelancer_name, msg_timestamp)
+                        displayed_messages.add(msg_timestamp)
+                        last_timestamp = max(last_timestamp, msg_timestamp)
+                        new_found = True
+                if not new_found:
+                    print("📭 No new messages")
+            except:
+                pass
+            continue
+        if not msg.strip():
+            continue
 
         # Send message
-        requests.post(f"{BASE_URL}/client/message/send", json={
-            "client_id": current_client_id,
-            "freelancer_id": freelancer_id,
-            "text": msg
-        })
-
-        # Get updated history and show only new messages
-        res = requests.get(f"{BASE_URL}/message/history", params={
-            "client_id": current_client_id,
-            "freelancer_id": freelancer_id
-        })
-        
         try:
-            messages = res.json()
-            for m in messages:
-                # Only show messages newer than last_timestamp
-                if m.get("timestamp", 0) > last_timestamp:
-                    role = "You" if m["sender_role"] == "client" else "Freelancer"
-                    print(f"{role}: {m['text']}")
-                    last_timestamp = m.get("timestamp", 0)
+            requests.post(f"{BASE_URL}/client/message/send", json={
+                "client_id": current_client_id,
+                "freelancer_id": freelancer_id,
+                "text": msg
+            })
+            
+            # Immediately show the sent message
+            current_time = int(time.time())
+            display_message(msg, True, freelancer_name, current_time)
+            displayed_messages.add(current_time)
+            last_timestamp = current_time
+            
+            # Check for any new messages from freelancer
+            time.sleep(0.5)  # Small delay
+            res = requests.get(f"{BASE_URL}/message/history", params={
+                "client_id": current_client_id,
+                "freelancer_id": freelancer_id
+            })
+            try:
+                messages = res.json()
+                for m in messages:
+                    msg_timestamp = m.get("timestamp", 0)
+                    if msg_timestamp > last_timestamp and msg_timestamp not in displayed_messages:
+                        is_sent = m["sender_role"] == "client"
+                        display_message(m['text'], is_sent, freelancer_name, msg_timestamp)
+                        displayed_messages.add(msg_timestamp)
+                        last_timestamp = max(last_timestamp, msg_timestamp)
+            except:
+                pass
         except:
-            pass
+            print("❌ Failed to send message")
 
 def open_chat_with_client(client_id):
-    print("\n--- CHAT (type 'exit' to stop) ---")
+    # Get client name
+    try:
+        conn = sqlite3.connect("client.db")
+        cur = conn.cursor()
+        cur.execute("SELECT name FROM client WHERE id=?", (client_id,))
+        row = cur.fetchone()
+        client_name = row[0] if row else "Client"
+        conn.close()
+    except:
+        client_name = "Client"
     
-    # Load and display existing chat history once
+    show_chat_header(client_name)
+    
+    # Load and display existing chat history
     res = requests.get(f"{BASE_URL}/message/history", params={
         "client_id": client_id,
         "freelancer_id": current_freelancer_id
     })
     
+    displayed_messages = set()  # Track displayed message timestamps
+    
     try:
         messages = res.json()
-        last_timestamp = 0
         if messages:
+            print("\n📜 Chat History:")
+            print("-" * 70)
             for m in messages:
-                role = "You" if m["sender_role"] == "freelancer" else "Client"
-                print(f"{role}: {m['text']}")
-                last_timestamp = max(last_timestamp, m.get("timestamp", 0))
+                is_sent = m["sender_role"] == "freelancer"
+                display_message(m['text'], is_sent, client_name, m.get("timestamp"))
+                displayed_messages.add(m.get("timestamp", 0))
     except:
         pass
     
-    # Now handle new messages
+    print("\n" + "-" * 70)
+    last_timestamp = max(displayed_messages) if displayed_messages else 0
+    
+    # Main chat loop
     while True:
-        msg = input("\nYou: ")
+        # Get user input
+        msg = input("\n💬 You: ")
         if msg.lower() == "exit":
+            print("\n👋 Left chat")
             break
+        if msg.lower() == "refresh" or msg.lower() == "r":
+            # Manual refresh to check for new messages
+            res = requests.get(f"{BASE_URL}/message/history", params={
+                "client_id": client_id,
+                "freelancer_id": current_freelancer_id
+            })
+            try:
+                messages = res.json()
+                new_found = False
+                for m in messages:
+                    msg_timestamp = m.get("timestamp", 0)
+                    if msg_timestamp > last_timestamp and msg_timestamp not in displayed_messages:
+                        is_sent = m["sender_role"] == "freelancer"
+                        display_message(m['text'], is_sent, client_name, msg_timestamp)
+                        displayed_messages.add(msg_timestamp)
+                        last_timestamp = max(last_timestamp, msg_timestamp)
+                        new_found = True
+                if not new_found:
+                    print("📭 No new messages")
+            except:
+                pass
+            continue
+        if not msg.strip():
+            continue
 
         # Send message
-        requests.post(f"{BASE_URL}/freelancer/message/send", json={
-            "freelancer_id": current_freelancer_id,
-            "client_id": client_id,
-            "text": msg
-        })
-
-        # Get updated history and show only new messages
-        res = requests.get(f"{BASE_URL}/message/history", params={
-            "client_id": client_id,
-            "freelancer_id": current_freelancer_id
-        })
-        
         try:
-            messages = res.json()
-            for m in messages:
-                # Only show messages newer than last_timestamp
-                if m.get("timestamp", 0) > last_timestamp:
-                    role = "You" if m["sender_role"] == "freelancer" else "Client"
-                    print(f"{role}: {m['text']}")
-                    last_timestamp = m.get("timestamp", 0)
+            requests.post(f"{BASE_URL}/freelancer/message/send", json={
+                "freelancer_id": current_freelancer_id,
+                "client_id": client_id,
+                "text": msg
+            })
+            
+            # Immediately show the sent message
+            current_time = int(time.time())
+            display_message(msg, True, client_name, current_time)
+            displayed_messages.add(current_time)
+            last_timestamp = current_time
+            
+            # Check for any new messages from client
+            time.sleep(0.5)  # Small delay
+            res = requests.get(f"{BASE_URL}/message/history", params={
+                "client_id": client_id,
+                "freelancer_id": current_freelancer_id
+            })
+            try:
+                messages = res.json()
+                for m in messages:
+                    msg_timestamp = m.get("timestamp", 0)
+                    if msg_timestamp > last_timestamp and msg_timestamp not in displayed_messages:
+                        is_sent = m["sender_role"] == "freelancer"
+                        display_message(m['text'], is_sent, client_name, msg_timestamp)
+                        displayed_messages.add(msg_timestamp)
+                        last_timestamp = max(last_timestamp, msg_timestamp)
+            except:
+                pass
         except:
-            pass
+            print("❌ Failed to send message")
 
 # ---------- CLIENT: VIEW DETAILS ----------
 def view_freelancer_details(fid):
@@ -424,10 +600,17 @@ def freelancer_flow():
         print("\n--- FREELANCER DASHBOARD ---")
         print("1. Create / Update Profile")
         print("2. View Hire Requests (Inbox)")
-        print("3. Exit")
+        print("3. Manage Active Jobs")
+        print("4. Messages")
+        print("5. Earnings & Performance")
+        print("6. Saved Clients")
+        print("7. Account Settings")
+        print("8. Notifications / Activity")
+        print("9. Exit")
 
         choice = input("Choose: ")
 
+        # 1️⃣ Create / Update Profile
         if choice == "1":
             print("\nAllowed Categories (example):")
             print("- Graphic Designer")
@@ -438,28 +621,31 @@ def freelancer_flow():
             print("- Illustrator")
             print("- Content Creator")
 
-            res = requests.post(f"{BASE_URL}/freelancer/profile", json={
-                "freelancer_id": current_freelancer_id,
-                "title": input("Title: "),
-                "skills": input("Skills: "),
-                "experience": int(input("Experience: ")),
-                "min_budget": float(input("Min Budget: ")),
-                "max_budget": float(input("Max Budget: ")),
-                "bio": input("Bio: "),
-                "category": input("Category (choose from above): ")
-            })
-
             try:
+                res = requests.post(f"{BASE_URL}/freelancer/profile", json={
+                    "freelancer_id": current_freelancer_id,
+                    "title": input("Title: "),
+                    "skills": input("Skills: "),
+                    "experience": int(input("Experience (years): ")),
+                    "min_budget": float(input("Min Budget: ")),
+                    "max_budget": float(input("Max Budget: ")),
+                    "bio": input("Bio: "),
+                    "category": input("Category (choose from above): ")
+                })
                 print(res.json())
-            except:
-                print("❌ Server error")
-                print(res.text)
+            except Exception:
+                print("❌ Server error while updating profile")
 
+        # 2️⃣ View Hire Requests (Inbox)
         elif choice == "2":
-            res = requests.get(f"{BASE_URL}/freelancer/hire/inbox", params={
-                "freelancer_id": current_freelancer_id
-            })
-            inbox = res.json()
+            try:
+                res = requests.get(f"{BASE_URL}/freelancer/hire/inbox", params={
+                    "freelancer_id": current_freelancer_id
+                })
+                inbox = res.json()
+            except Exception:
+                inbox = []
+
             if not inbox:
                 print("❌ No hire requests")
                 continue
@@ -476,7 +662,8 @@ def freelancer_flow():
                     print("1. Accept")
                     print("2. Reject")
                     print("3. Message Client")
-                    print("4. Next")
+                    print("4. Save Client")
+                    print("5. Next")
                     a = input("Choose: ")
 
                     if a == "1":
@@ -495,8 +682,167 @@ def freelancer_flow():
                         print(rr.json())
                     elif a == "3":
                         open_chat_with_client(r["client_id"])
+                    elif a == "4":
+                        rr = requests.post(f"{BASE_URL}/freelancer/save-client", json={
+                            "freelancer_id": current_freelancer_id,
+                            "client_id": r["client_id"]
+                        })
+                        try:
+                            print(rr.json())
+                        except Exception:
+                            print("❌ Failed to save client")
 
+        # 3️⃣ Manage Active Jobs
         elif choice == "3":
+            try:
+                res = requests.get(f"{BASE_URL}/freelancer/hire/inbox", params={
+                    "freelancer_id": current_freelancer_id
+                })
+                inbox = res.json()
+            except Exception:
+                inbox = []
+
+            active = [r for r in inbox if r.get("status") == "ACCEPTED"]
+            print("\n--- ACTIVE JOBS ---")
+            if not active:
+                print("📭 No active (accepted) jobs")
+            else:
+                for i, j in enumerate(active, 1):
+                    title = j.get("note") or j.get("request_id")
+                    print(f"{i}. Client: {j['client_name']} | Budget: ₹{j['proposed_budget']} | Status: {j['status']}")
+
+        # 4️⃣ Messages
+        elif choice == "4":
+            # List clients you have hire-request history with
+            try:
+                res = requests.get(f"{BASE_URL}/freelancer/hire/inbox", params={
+                    "freelancer_id": current_freelancer_id
+                })
+                inbox = res.json()
+            except Exception:
+                inbox = []
+
+            clients = {}
+            for r in inbox:
+                clients[r["client_id"]] = r["client_name"]
+
+            if not clients:
+                print("📭 No clients to message yet")
+            else:
+                print("\n--- YOUR CLIENTS ---")
+                mapping = []
+                for idx, (cid, name) in enumerate(clients.items(), 1):
+                    print(f"{idx}. {name} (ID: {cid})")
+                    mapping.append((idx, cid))
+                sel = input("Select client number (or Enter to cancel): ").strip()
+                if sel.isdigit():
+                    sel = int(sel)
+                    for num, cid in mapping:
+                        if num == sel:
+                            open_chat_with_client(cid)
+                            break
+
+        # 5️⃣ Earnings & Performance
+        elif choice == "5":
+            try:
+                res = requests.get(f"{BASE_URL}/freelancer/stats", params={
+                    "freelancer_id": current_freelancer_id
+                })
+                data = res.json()
+                if not data.get("success"):
+                    print("❌", data.get("msg", "Could not fetch stats"))
+                else:
+                    print("\n--- EARNINGS & PERFORMANCE ---")
+                    print("Total Earnings: ₹", data["total_earnings"])
+                    print("Completed Jobs:", data["completed_jobs"])
+                    print("Rating: ⭐", data["rating"])
+                    print("Job Success:", f"{data['job_success_percent']}%")
+            except Exception:
+                print("❌ Error fetching stats")
+
+        # 6️⃣ Saved Clients
+        elif choice == "6":
+            try:
+                res = requests.get(f"{BASE_URL}/freelancer/saved-clients", params={
+                    "freelancer_id": current_freelancer_id
+                })
+                clients = res.json()
+            except Exception:
+                clients = []
+
+            print("\n--- SAVED CLIENTS ---")
+            if not clients:
+                print("❌ No saved clients")
+            else:
+                for c in clients:
+                    print(f"{c['client_id']}. {c['name']} - {c['email']}")
+                    print("1. Message 💬")
+                    print("2. Next")
+                    a = input("Choose: ")
+                    if a == "1":
+                        open_chat_with_client(c["client_id"])
+
+        # 7️⃣ Account Settings
+        elif choice == "7":
+            while True:
+                print("\n--- ACCOUNT SETTINGS ---")
+                print("1. Change Password")
+                print("2. Update Email")
+                print("3. Notification Settings (UI only)")
+                print("4. Logout")
+                print("5. Back")
+                a = input("Choose: ")
+
+                if a == "1":
+                    old_pwd = input("Old Password: ")
+                    new_pwd = input("New Password: ")
+                    try:
+                        res = requests.post(f"{BASE_URL}/freelancer/change-password", json={
+                            "freelancer_id": current_freelancer_id,
+                            "old_password": old_pwd,
+                            "new_password": new_pwd
+                        })
+                        print(res.json())
+                    except Exception:
+                        print("❌ Failed to change password")
+                elif a == "2":
+                    new_email = input("New Email: ")
+                    try:
+                        res = requests.post(f"{BASE_URL}/freelancer/update-email", json={
+                            "freelancer_id": current_freelancer_id,
+                            "new_email": new_email
+                        })
+                        print(res.json())
+                    except Exception:
+                        print("❌ Failed to update email")
+                elif a == "3":
+                    print("ℹ Notification settings are UI-only for now.")
+                elif a == "4":
+                    current_freelancer_id = None
+                    print("✅ Logged out")
+                    return
+                elif a == "5":
+                    break
+
+        # 8️⃣ Notifications / Activity
+        elif choice == "8":
+            try:
+                res = requests.get(f"{BASE_URL}/freelancer/notifications", params={
+                    "freelancer_id": current_freelancer_id
+                })
+                notes = res.json()
+            except Exception:
+                notes = []
+
+            print("\n--- NOTIFICATIONS / ACTIVITY ---")
+            if not notes:
+                print("📭 No recent activity")
+            else:
+                for n in notes:
+                    print("✔", n)
+
+        # 9️⃣ Exit
+        elif choice == "9":
             break
 
 # ---------- MAIN MENU ----------

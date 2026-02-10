@@ -103,7 +103,7 @@ def create_tables():
     )
     """)
 
-    # ---------- SAVED FREELANCERS ----------
+    # ---------- SAVED FREELANCERS (client side) ----------
     cur.execute("""
     CREATE TABLE IF NOT EXISTS saved_freelancer (
         client_id INTEGER,
@@ -112,7 +112,16 @@ def create_tables():
     )
     """)
 
-    # ---------- NOTIFICATIONS ----------
+    # ---------- SAVED CLIENTS (freelancer side) ----------
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS saved_client (
+        freelancer_id INTEGER,
+        client_id INTEGER,
+        UNIQUE(freelancer_id, client_id)
+    )
+    """)
+
+    # ---------- NOTIFICATIONS (client-focused; freelancer notifications are derived) ----------
     cur.execute("""
     CREATE TABLE IF NOT EXISTS notification (
         id INTEGER PRIMARY KEY AUTOINCREMENT,

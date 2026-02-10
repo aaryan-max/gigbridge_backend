@@ -899,6 +899,278 @@ def client_notifications():
         return jsonify({"success": False, "msg": str(e)}), 500
 
 # ============================================================
+# FREELANCER – STATS / EARNINGS & PERFORMANCE
+# ============================================================
+
+@app.route("/freelancer/stats", methods=["GET"])
+def freelancer_stats():
+    freelancer_id = request.args.get("freelancer_id")
+    if not freelancer_id:
+        return jsonify({"success": False, "msg": "freelancer_id required"}), 400
+
+    try:
+        freelancer_id = int(freelancer_id)
+    except ValueError:
+        return jsonify({"success": False, "msg": "Invalid freelancer_id"}), 400
+
+    conn = None
+    try:
+        conn = sqlite3.connect("freelancer.db")
+        cur = conn.cursor()
+
+        # Total earnings and completed jobs (ACCEPTED)
+        cur.execute("""
+            SELECT COUNT(*), COALESCE(SUM(proposed_budget), 0)
+            FROM hire_request
+            WHERE freelancer_id=? AND status='ACCEPTED'
+        """, (freelancer_id,))
+        row = cur.fetchone()
+        completed_jobs = int(row[0] or 0)
+        total_earnings = float(row[1] or 0.0)
+
+        # Total jobs for job success %
+        cur.execute("""
+            SELECT COUNT(*)
+            FROM hire_request
+            WHERE freelancer_id=?
+        """, (freelancer_id,))
+        total_jobs_row = cur.fetchone()
+        total_jobs = int(total_jobs_row[0] or 0)
+
+        # Rating from profile
+        cur.execute("""
+            SELECT COALESCE(rating, 0)
+            FROM freelancer_profile
+            WHERE freelancer_id=?
+        """, (freelancer_id,))
+        rating_row = cur.fetchone()
+        rating = float(rating_row[0] or 0.0) if rating_row else 0.0
+
+        job_success = 0.0
+        if total_jobs > 0:
+            job_success = round((completed_jobs / total_jobs) * 100.0, 2)
+
+        conn.close()
+        return jsonify({
+            "success": True,
+            "total_earnings": total_earnings,
+            "completed_jobs": completed_jobs,
+            "rating": rating,
+            "job_success_percent": job_success
+        })
+    except Exception as e:
+        if conn:
+            conn.close()
+        return jsonify({"success": False, "msg": str(e)}), 500
+
+# ============================================================
+# FREELANCER – SAVED CLIENTS
+# ============================================================
+
+@app.route("/freelancer/save-client", methods=["POST"])
+def freelancer_save_client():
+    d = get_json()
+    missing = require_fields(d, ["freelancer_id", "client_id"])
+    if missing:
+        return jsonify({"success": False, "msg": "Missing fields"}), 400
+
+    conn = None
+    try:
+        conn = sqlite3.connect("freelancer.db")
+        cur = conn.cursor()
+        cur.execute("""
+            INSERT OR IGNORE INTO saved_client (freelancer_id, client_id)
+            VALUES (?, ?)
+        """, (int(d["freelancer_id"]), int(d["client_id"])))
+        conn.commit()
+        conn.close()
+        return jsonify({"success": True})
+    except Exception as e:
+        if conn:
+            conn.close()
+        return jsonify({"success": False, "msg": str(e)}), 500
+
+
+@app.route("/freelancer/saved-clients", methods=["GET"])
+def freelancer_saved_clients():
+    freelancer_id = request.args.get("freelancer_id")
+    if not freelancer_id:
+        return jsonify({"success": False, "msg": "freelancer_id required"}), 400
+
+    try:
+        freelancer_id = int(freelancer_id)
+    except ValueError:
+        return jsonify({"success": False, "msg": "Invalid freelancer_id"}), 400
+
+    conn = None
+    client_conn = None
+    try:
+        conn = sqlite3.connect("freelancer.db")
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT client_id
+            FROM saved_client
+            WHERE freelancer_id=?
+        """, (freelancer_id,))
+        rows = cur.fetchall()
+        conn.close()
+
+        client_ids = [int(r[0]) for r in rows]
+        if not client_ids:
+            return jsonify([])
+
+        client_conn = sqlite3.connect("client.db")
+        client_cur = client_conn.cursor()
+
+        out = []
+        for cid in client_ids:
+            client_cur.execute("SELECT name, email FROM client WHERE id=?", (cid,))
+            c = client_cur.fetchone()
+            if c:
+                out.append({
+                    "client_id": cid,
+                    "name": c[0],
+                    "email": c[1]
+                })
+
+        client_conn.close()
+        return jsonify(out)
+    except Exception as e:
+        if client_conn:
+            client_conn.close()
+        if conn:
+            conn.close()
+        return jsonify({"success": False, "msg": str(e)}), 500
+
+# ============================================================
+# FREELANCER – ACCOUNT SETTINGS (EMAIL / PASSWORD)
+# ============================================================
+
+@app.route("/freelancer/change-password", methods=["POST"])
+def freelancer_change_password():
+    d = get_json()
+    missing = require_fields(d, ["freelancer_id", "old_password", "new_password"])
+    if missing:
+        return jsonify({"success": False, "msg": "Missing fields"}), 400
+
+    freelancer_id = int(d["freelancer_id"])
+    old_password = str(d["old_password"])
+    new_password = str(d["new_password"])
+
+    conn = None
+    try:
+        conn = sqlite3.connect("freelancer.db")
+        cur = conn.cursor()
+        cur.execute("SELECT password FROM freelancer WHERE id=?", (freelancer_id,))
+        row = cur.fetchone()
+        if not row:
+            conn.close()
+            return jsonify({"success": False, "msg": "Freelancer not found"}), 404
+
+        if not check_password_hash(row[0], old_password):
+            conn.close()
+            return jsonify({"success": False, "msg": "Old password incorrect"}), 400
+
+        cur.execute(
+            "UPDATE freelancer SET password=? WHERE id=?",
+            (generate_password_hash(new_password), freelancer_id)
+        )
+        conn.commit()
+        conn.close()
+        return jsonify({"success": True})
+    except Exception as e:
+        if conn:
+            conn.close()
+        return jsonify({"success": False, "msg": str(e)}), 500
+
+
+@app.route("/freelancer/update-email", methods=["POST"])
+def freelancer_update_email():
+    d = get_json()
+    missing = require_fields(d, ["freelancer_id", "new_email"])
+    if missing:
+        return jsonify({"success": False, "msg": "Missing fields"}), 400
+
+    freelancer_id = int(d["freelancer_id"])
+    new_email = str(d["new_email"]).strip().lower()
+
+    if not valid_email(new_email):
+        return jsonify({"success": False, "msg": "Invalid email"}), 400
+
+    conn = None
+    try:
+        conn = sqlite3.connect("freelancer.db")
+        cur = conn.cursor()
+        cur.execute(
+            "UPDATE freelancer SET email=? WHERE id=?",
+            (new_email, freelancer_id)
+        )
+        conn.commit()
+        conn.close()
+        return jsonify({"success": True})
+    except sqlite3.IntegrityError:
+        if conn:
+            conn.close()
+        return jsonify({"success": False, "msg": "Email already in use"}), 409
+    except Exception as e:
+        if conn:
+            conn.close()
+        return jsonify({"success": False, "msg": str(e)}), 500
+
+# ============================================================
+# FREELANCER – NOTIFICATIONS / ACTIVITY (derived)
+# ============================================================
+
+@app.route("/freelancer/notifications", methods=["GET"])
+def freelancer_notifications():
+    freelancer_id = request.args.get("freelancer_id")
+    if not freelancer_id:
+        return jsonify({"success": False, "msg": "freelancer_id required"}), 400
+
+    try:
+        freelancer_id = int(freelancer_id)
+    except ValueError:
+        return jsonify({"success": False, "msg": "Invalid freelancer_id"}), 400
+
+    conn = None
+    try:
+        conn = sqlite3.connect("freelancer.db")
+        cur = conn.cursor()
+
+        notifications = []
+
+        # From hire requests
+        cur.execute("""
+            SELECT job_title, status, created_at
+            FROM hire_request
+            WHERE freelancer_id=?
+            ORDER BY created_at DESC
+            LIMIT 20
+        """, (freelancer_id,))
+        for title, status, _created_at in cur.fetchall():
+            job_title = title or "Untitled"
+            notifications.append(f'Job "{job_title}" status: {status}')
+
+        # From messages (client -> freelancer)
+        cur.execute("""
+            SELECT timestamp
+            FROM message
+            WHERE receiver_id=? AND sender_role='client'
+            ORDER BY timestamp DESC
+            LIMIT 20
+        """, (freelancer_id,))
+        msg_rows = cur.fetchall()
+        if msg_rows:
+            notifications.append("Clients have recently sent you messages.")
+
+        conn.close()
+        return jsonify(notifications)
+    except Exception as e:
+        if conn:
+            conn.close()
+        return jsonify({"success": False, "msg": str(e)}), 500
+
+# ============================================================
 # RUN
 # ============================================================
 
