@@ -760,6 +760,117 @@ def freelancer_hire_respond():
     return jsonify({"success": True, "status": new_status})
 
 # ============================================================
+# CLIENT – MESSAGE THREADS (list freelancers you chatted with)
+# ============================================================
+
+@app.route("/client/messages/threads", methods=["GET"])
+def client_message_threads():
+    client_id = request.args.get("client_id")
+    if not client_id:
+        return jsonify({"success": False, "msg": "client_id required"}), 400
+
+    try:
+        client_id = int(client_id)
+    except ValueError:
+        return jsonify({"success": False, "msg": "Invalid client_id"}), 400
+
+    conn = None
+    try:
+        conn = sqlite3.connect("freelancer.db")
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT DISTINCT
+                CASE
+                    WHEN sender_role='client' THEN receiver_id
+                    ELSE sender_id
+                END AS freelancer_id
+            FROM message
+            WHERE (sender_role='client' AND sender_id=?)
+               OR (sender_role='freelancer' AND receiver_id=?)
+            ORDER BY freelancer_id DESC
+        """, (client_id, client_id))
+        ids = [int(r[0]) for r in cur.fetchall() if r and r[0] is not None]
+
+        if not ids:
+            conn.close()
+            return jsonify([])
+
+        out = []
+        for fid in ids:
+            cur.execute("SELECT name, email FROM freelancer WHERE id=?", (fid,))
+            fr = cur.fetchone()
+            out.append({
+                "freelancer_id": fid,
+                "name": (fr[0] if fr else "Freelancer"),
+                "email": (fr[1] if fr else "")
+            })
+
+        conn.close()
+        return jsonify(out)
+    except Exception as e:
+        if conn:
+            conn.close()
+        return jsonify({"success": False, "msg": str(e)}), 500
+
+# ============================================================
+# CLIENT – JOB REQUEST STATUS (detailed)
+# ============================================================
+
+@app.route("/client/job-requests", methods=["GET"])
+def client_job_requests():
+    client_id = request.args.get("client_id")
+    if not client_id:
+        return jsonify({"success": False, "msg": "client_id required"}), 400
+
+    try:
+        client_id = int(client_id)
+    except ValueError:
+        return jsonify({"success": False, "msg": "Invalid client_id"}), 400
+
+    conn = None
+    try:
+        conn = sqlite3.connect("freelancer.db")
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT
+                hr.id,
+                hr.freelancer_id,
+                f.name,
+                f.email,
+                hr.job_title,
+                hr.proposed_budget,
+                hr.note,
+                hr.status,
+                hr.created_at
+            FROM hire_request hr
+            JOIN freelancer f ON f.id = hr.freelancer_id
+            WHERE hr.client_id=?
+            ORDER BY hr.created_at DESC
+        """, (client_id,))
+        rows = cur.fetchall()
+        conn.close()
+
+        out = []
+        for r in rows:
+            out.append({
+                "request_id": r[0],
+                "freelancer_id": r[1],
+                "freelancer_name": r[2],
+                "freelancer_email": r[3],
+                "job_title": r[4] or "",
+                "proposed_budget": r[5],
+                "note": r[6] or "",
+                "status": r[7],
+                "created_at": r[8]
+            })
+
+        return jsonify(out)
+    except Exception as e:
+        if conn:
+            conn.close()
+        return jsonify({"success": False, "msg": str(e)}), 500
+
+# ============================================================
 # CLIENT – VIEW MY JOBS
 # ============================================================
 

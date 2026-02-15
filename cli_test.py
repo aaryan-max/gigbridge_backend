@@ -419,6 +419,99 @@ def hire_freelancer(fid):
     })
     print(res.json())
 
+# ---------- CLIENT: MESSAGES (THREADS) ----------
+def client_messages_menu():
+    """Show freelancers you have chatted with and open a chat."""
+    if not current_client_id:
+        print("❌ Please login as client first")
+        return
+
+    try:
+        res = requests.get(f"{BASE_URL}/client/messages/threads", params={
+            "client_id": current_client_id
+        })
+        threads = res.json()
+    except Exception:
+        threads = []
+
+    print("\n--- MESSAGES ---")
+    if not threads:
+        print("📭 No messages yet")
+        return
+
+    mapping = []
+    for idx, t in enumerate(threads, 1):
+        name = t.get("name") or "Freelancer"
+        fid = t.get("freelancer_id")
+        print(f"{idx}. {name} (ID: {fid})")
+        mapping.append((idx, fid, name))
+
+    sel = input("Select freelancer number to open chat (or Enter to go back): ").strip()
+    if not sel:
+        return
+    if not sel.isdigit():
+        print("❌ Invalid selection")
+        return
+
+    sel = int(sel)
+    for num, fid, _name in mapping:
+        if num == sel:
+            open_chat_with_freelancer(fid)
+            return
+
+    print("❌ Invalid selection")
+
+# ---------- CLIENT: JOB REQUEST STATUS ----------
+def client_job_request_status_menu():
+    """Show detailed job request status and allow messaging the freelancer."""
+    if not current_client_id:
+        print("❌ Please login as client first")
+        return
+
+    try:
+        res = requests.get(f"{BASE_URL}/client/job-requests", params={
+            "client_id": current_client_id
+        })
+        data = res.json()
+    except Exception:
+        data = []
+
+    print("\n--- JOB REQUEST STATUS ---")
+    if not data:
+        print("📭 No job requests found")
+        return
+
+    mapping = []
+    for idx, r in enumerate(data, 1):
+        title = (r.get("job_title") or "Untitled").strip()
+        budget = r.get("proposed_budget")
+        status = r.get("status")
+        fname = r.get("freelancer_name") or "Freelancer"
+        fid = r.get("freelancer_id")
+        rid = r.get("request_id")
+
+        print(f"\n{idx}. Request ID: {rid}")
+        print(f"   Freelancer: {fname} (ID: {fid})")
+        print(f"   Job Title: {title}")
+        print(f"   Budget: ₹{budget}")
+        print(f"   Status: {status}")
+
+        mapping.append((idx, fid))
+
+    print("\n1. Message a freelancer about a request")
+    print("2. Back")
+    ch = input("Choose: ").strip()
+
+    if ch == "1":
+        num = input("Enter request number: ").strip()
+        if num.isdigit():
+            num = int(num)
+            for i, fid in mapping:
+                if i == num:
+                    open_chat_with_freelancer(fid)
+                    return
+        print("❌ Invalid request number")
+
 # ---------- CLIENT FLOW ----------
 def client_flow():
     global current_client_id
@@ -436,7 +529,9 @@ def client_flow():
         print("4. View My Jobs")
         print("5. Saved Freelancers")
         print("6. Notifications")
-        print("7. Exit")
+        print("7. Messages")
+        print("8. Job Request Status")
+        print("9. Exit")
 
         choice = input("Choose: ")
 
@@ -585,6 +680,12 @@ def client_flow():
                 print("❌ Error fetching notifications")
 
         elif choice == "7":
+            client_messages_menu()
+
+        elif choice == "8":
+            client_job_request_status_menu()
+
+        elif choice == "9":
             break
 
 # ---------- FREELANCER FLOW ----------
