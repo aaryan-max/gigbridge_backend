@@ -6,6 +6,16 @@ def client_db():
 def freelancer_db():
     return sqlite3.connect("freelancer.db")
 
+def _try_add_column(cur, table, col_def):
+    """
+    SQLite doesn't support: ADD COLUMN IF NOT EXISTS
+    So we try, and ignore if column already exists.
+    """
+    try:
+        cur.execute(f"ALTER TABLE {table} ADD COLUMN {col_def}")
+    except sqlite3.OperationalError:
+        pass
+
 def create_tables():
 
     # ---------- CLIENT ----------
@@ -20,6 +30,10 @@ def create_tables():
         password TEXT
     )
     """)
+
+    # ✅ OAuth support (does NOT affect your existing login/signup/OTP logic)
+    _try_add_column(cur, "client", "auth_provider TEXT DEFAULT 'local'")
+    _try_add_column(cur, "client", "google_sub TEXT")
 
     cur.execute("""
     CREATE TABLE IF NOT EXISTS client_profile (
@@ -53,6 +67,10 @@ def create_tables():
         password TEXT
     )
     """)
+
+    # ✅ OAuth support (does NOT affect your existing login/signup/OTP logic)
+    _try_add_column(cur, "freelancer", "auth_provider TEXT DEFAULT 'local'")
+    _try_add_column(cur, "freelancer", "google_sub TEXT")
 
     cur.execute("""
     CREATE TABLE IF NOT EXISTS freelancer_profile (
@@ -121,7 +139,7 @@ def create_tables():
     )
     """)
 
-    # ---------- NOTIFICATIONS (client-focused; freelancer notifications are derived) ----------
+    # ---------- NOTIFICATIONS ----------
     cur.execute("""
     CREATE TABLE IF NOT EXISTS notification (
         id INTEGER PRIMARY KEY AUTOINCREMENT,

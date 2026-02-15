@@ -2,6 +2,8 @@ import requests
 import time
 import sqlite3
 from datetime import datetime
+import webbrowser
+
 
 BASE_URL = "http://127.0.0.1:5000"
 
@@ -96,18 +98,86 @@ def login(role=None):
         else:
             print("❌ Account not found. Please sign up first.")
 
+
+def continue_with_google(role):
+    global current_client_id, current_freelancer_id
+
+    try:
+        res = requests.get(f"{BASE_URL}/auth/google/start", params={"role": role})
+        data = res.json()
+    except Exception:
+        print("❌ Failed to contact server for Google OAuth")
+        return
+
+    if not data.get("success"):
+        print("❌", data.get("msg", "Google OAuth failed to start"))
+        return
+
+    auth_url = data["auth_url"]
+    state = data["state"]
+
+    print("\n🌐 Opening browser for Google login...")
+    print("If browser doesn't open, copy this URL and open manually:\n")
+    print(auth_url)
+
+    try:
+        webbrowser.open(auth_url)
+    except Exception:
+        pass
+
+    print("\n⏳ After login, come back here. Checking status...")
+
+    # Poll status (simple)
+    start = time.time()
+    while True:
+        if time.time() - start > 180:  # 3 minutes timeout
+            print("❌ Timed out waiting for Google login")
+            return
+
+        try:
+            st = requests.get(f"{BASE_URL}/auth/google/status", params={"state": state}).json()
+        except Exception:
+            time.sleep(2)
+            continue
+
+        if st.get("success") and st.get("done") is True:
+            result = st.get("result") or {}
+            if not result.get("success"):
+                print("❌ Google login failed:", result.get("msg", "unknown error"))
+                return
+
+            if role == "client" and result.get("client_id"):
+                current_client_id = result["client_id"]
+                print("✅ Google login successful (Client). client_id =", current_client_id)
+                return
+
+            if role == "freelancer" and result.get("freelancer_id"):
+                current_freelancer_id = result["freelancer_id"]
+                print("✅ Google login successful (Freelancer). freelancer_id =", current_freelancer_id)
+                return
+
+            print("❌ Google login completed but ID not returned")
+            return
+
+        time.sleep(2)            
+
 # ---------- LOGIN OR SIGNUP ----------
+
 def login_or_signup(role):
     print("1. Login")
     print("2. Signup")
+    print("3. Continue with Google")   # ✅ ADD THIS LINE
     choice = input("Choose: ")
 
     if choice == "1":
         login(role=role)
     elif choice == "2":
         signup_with_role(role)
+    elif choice == "3":                # ✅ ADD THIS BLOCK
+        continue_with_google(role)
     else:
         print("❌ Invalid choice")
+
 
 # ---------- CHAT HELPERS ----------
 def format_timestamp(ts):
@@ -947,6 +1017,7 @@ def freelancer_flow():
             break
 
 # ---------- MAIN MENU ----------
+# ---------- MAIN MENU ----------
 while True:
     print("\n====== GIGBRIDGE ======")
     print("1. Login")
@@ -964,9 +1035,31 @@ while True:
         r = input("Choose: ")
 
         if r == "1":
-            login(role="client")
+            print("\nLogin method:")
+            print("1. Continue with Email")
+            print("2. Continue with Google")
+            m = input("Choose: ")
+            if m == "1":
+                login(role="client")
+            elif m == "2":
+                continue_with_google("client")
+            else:
+                print("❌ Invalid choice")
+
         elif r == "2":
-            login(role="freelancer")
+            print("\nLogin method:")
+            print("1. Continue with Email")
+            print("2. Continue with Google")
+            m = input("Choose: ")
+            if m == "1":
+                login(role="freelancer")
+            elif m == "2":
+                continue_with_google("freelancer")
+            else:
+                print("❌ Invalid choice")
+
+        else:
+            print("❌ Invalid role choice")
 
     elif option == "2":
         print("Choose role to signup:")
@@ -975,9 +1068,31 @@ while True:
         r = input("Choose: ")
 
         if r == "1":
-            signup_with_role("client")
+            print("\nSignup method:")
+            print("1. Continue with Email (OTP)")
+            print("2. Continue with Google")
+            m = input("Choose: ")
+            if m == "1":
+                signup_with_role("client")
+            elif m == "2":
+                continue_with_google("client")
+            else:
+                print("❌ Invalid choice")
+
         elif r == "2":
-            signup_with_role("freelancer")
+            print("\nSignup method:")
+            print("1. Continue with Email (OTP)")
+            print("2. Continue with Google")
+            m = input("Choose: ")
+            if m == "1":
+                signup_with_role("freelancer")
+            elif m == "2":
+                continue_with_google("freelancer")
+            else:
+                print("❌ Invalid choice")
+
+        else:
+            print("❌ Invalid role choice")
 
     elif option == "3":
         client_flow()

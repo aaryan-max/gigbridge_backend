@@ -4,11 +4,15 @@ import random
 import time
 import smtplib
 import os
+import requests
+import secrets
+import urllib.parse
 from email.message import EmailMessage
 from werkzeug.security import generate_password_hash, check_password_hash
 
 from database import create_tables
 from categories import is_valid_category
+
 
 # ============================================================
 # APP INIT
@@ -32,6 +36,27 @@ SMTP_PORT = 587
 # ============================================================
 
 OTP_TTL_SECONDS = 5 * 60  # 5 minutes
+
+# ============================================================
+# GOOGLE OAUTH CONFIG (ADDED - DOES NOT CHANGE EXISTING LOGIC)
+# ============================================================
+
+GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID", "")
+GOOGLE_CLIENT_SECRET = os.getenv("GOOGLE_CLIENT_SECRET", "")
+GOOGLE_REDIRECT_URI = os.getenv("GOOGLE_REDIRECT_URI", "http://127.0.0.1:5000/auth/google/callback")
+
+# state -> { role, created_at, done, result }
+GOOGLE_OAUTH_STATES = {}
+
+def _google_state_cleanup():
+    now = now_ts()
+    expired = []
+    for k, v in GOOGLE_OAUTH_STATES.items():
+        if now - int(v.get("created_at", now)) > 10 * 60:  # 10 minutes
+            expired.append(k)
+    for k in expired:
+        GOOGLE_OAUTH_STATES.pop(k, None)
+
 
 # ============================================================
 # HELPERS
@@ -1280,6 +1305,237 @@ def freelancer_notifications():
         if conn:
             conn.close()
         return jsonify({"success": False, "msg": str(e)}), 500
+
+# ============================================================
+# GOOGLE OAUTH ROUTES (ADDED)
+# - DOES NOT TOUCH EXISTING LOGIN/SIGNUP/OTP
+# ============================================================
+
+@app.route("/auth/google/start", methods=["GET"])
+def google_oauth_start():
+    _google_state_cleanup()
+
+    role = (request.args.get("role", "") or "").strip().lower()
+    if role not in ("client", "freelancer"):
+        return jsonify({"success": False, "msg": "role must be client or freelancer"}), 400
+
+    if not GOOGLE_CLIENT_ID or not GOOGLE_CLIENT_SECRET:
+        return jsonify({
+            "success": False,
+            "msg": "Google OAuth not configured. Set GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET."
+        }), 500
+
+    state = secrets.token_urlsafe(24)
+
+    GOOGLE_OAUTH_STATES[state] = {
+        "role": role,
+        "created_at": now_ts(),
+        "done": False,
+        "result": None
+    }
+
+    params = {
+        "client_id": GOOGLE_CLIENT_ID,
+        "redirect_uri": GOOGLE_REDIRECT_URI,
+        "response_type": "code",
+        "scope": "openid email profile",
+        "state": state,
+        "access_type": "online",
+        "prompt": "select_account"
+    }
+
+    auth_url = "https://accounts.google.com/o/oauth2/v2/auth?" + urllib.parse.urlencode(params)
+    return jsonify({"success": True, "auth_url": auth_url, "state": state})
+
+
+@app.route("/auth/google/callback", methods=["GET"])
+def google_oauth_callback():
+    _google_state_cleanup()
+
+    code = request.args.get("code")
+    state = request.args.get("state")
+
+    if not code or not state:
+        return "Missing code/state", 400
+
+    st = GOOGLE_OAUTH_STATES.get(state)
+    if not st:
+        return "Invalid or expired state. Please try again.", 400
+
+    role = st["role"]
+
+    # 1) Exchange code -> tokens
+    token_res = requests.post(
+        "https://oauth2.googleapis.com/token",
+        data={
+            "code": code,
+            "client_id": GOOGLE_CLIENT_ID,
+            "client_secret": GOOGLE_CLIENT_SECRET,
+            "redirect_uri": GOOGLE_REDIRECT_URI,
+            "grant_type": "authorization_code"
+        },
+        timeout=15
+    )
+
+    if token_res.status_code != 200:
+        st["done"] = True
+        st["result"] = {"success": False, "msg": "Token exchange failed"}
+        return "Google token exchange failed. You can close this tab.", 400
+
+    token_data = token_res.json()
+    id_token = token_data.get("id_token")
+    if not id_token:
+        st["done"] = True
+        st["result"] = {"success": False, "msg": "No id_token returned"}
+        return "Google did not return an ID token. You can close this tab.", 400
+
+    # 2) Verify ID token using Google's tokeninfo endpoint (no extra libs needed)
+    info_res = requests.get(
+        "https://oauth2.googleapis.com/tokeninfo",
+        params={"id_token": id_token},
+        timeout=15
+    )
+
+    if info_res.status_code != 200:
+        st["done"] = True
+        st["result"] = {"success": False, "msg": "Token verification failed"}
+        return "Google token verification failed. You can close this tab.", 400
+
+    info = info_res.json()
+
+    # Basic checks
+    aud = info.get("aud")
+    email = (info.get("email") or "").strip().lower()
+    name = (info.get("name") or "").strip()
+    sub = (info.get("sub") or "").strip()
+    email_verified = str(info.get("email_verified", "")).lower()
+
+    if aud != GOOGLE_CLIENT_ID:
+        st["done"] = True
+        st["result"] = {"success": False, "msg": "Invalid token audience"}
+        return "Invalid Google token (audience). You can close this tab.", 400
+
+    if not email or not sub:
+        st["done"] = True
+        st["result"] = {"success": False, "msg": "Email not available"}
+        return "Google email not available. You can close this tab.", 400
+
+    # optional strict check
+    if email_verified and email_verified not in ("true", "1", "yes"):
+        st["done"] = True
+        st["result"] = {"success": False, "msg": "Email not verified"}
+        return "Google email not verified. You can close this tab.", 400
+
+    # 3) Upsert user into correct DB based on role
+    if role == "client":
+        conn = sqlite3.connect("client.db")
+        cur = conn.cursor()
+
+        cur.execute("SELECT id, password, auth_provider, google_sub FROM client WHERE email=?", (email,))
+        row = cur.fetchone()
+
+        if row:
+            client_id, pwd, provider, gsub = row
+            if not provider:
+                provider = "local"
+            if not gsub:
+                cur.execute("UPDATE client SET google_sub=? WHERE id=?", (sub, client_id))
+            conn.commit()
+            conn.close()
+
+            st["done"] = True
+            st["result"] = {"success": True, "role": "client", "client_id": client_id, "email": email}
+
+            return f"""
+            <h3>✅ Google Login Success (Client)</h3>
+            <p>You can close this tab and return to the app.</p>
+            """
+
+        if not name:
+            name = email.split("@")[0]
+
+        # ✅ IMPORTANT FIX: store a random hashed password so existing login logic never crashes
+        random_pwd_hash = generate_password_hash(secrets.token_urlsafe(32))
+
+        cur.execute(
+            "INSERT INTO client (name, email, password, auth_provider, google_sub) VALUES (?,?,?,?,?)",
+            (name, email, random_pwd_hash, "google", sub)
+        )
+        client_id = cur.lastrowid
+        conn.commit()
+        conn.close()
+
+        st["done"] = True
+        st["result"] = {"success": True, "role": "client", "client_id": client_id, "email": email}
+
+        return f"""
+        <h3>✅ Google Signup/Login Success (Client)</h3>
+        <p>You can close this tab and return to the app.</p>
+        """
+
+    else:
+        conn = sqlite3.connect("freelancer.db")
+        cur = conn.cursor()
+
+        cur.execute("SELECT id, password, auth_provider, google_sub FROM freelancer WHERE email=?", (email,))
+        row = cur.fetchone()
+
+        if row:
+            freelancer_id, pwd, provider, gsub = row
+            if not provider:
+                provider = "local"
+            if not gsub:
+                cur.execute("UPDATE freelancer SET google_sub=? WHERE id=?", (sub, freelancer_id))
+            conn.commit()
+            conn.close()
+
+            st["done"] = True
+            st["result"] = {"success": True, "role": "freelancer", "freelancer_id": freelancer_id, "email": email}
+
+            return f"""
+            <h3>✅ Google Login Success (Freelancer)</h3>
+            <p>You can close this tab and return to the app.</p>
+            """
+
+        if not name:
+            name = email.split("@")[0]
+
+        # ✅ IMPORTANT FIX: store a random hashed password so existing login logic never crashes
+        random_pwd_hash = generate_password_hash(secrets.token_urlsafe(32))
+
+        cur.execute(
+            "INSERT INTO freelancer (name, email, password, auth_provider, google_sub) VALUES (?,?,?,?,?)",
+            (name, email, random_pwd_hash, "google", sub)
+        )
+        freelancer_id = cur.lastrowid
+        conn.commit()
+        conn.close()
+
+        st["done"] = True
+        st["result"] = {"success": True, "role": "freelancer", "freelancer_id": freelancer_id, "email": email}
+
+        return f"""
+        <h3>✅ Google Signup/Login Success (Freelancer)</h3>
+        <p>You can close this tab and return to the app.</p>
+        """
+
+
+@app.route("/auth/google/status", methods=["GET"])
+def google_oauth_status():
+    _google_state_cleanup()
+
+    state = request.args.get("state")
+    if not state:
+        return jsonify({"success": False, "msg": "state required"}), 400
+
+    st = GOOGLE_OAUTH_STATES.get(state)
+    if not st:
+        return jsonify({"success": False, "msg": "invalid/expired state"}), 404
+
+    if not st.get("done"):
+        return jsonify({"success": True, "done": False})
+
+    return jsonify({"success": True, "done": True, "result": st.get("result")})
 
 # ============================================================
 # RUN
