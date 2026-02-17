@@ -257,45 +257,6 @@ def freelancer_send_otp():
     if not valid_email(email):
         return jsonify({"success": False, "msg": "Invalid email"}), 400
 
-    otp = str(random.randint(100000, 999999))
-    expires_at = now_ts() + OTP_TTL_SECONDS
-
-    conn = sqlite3.connect("freelancer.db")
-    cur = conn.cursor()
-    cur.execute(
-        "INSERT OR REPLACE INTO freelancer_otp (email, otp, expires_at) VALUES (?, ?, ?)",
-        (email, otp, expires_at)
-    )
-    conn.commit()
-    conn.close()
-
-    try:
-        send_otp_email(email, otp)
-    except:
-        pass
-
-    return jsonify({"success": True})
-
-@app.route("/freelancer/verify-otp", methods=["POST"])
-def freelancer_verify_otp():
-    d = get_json()
-    missing = require_fields(d, ["name", "email", "password", "otp"])
-    if missing:
-        return jsonify({"success": False, "msg": "Missing fields"}), 400
-
-    name = str(d["name"]).strip()
-    email = str(d["email"]).strip().lower()
-    password = str(d["password"])
-    otp_in = str(d["otp"]).strip()
-
-    conn = sqlite3.connect("freelancer.db")
-    cur = conn.cursor()
-    cur.execute("SELECT otp, expires_at FROM freelancer_otp WHERE email=?", (email,))
-    row = cur.fetchone()
-
-    if not row:
-        conn.close()
-        return jsonify({"success": False, "msg": "OTP not found"}), 400
 
     db_otp, expires_at = row
     if now_ts() > int(expires_at):
@@ -328,7 +289,73 @@ def freelancer_verify_otp():
 
     except sqlite3.IntegrityError:
         conn.close()
-        return jsonify({"success": False, "msg": "Freelancer already exists"}), 409
+        return jsonify({"success": True, "client_id": client_id})
+
+@app.route("/client/signup", methods=["POST"])
+def client_signup():
+    """Direct signup endpoint for clients"""
+    d = get_json()
+    missing = require_fields(d, ["name", "email", "password"])
+    if missing:
+        return jsonify({"success": False, "msg": "Missing fields"}), 400
+    
+    name = str(d["name"]).strip()
+    email = str(d["email"]).strip().lower()
+    password = str(d["password"])
+    
+    if not valid_email(email):
+        return jsonify({"success": False, "msg": "Invalid email format"}), 400
+    
+    conn = sqlite3.connect("client.db")
+    cur = conn.cursor()
+    
+    # Check if email already exists
+    cur.execute("SELECT id FROM client WHERE email=?", (email,))
+    if cur.fetchone():
+        conn.close()
+        return jsonify({"success": False, "msg": "Email already exists"}), 400
+    
+    # Insert new client
+    cur.execute("INSERT INTO client (name, email, password) VALUES (?, ?, ?)", 
+               (name, email, generate_password_hash(password)))
+    client_id = cur.lastrowid
+    conn.commit()
+    conn.close()
+    
+    return jsonify({"success": True, "client_id": client_id})
+
+@app.route("/freelancer/signup", methods=["POST"])
+def freelancer_signup():
+    """Direct signup endpoint for freelancers"""
+    d = get_json()
+    missing = require_fields(d, ["name", "email", "password"])
+    if missing:
+        return jsonify({"success": False, "msg": "Missing fields"}), 400
+    
+    name = str(d["name"]).strip()
+    email = str(d["email"]).strip().lower()
+    password = str(d["password"])
+    
+    if not valid_email(email):
+        return jsonify({"success": False, "msg": "Invalid email format"}), 400
+    
+    conn = sqlite3.connect("freelancer.db")
+    cur = conn.cursor()
+    
+    # Check if email already exists
+    cur.execute("SELECT id FROM freelancer WHERE email=?", (email,))
+    if cur.fetchone():
+        conn.close()
+        return jsonify({"success": False, "msg": "Email already exists"}), 400
+    
+    # Insert new freelancer
+    cur.execute("INSERT INTO freelancer (name, email, password) VALUES (?, ?, ?)", 
+               (name, email, generate_password_hash(password)))
+    freelancer_id = cur.lastrowid
+    conn.commit()
+    conn.close()
+    
+    return jsonify({"success": True, "freelancer_id": freelancer_id})
 
 # ============================================================
 # LOGIN APIs (CORE LOGIC SAME)
@@ -1767,106 +1794,10 @@ def get_freelancer_portfolio(freelancer_id):
             "title": row["title"],
             "description": row["description"],
             "image_path": row["image_path"],
+            "created_at": row["created_at"]
         })
     
     return jsonify({"success": True, "portfolio_items": portfolio_items})
-
-# ============================================================
-# ===== NEW: AI Recommendation Engine =====
-# ============================================================
-
-@app.route("/freelancers/recommend", methods=["POST"])
-def recommend_freelancers():
-    """NEW CODE: AI-powered freelancer recommendation engine"""
-    d = get_json()
-    missing = require_fields(d, ["category", "budget"])
-    if missing:
-        return jsonify({"success": False, "msg": "Missing fields"}), 400
-    
-    category = str(d["category"]).strip()
-    budget = float(d["budget"])
-    
-    # Fetch all freelancers with profile data
-    conn = sqlite3.connect("freelancer.db")
-    conn.row_factory = sqlite3.Row
-    cur = conn.cursor()
-    
-    cur.execute("""
-        SELECT f.id, f.name,
-               COALESCE(fp.title, '') as title,
-               COALESCE(fp.skills, '') as skills,
-               COALESCE(fp.experience, 0) as experience,
-               COALESCE(fp.min_budget, 0) as min_budget,
-               COALESCE(fp.max_budget, 0) as max_budget,
-               COALESCE(fp.rating, 0) as rating,
-               COALESCE(fp.category, '') as category,
-               COALESCE(fp.total_projects, 0) as total_projects
-        FROM freelancer f
-        LEFT JOIN freelancer_profile fp ON fp.freelancer_id = f.id
-        WHERE fp.category IS NOT NULL AND fp.category != ''
-        ORDER BY f.id DESC
-    """)
-    
-    rows = cur.fetchall()
-    conn.close()
-    
-    recommendations = []
-    
-    for row in rows:
-        score = 0.0
-        
-        # Category match (+20 points)
-        if row["category"].lower() == category.lower():
-            score += 20
-        
-        # Budget match (+20 points)
-        if row["min_budget"] <= budget <= row["max_budget"]:
-            score += 20
-        
-        # Rating weight (rating * 10)
-        score += row["rating"] * 10
-        
-        # Experience weight (experience * 2)
-        score += row["experience"] * 2
-        
-        # Job success percentage
-        if row["total_projects"] > 0:
-            # Calculate completed jobs from hire_request table
-            conn = sqlite3.connect("freelancer.db")
-            cur = conn.cursor()
-            cur.execute("""
-                SELECT COUNT(*) FROM hire_request 
-                WHERE freelancer_id = ? AND status = 'ACCEPTED'
-            """, (row["id"],))
-            completed_jobs = cur.fetchone()[0]
-            
-            cur.execute("""
-                SELECT COUNT(*) FROM hire_request 
-                WHERE freelancer_id = ? AND status IN ('ACCEPTED', 'REJECTED', 'PENDING')
-            """, (row["id"],))
-            total_jobs = cur.fetchone()[0]
-            conn.close()
-            
-            if total_jobs > 0:
-                success_percentage = (completed_jobs / total_jobs) * 100
-                score += success_percentage * 0.3
-        
-        # Create recommendation entry
-        recommendations.append({
-            "freelancer_id": row["id"],
-            "name": row["name"],
-            "category": row["category"],
-            "rating": row["rating"],
-            "experience": row["experience"],
-            "budget_range": f"{row['min_budget']} - {row['max_budget']}",
-            "match_score": round(score, 1)
-        })
-    
-    # Sort by score descending and return top 5
-    recommendations.sort(key=lambda x: x["match_score"], reverse=True)
-    top_recommendations = recommendations[:5]
-    
-    return jsonify(top_recommendations)
 
 # ============================================================
 # RUN
@@ -1874,3 +1805,43 @@ def recommend_freelancers():
 
 if __name__ == "__main__":
     app.run(debug=True)
+
+    otp = str(random.randint(100000, 999999))
+    expires_at = now_ts() + OTP_TTL_SECONDS
+
+    conn = sqlite3.connect("freelancer.db")
+    cur = conn.cursor()
+    cur.execute(
+        "INSERT OR REPLACE INTO freelancer_otp (email, otp, expires_at) VALUES (?, ?, ?)",
+        (email, otp, expires_at)
+    )
+    conn.commit()
+    conn.close()
+
+    try:
+        send_otp_email(email, otp)
+    except:
+        pass
+
+    return jsonify({"success": True})
+
+@app.route("/freelancer/verify-otp", methods=["POST"])
+def freelancer_verify_otp():
+    d = get_json()
+    missing = require_fields(d, ["name", "email", "password", "otp"])
+    if missing:
+        return jsonify({"success": False, "msg": "Missing fields"}), 400
+
+    name = str(d["name"]).strip()
+    email = str(d["email"]).strip().lower()
+    password = str(d["password"])
+    otp_in = str(d["otp"]).strip()
+
+    conn = sqlite3.connect("freelancer.db")
+    cur = conn.cursor()
+    cur.execute("SELECT otp, expires_at FROM freelancer_otp WHERE email=?", (email,))
+    row = cur.fetchone()
+
+    if not row:
+        conn.close()
+        return jsonify({"success": False, "msg": "OTP not found"}), 400
