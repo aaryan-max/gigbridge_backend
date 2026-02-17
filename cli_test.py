@@ -1,90 +1,545 @@
 import requests
 import time
-import os
+import sqlite3
+from datetime import datetime
+import webbrowser
+
 
 BASE_URL = "http://127.0.0.1:5000"
+
 current_client_id = None
 current_freelancer_id = None
 
+# ============================================================
+# ===== NEW: CALL FEATURE =====
+# ============================================================
+
+def start_call(caller_role, receiver_id, call_type):
+    """Start a voice or video call"""
+    try:
+        # Determine caller ID based on role
+        if caller_role == "client":
+            caller_id = current_client_id
+            receiver_role = "freelancer"
+        else:
+            caller_id = current_freelancer_id
+            receiver_role = "client"
+        
+        res = requests.post(f"{BASE_URL}/call/start", json={
+            "caller_role": caller_role,
+            "caller_id": caller_id,
+            "receiver_role": receiver_role,
+            "receiver_id": receiver_id,
+            "call_type": call_type
+        })
+        
+        result = res.json()
+        if result.get("success"):
+            print(f"✅ {call_type.title()} call started!")
+            print(f"📞 Room: {result['room_name']}")
+            print("🌐 Opening browser in 3 seconds...")
+            
+            time.sleep(3)
+            webbrowser.open(result["room_url"])
+        else:
+            print("❌ Failed to start call:", result.get("msg"))
+    except Exception as e:
+        print("❌ Error starting call:", str(e))
+
+def check_incoming_calls():
+    """Check for incoming calls"""
+    try:
+        # Determine current user role and ID
+        if current_client_id:
+            role = "client"
+            user_id = current_client_id
+        else:
+            role = "freelancer"
+            user_id = current_freelancer_id
+        
+        res = requests.get(f"{BASE_URL}/call/incoming", params={
+            "role": role,
+            "user_id": user_id
+        })
+        
+        data = res.json()
+        if data.get("success") and data.get("calls"):
+            print("\n--- INCOMING CALLS ---")
+            for call in data["calls"]:
+                call_type = call["call_type"].title()
+                print(f"📞 {call_type} call from {call['caller_role']} ID {call['caller_id']}")
+                print(f"   Room: {call['room_name']}")
+                print("1. Accept")
+                print("2. Reject")
+                
+                action = input("Choose: ")
+                if action == "1":
+                    respond_res = requests.post(f"{BASE_URL}/call/respond", json={
+                        "call_id": call["call_id"],
+                        "action": "accept"
+                    })
+                    if respond_res.json().get("success"):
+                        print("✅ Call accepted!")
+                        print("🌐 Opening browser...")
+                        time.sleep(2)
+                        webbrowser.open(f"https://meet.jit.si/{call['room_name']}")
+                elif action == "2":
+                    requests.post(f"{BASE_URL}/call/respond", json={
+                        "call_id": call["call_id"],
+                        "action": "reject"
+                    })
+                    print("❌ Call rejected")
+        else:
+            print("📭 No incoming calls")
+    except Exception as e:
+        print("❌ Error checking calls:", str(e))
+
+# ---------- VALIDATORS ----------
 def valid_email(email):
-    return "@" in email and "." in email.split("@")[1]
+    return "@" in email and "." in email
 
 def valid_phone(phone):
     return phone.isdigit() and len(phone) == 10
 
-def login(role):
-    global current_client_id, current_freelancer_id
-    
-    email = input("Email: ")
-    password = input("Password: ")
-    
-    if role == "client":
-        res = requests.post(f"{BASE_URL}/client/login", json={
-            "email": email,
-            "password": password
-        })
-        data = res.json()
-        if data.get("success"):
-            current_client_id = data["client_id"]
-            print(f"✅ Logged in as client (ID: {current_client_id})")
-            client_flow()
-        else:
-            print("❌", data.get("msg", "Login failed"))
-    else:
-        res = requests.post(f"{BASE_URL}/freelancer/login", json={
-            "email": email,
-            "password": password
-        })
-        data = res.json()
-        if data.get("success"):
-            current_freelancer_id = data["freelancer_id"]
-            print(f"✅ Logged in as freelancer (ID: {current_freelancer_id})")
-            freelancer_flow()
-        else:
-            print("❌", data.get("msg", "Login failed"))
-
+# ---------- SIGNUP WITH OTP (AUTO-LOGIN AFTER SIGNUP) ----------
 def signup_with_role(role):
     global current_client_id, current_freelancer_id
-    
-    name = input("Name: ")
-    email = input("Email: ")
-    password = input("Password: ")
-    
-    if not valid_email(email):
-        print("❌ Invalid email format")
-        return
-    
-    if role == "client":
-        res = requests.post(f"{BASE_URL}/client/signup", json={
-            "name": name,
-            "email": email,
-            "password": password
-        })
-        data = res.json()
-        if data.get("success"):
-            print("✅ Signup successful! Please check your email for OTP.")
-            # OTP verification would go here
-            current_client_id = data["client_id"]
-            client_flow()
-        else:
-            print("❌", data.get("msg", "Signup failed"))
-    else:
-        res = requests.post(f"{BASE_URL}/freelancer/signup", json={
-            "name": name,
-            "email": email,
-            "password": password
-        })
-        data = res.json()
-        if data.get("success"):
-            print("✅ Signup successful! Please check your email for OTP.")
-            # OTP verification would go here
-            current_freelancer_id = data["freelancer_id"]
-            freelancer_flow()
-        else:
-            print("❌", data.get("msg", "Signup failed"))
 
+    name = input("Name: ")
+
+    while True:
+        email = input("Email: ")
+        if valid_email(email):
+            break
+        print("❌ Invalid email")
+
+    password = input("Password: ")
+
+    # STEP 1: SEND OTP
+    if role == "client":
+        requests.post(f"{BASE_URL}/client/send-otp", json={"email": email})
+    else:
+        requests.post(f"{BASE_URL}/freelancer/send-otp", json={"email": email})
+
+    print("📩 OTP sent to your email")
+
+    # STEP 2: VERIFY OTP
+    otp = input("Enter OTP: ")
+
+    if role == "client":
+        res = requests.post(f"{BASE_URL}/client/verify-otp", json={
+            "name": name, "email": email, "password": password, "otp": otp
+        })
+    else:
+        res = requests.post(f"{BASE_URL}/freelancer/verify-otp", json={
+            "name": name, "email": email, "password": password, "otp": otp
+        })
+
+    response = res.json()
+    print(response)
+
+    if response.get("success"):
+        if role == "client" and response.get("client_id"):
+            current_client_id = response["client_id"]
+            print("✅ Client signup successful (auto-logged in)")
+        elif role == "freelancer" and response.get("freelancer_id"):
+            current_freelancer_id = response["freelancer_id"]
+            print("✅ Freelancer signup successful (auto-logged in)")
+        else:
+            print("✅ Signup successful. You can now login.")
+    else:
+        print("❌ Signup failed:", response.get("msg"))
+
+    return
+
+# ---------- LOGIN ----------
+def login(role=None):
+    global current_client_id, current_freelancer_id
+
+    while True:
+        email = input("Email: ")
+        if valid_email(email):
+            break
+        print("❌ Invalid email")
+
+    password = input("Password: ")
+
+    if role == "client":
+        res = requests.post(f"{BASE_URL}/client/login", json={"email": email, "password": password})
+        data = res.json()
+        if data.get("client_id"):
+            current_client_id = data["client_id"]
+            print("✅ Client login successful")
+        else:
+            print("❌ Account not found. Please sign up first.")
+
+    elif role == "freelancer":
+        res = requests.post(f"{BASE_URL}/freelancer/login", json={"email": email, "password": password})
+        data = res.json()
+        if data.get("freelancer_id"):
+            current_freelancer_id = data["freelancer_id"]
+            print("✅ Freelancer login successful")
+        else:
+            print("❌ Account not found. Please sign up first.")
+
+
+def continue_with_google(role):
+    global current_client_id, current_freelancer_id
+
+    try:
+        res = requests.get(f"{BASE_URL}/auth/google/start", params={"role": role})
+        data = res.json()
+    except Exception:
+        print("❌ Failed to contact server for Google OAuth")
+        return
+
+    if not data.get("success"):
+        print("❌", data.get("msg", "Google OAuth failed to start"))
+        return
+
+    auth_url = data["auth_url"]
+    state = data["state"]
+
+    print("\n🌐 Opening browser for Google login...")
+    print("If browser doesn't open, copy this URL and open manually:\n")
+    print(auth_url)
+
+    try:
+        webbrowser.open(auth_url)
+    except Exception:
+        pass
+
+    print("\n⏳ After login, come back here. Checking status...")
+
+    # Poll status (simple)
+    start = time.time()
+    while True:
+        if time.time() - start > 180:  # 3 minutes timeout
+            print("❌ Timed out waiting for Google login")
+            return
+
+        try:
+            st = requests.get(f"{BASE_URL}/auth/google/status", params={"state": state}).json()
+        except Exception:
+            time.sleep(2)
+            continue
+
+        if st.get("success") and st.get("done") is True:
+            result = st.get("result") or {}
+            if not result.get("success"):
+                print("❌ Google login failed:", result.get("msg", "unknown error"))
+                return
+
+            if role == "client" and result.get("client_id"):
+                current_client_id = result["client_id"]
+                print("✅ Google login successful (Client). client_id =", current_client_id)
+                return
+
+            if role == "freelancer" and result.get("freelancer_id"):
+                current_freelancer_id = result["freelancer_id"]
+                print("✅ Google login successful (Freelancer). freelancer_id =", current_freelancer_id)
+                return
+
+            print("❌ Google login completed but ID not returned")
+            return
+
+        time.sleep(2)            
+
+# ---------- LOGIN OR SIGNUP ----------
+
+def login_or_signup(role):
+    print("1. Login")
+    print("2. Signup")
+    print("3. Continue with Google")   # ✅ ADD THIS LINE
+    choice = input("Choose: ")
+
+    if choice == "1":
+        login(role=role)
+    elif choice == "2":
+        signup_with_role(role)
+    elif choice == "3":                # ✅ ADD THIS BLOCK
+        continue_with_google(role)
+    else:
+        print("❌ Invalid choice")
+
+
+# ---------- CHAT HELPERS ----------
+def format_timestamp(ts):
+    """Convert Unix timestamp to readable time"""
+    try:
+        dt = datetime.fromtimestamp(ts)
+        return dt.strftime("%I:%M %p")  # 12-hour format like WhatsApp
+    except:
+        return ""
+
+def display_message(text, is_sent, sender_name="", timestamp=None):
+    """Display message in WhatsApp-like format"""
+    time_str = format_timestamp(timestamp) if timestamp else ""
+    max_width = 60  # Max message width
+    
+    if is_sent:
+        # Your messages aligned to right (like WhatsApp)
+        # Wrap long messages
+        words = text.split()
+        lines = []
+        current_line = ""
+        for word in words:
+            if len(current_line + word) < max_width:
+                current_line += word + " "
+            else:
+                if current_line:
+                    lines.append(current_line.strip())
+                current_line = word + " "
+        if current_line:
+            lines.append(current_line.strip())
+        
+        for line in lines:
+            padding = 70 - len(line) - 6  # 6 for "[You] "
+            print(f"{' ' * max(0, padding)}[You] {line}")
+        if time_str:
+            print(f"{' ' * (70 - len(time_str) - 2)}{time_str} ✓")
+    else:
+        # Received messages aligned to left
+        sender_label = sender_name if sender_name else "Freelancer"
+        words = text.split()
+        lines = []
+        current_line = ""
+        for word in words:
+            if len(current_line + word) < max_width:
+                current_line += word + " "
+            else:
+                if current_line:
+                    lines.append(current_line.strip())
+                current_line = word + " "
+        if current_line:
+            lines.append(current_line.strip())
+        
+        for i, line in enumerate(lines):
+            prefix = f"[{sender_label}]" if i == 0 else " " * (len(sender_label) + 2)
+            print(f"{prefix} {line}")
+        if time_str:
+            print(f"{' ' * (len(sender_label) + 2)}{time_str}")
+
+def clear_chat_display():
+    """Clear screen for better chat experience"""
+    import os
+    os.system('cls' if os.name == 'nt' else 'clear')
+
+def show_chat_header(contact_name):
+    """Show WhatsApp-like header"""
+    print("\n" + "=" * 70)
+    print(f"💬 Chat with {contact_name}")
+    print("=" * 70)
+    print("Type your message and press Enter. Type 'exit' to leave chat.")
+    print("-" * 70)
+
+# ---------- CHAT ----------
+def open_chat_with_freelancer(freelancer_id):
+    # Get freelancer name
+    try:
+        res = requests.get(f"{BASE_URL}/freelancers/{freelancer_id}")
+        freelancer_data = res.json()
+        freelancer_name = freelancer_data.get("name", "Freelancer")
+    except:
+        freelancer_name = "Freelancer"
+    
+    show_chat_header(freelancer_name)
+    
+    # Load and display existing chat history
+    res = requests.get(f"{BASE_URL}/message/history", params={
+        "client_id": current_client_id,
+        "freelancer_id": freelancer_id
+    })
+    
+    displayed_messages = set()  # Track displayed message timestamps to avoid duplicates
+    
+    try:
+        messages = res.json()
+        if messages:
+            print("\n📜 Chat History:")
+            print("-" * 70)
+            for m in messages:
+                is_sent = m["sender_role"] == "client"
+                display_message(m['text'], is_sent, freelancer_name, m.get("timestamp"))
+                displayed_messages.add(m.get("timestamp", 0))
+    except:
+        pass
+    
+    print("\n" + "-" * 70)
+    last_timestamp = max(displayed_messages) if displayed_messages else 0
+    
+    # Main chat loop
+    while True:
+        # Get user input
+        msg = input("\n💬 You: ")
+        if msg.lower() == "exit":
+            print("\n👋 Left chat")
+            break
+        if msg.lower() == "refresh" or msg.lower() == "r":
+            # Manual refresh to check for new messages
+            res = requests.get(f"{BASE_URL}/message/history", params={
+                "client_id": current_client_id,
+                "freelancer_id": freelancer_id
+            })
+            try:
+                messages = res.json()
+                new_found = False
+                for m in messages:
+                    msg_timestamp = m.get("timestamp", 0)
+                    if msg_timestamp > last_timestamp and msg_timestamp not in displayed_messages:
+                        is_sent = m["sender_role"] == "client"
+                        display_message(m['text'], is_sent, freelancer_name, msg_timestamp)
+                        displayed_messages.add(msg_timestamp)
+                        last_timestamp = max(last_timestamp, msg_timestamp)
+                        new_found = True
+                if not new_found:
+                    print("📭 No new messages")
+            except:
+                pass
+            continue
+        if not msg.strip():
+            continue
+
+        # Send message
+        try:
+            requests.post(f"{BASE_URL}/client/message/send", json={
+                "client_id": current_client_id,
+                "freelancer_id": freelancer_id,
+                "text": msg
+            })
+            
+            # Immediately show the sent message
+            current_time = int(time.time())
+            display_message(msg, True, freelancer_name, current_time)
+            displayed_messages.add(current_time)
+            last_timestamp = current_time
+            
+            # Check for any new messages from freelancer
+            time.sleep(0.5)  # Small delay
+            res = requests.get(f"{BASE_URL}/message/history", params={
+                "client_id": current_client_id,
+                "freelancer_id": freelancer_id
+            })
+            try:
+                messages = res.json()
+                for m in messages:
+                    msg_timestamp = m.get("timestamp", 0)
+                    if msg_timestamp > last_timestamp and msg_timestamp not in displayed_messages:
+                        is_sent = m["sender_role"] == "client"
+                        display_message(m['text'], is_sent, freelancer_name, msg_timestamp)
+                        displayed_messages.add(msg_timestamp)
+                        last_timestamp = max(last_timestamp, msg_timestamp)
+            except:
+                pass
+        except:
+            print("❌ Failed to send message")
+
+def open_chat_with_client(client_id):
+    # Get client name
+    try:
+        conn = sqlite3.connect("client.db")
+        cur = conn.cursor()
+        cur.execute("SELECT name FROM client WHERE id=?", (client_id,))
+        row = cur.fetchone()
+        client_name = row[0] if row else "Client"
+        conn.close()
+    except:
+        client_name = "Client"
+    
+    show_chat_header(client_name)
+    
+    # Load and display existing chat history
+    res = requests.get(f"{BASE_URL}/message/history", params={
+        "client_id": client_id,
+        "freelancer_id": current_freelancer_id
+    })
+    
+    displayed_messages = set()  # Track displayed message timestamps
+    
+    try:
+        messages = res.json()
+        if messages:
+            print("\n📜 Chat History:")
+            print("-" * 70)
+            for m in messages:
+                is_sent = m["sender_role"] == "freelancer"
+                display_message(m['text'], is_sent, client_name, m.get("timestamp"))
+                displayed_messages.add(m.get("timestamp", 0))
+    except:
+        pass
+    
+    print("\n" + "-" * 70)
+    last_timestamp = max(displayed_messages) if displayed_messages else 0
+    
+    # Main chat loop
+    while True:
+        # Get user input
+        msg = input("\n💬 You: ")
+        if msg.lower() == "exit":
+            print("\n👋 Left chat")
+            break
+        if msg.lower() == "refresh" or msg.lower() == "r":
+            # Manual refresh to check for new messages
+            res = requests.get(f"{BASE_URL}/message/history", params={
+                "client_id": client_id,
+                "freelancer_id": current_freelancer_id
+            })
+            try:
+                messages = res.json()
+                new_found = False
+                for m in messages:
+                    msg_timestamp = m.get("timestamp", 0)
+                    if msg_timestamp > last_timestamp and msg_timestamp not in displayed_messages:
+                        is_sent = m["sender_role"] == "freelancer"
+                        display_message(m['text'], is_sent, client_name, msg_timestamp)
+                        displayed_messages.add(msg_timestamp)
+                        last_timestamp = max(last_timestamp, msg_timestamp)
+                        new_found = True
+                if not new_found:
+                    print("📭 No new messages")
+            except:
+                pass
+            continue
+        if not msg.strip():
+            continue
+
+        # Send message
+        try:
+            requests.post(f"{BASE_URL}/freelancer/message/send", json={
+                "freelancer_id": current_freelancer_id,
+                "client_id": client_id,
+                "text": msg
+            })
+            
+            # Immediately show the sent message
+            current_time = int(time.time())
+            display_message(msg, True, client_name, current_time)
+            displayed_messages.add(current_time)
+            last_timestamp = current_time
+            
+            # Check for any new messages from client
+            time.sleep(0.5)  # Small delay
+            res = requests.get(f"{BASE_URL}/message/history", params={
+                "client_id": client_id,
+                "freelancer_id": current_freelancer_id
+            })
+            try:
+                messages = res.json()
+                for m in messages:
+                    msg_timestamp = m.get("timestamp", 0)
+                    if msg_timestamp > last_timestamp and msg_timestamp not in displayed_messages:
+                        is_sent = m["sender_role"] == "freelancer"
+                        display_message(m['text'], is_sent, client_name, msg_timestamp)
+                        displayed_messages.add(msg_timestamp)
+                        last_timestamp = max(last_timestamp, msg_timestamp)
+            except:
+                pass
+        except:
+            print("❌ Failed to send message")
+
+# ---------- CLIENT: VIEW DETAILS ----------
 def view_freelancer_details(fid):
-    res = requests.get(f"{BASE_URL}/freelancer/profile/{fid}")
+    res = requests.get(f"{BASE_URL}/freelancers/{fid}")
     data = res.json()
     if not data.get("success"):
         print("❌", data.get("msg"))
@@ -94,12 +549,6 @@ def view_freelancer_details(fid):
     print("ID:", data["freelancer_id"])
     print("Name:", data["name"])
     print("Email:", data["email"])
-    
-    if data.get("profile_image"):
-        print("Profile Photo:", data["profile_image"])
-    else:
-        print("Profile Photo: Not uploaded")
-    
     print("Category:", data["category"])
     print("Title:", data["title"])
     print("Skills:", data["skills"])
@@ -109,17 +558,20 @@ def view_freelancer_details(fid):
     print("Rating:", data["rating"])
     print("Bio:", data["bio"])
     
-    # Show portfolio items
+    # Display profile image if available
+    if data.get("profile_image"):
+        print("Profile Image:", data["profile_image"])
+    
+    # Display portfolio items
     try:
         portfolio_res = requests.get(f"{BASE_URL}/freelancer/portfolio/{fid}")
         portfolio_data = portfolio_res.json()
         if portfolio_data.get("success") and portfolio_data.get("portfolio_items"):
             print("\n--- PORTFOLIO ---")
             for item in portfolio_data["portfolio_items"]:
-                print(f"\n📸 {item['title']}")
+                print(f"\n📁 {item['title']}")
                 print(f"   Description: {item['description']}")
                 print(f"   Image: {item['image_path']}")
-                print(f"   Added: {item['created_at']}")
         else:
             print("\n--- PORTFOLIO ---")
             print("📭 No portfolio items")
@@ -127,6 +579,7 @@ def view_freelancer_details(fid):
         print("\n--- PORTFOLIO ---")
         print("❌ Error loading portfolio")
 
+# ---------- CLIENT: HIRE ----------
 def hire_freelancer(fid):
     job_title = input("Job Title: ")
     budget = input("Proposed Budget: ")
@@ -141,25 +594,140 @@ def hire_freelancer(fid):
     })
     print(res.json())
 
-def open_chat_with_freelancer(fid):
-    print(f"\n--- CHAT WITH FREELANCER {fid} ---")
-    print("Type 'exit' to end chat")
-    
-    while True:
-        msg = input("You: ")
-        if msg.lower() == 'exit':
-            break
-        
-        try:
-            res = requests.post(f"{BASE_URL}/client/message/send", json={
-                "client_id": current_client_id,
-                "freelancer_id": fid,
-                "text": msg
-            })
-            print("✅ Message sent")
-        except:
-            print("❌ Failed to send message")
+# ---------- CLIENT: MESSAGES (THREADS) ----------
+def client_messages_menu():
+    """Show freelancers you have chatted with and open a chat."""
+    if not current_client_id:
+        print("❌ Please login as client first")
+        return
 
+    try:
+        res = requests.get(f"{BASE_URL}/client/messages/threads", params={
+            "client_id": current_client_id
+        })
+        threads = res.json()
+    except Exception:
+        threads = []
+
+    print("\n--- MESSAGES ---")
+    if not threads:
+        print("📭 No messages yet")
+        return
+
+    mapping = []
+    for idx, t in enumerate(threads, 1):
+        name = t.get("name") or "Freelancer"
+        fid = t.get("freelancer_id")
+        print(f"{idx}. {name} (ID: {fid})")
+        mapping.append((idx, fid, name))
+
+    sel = input("Select freelancer number to open chat (or Enter to go back): ").strip()
+    if not sel:
+        return
+    if not sel.isdigit():
+        print("❌ Invalid selection")
+        return
+
+    sel = int(sel)
+    for num, fid, _name in mapping:
+        if num == sel:
+            open_chat_with_freelancer(fid)
+            return
+
+    print("❌ Invalid selection")
+
+# ---------- CLIENT: JOB REQUEST STATUS ----------
+def client_job_request_status_menu():
+    """Show job request status - Simplified display only."""
+    if not current_client_id:
+        print("❌ Please login as client first")
+        return
+
+    try:
+        res = requests.get(f"{BASE_URL}/client/job-requests", params={
+            "client_id": current_client_id
+        })
+        data = res.json()
+    except Exception:
+        data = []
+
+    print("\n--- JOB REQUEST STATUS ---")
+    if not data:
+        print("📭 No job requests found")
+        return
+
+    for idx, r in enumerate(data, 1):
+        title = (r.get("job_title") or "Untitled").strip()
+        budget = r.get("proposed_budget")
+        status = r.get("status")
+        fname = r.get("freelancer_name") or "Freelancer"
+        fid = r.get("freelancer_id")
+        rid = r.get("request_id")
+
+        print(f"\n{idx}. Request ID: {rid}")
+        print(f"   Freelancer: {fname} (ID: {fid})")
+        print(f"   Job Title: {title}")
+        print(f"   Budget: ₹{budget}")
+        print(f"   Status: {status}")
+
+# ---------- CLIENT: AI RECOMMENDATIONS ----------
+def client_ai_recommendations():
+    """Display AI-recommended freelancers based on category and budget"""
+    print("\n--- AI RECOMMENDATIONS ---")
+    
+    category = input("Category: ").strip()
+    budget_input = input("Budget: ").strip()
+    
+    try:
+        budget = float(budget_input)
+    except ValueError:
+        print("❌ Invalid budget amount")
+        return
+    
+    try:
+        res = requests.post(f"{BASE_URL}/freelancers/recommend", json={
+            "category": category,
+            "budget": budget
+        })
+        recommendations = res.json()
+    except Exception as e:
+        print("❌ Error getting recommendations:", str(e))
+        return
+    
+    if not recommendations:
+        print("📭 No recommendations found")
+        return
+    
+    print("\n--- AI RECOMMENDED FREELANCERS ---")
+    for i, freelancer in enumerate(recommendations, 1):
+        print(f"\n{i}. {freelancer['name']}")
+        print(f"   Match Score: {freelancer['match_score']}%")
+        print(f"   Rating: {freelancer['rating']}")
+        print(f"   Experience: {freelancer['experience']} years")
+        print(f"   Budget: {freelancer['budget_range']}")
+        print(f"   Category: {freelancer['category']}")
+        
+        print("1. View Details")
+        print("2. Message")
+        print("3. Hire")
+        print("4. Save Freelancer")
+        print("5. Next")
+        
+        action = input("Choose: ")
+        if action == "1":
+            view_freelancer_details(freelancer["freelancer_id"])
+        elif action == "2":
+            open_chat_with_freelancer(freelancer["freelancer_id"])
+        elif action == "3":
+            hire_freelancer(freelancer["freelancer_id"])
+        elif action == "4":
+            res = requests.post(f"{BASE_URL}/client/save-freelancer", json={
+                "client_id": current_client_id,
+                "freelancer_id": freelancer["freelancer_id"]
+            })
+            print(res.json())
+
+# ---------- CLIENT FLOW ----------
 def client_flow():
     global current_client_id
 
@@ -173,21 +741,22 @@ def client_flow():
         print("1. Create / Update Profile")
         print("2. View All Freelancers")
         print("3. Search Freelancers")
-        print("4. View My Jobs")
-        print("5. Saved Freelancers")
-        print("6. Notifications")
-        print("7. Messages")
-        print("8. Job Request Status")
-        print("9. Recommended Freelancers (AI)")
+        print("4. Recommended Freelancers (AI)")
+        print("5. View My Jobs")
+        print("6. Saved Freelancers")
+        print("7. Notifications")
+        print("8. Messages")
+        print("9. Job Request Status")
         print("10. Exit")
 
         choice = input("Choose: ")
-
+        
         if choice == "1":
             while True:
                 phone = input("Phone (10 digits): ")
                 if valid_phone(phone):
                     break
+                print(" Phone must be 10 digits")
                 print("❌ Phone must be 10 digits")
 
             res = requests.post(f"{BASE_URL}/client/profile", json={
@@ -277,56 +846,111 @@ def client_flow():
                     })
                     print(res.json())
 
-        elif choice == "9":
-            category = input("Category: ").strip()
-            budget = input("Budget: ").strip()
-            
+        elif choice == "4":
+            client_ai_recommendations()
+
+        elif choice == "5":
+            res = requests.get(f"{BASE_URL}/client/jobs", params={
+                "client_id": current_client_id
+            })
+            print("\n--- My Jobs ---")
             try:
-                res = requests.post(f"{BASE_URL}/freelancers/recommend", json={
-                    "category": category,
-                    "budget": budget
-                })
-                recommendations = res.json()
-                
-                if not recommendations:
-                    print("📭 No recommended freelancers found")
-                    continue
-                
-                print("\n--- AI RECOMMENDED FREELANCERS ---")
-                for i, rec in enumerate(recommendations, 1):
-                    print(f"\n{i}. {rec['name']}")
-                    print(f"   Match Score: {rec['match_score']}%")
-                    print(f"   Rating: {rec['rating']}")
-                    print(f"   Experience: {rec['experience']} years")
-                    print(f"   Budget: {rec['budget_range']}")
-                    print(f"   Category: {rec['category']}")
-                    
-                    print("1. View Details")
-                    print("2. Message")
-                    print("3. Hire")
-                    print("4. Save Freelancer")
-                    print("5. Next")
-                    
-                    action = input("Choose: ")
-                    if action == "1":
-                        view_freelancer_details(rec["freelancer_id"])
-                    elif action == "2":
-                        open_chat_with_freelancer(rec["freelancer_id"])
-                    elif action == "3":
-                        hire_freelancer(rec["freelancer_id"])
-                    elif action == "4":
-                        res = requests.post(f"{BASE_URL}/client/save-freelancer", json={
-                            "client_id": current_client_id,
-                            "freelancer_id": rec["freelancer_id"]
-                        })
-                        print(res.json())
-                        
+                jobs = res.json()
+                if not jobs:
+                    print("❌ No jobs found")
+                else:
+                    for i, j in enumerate(jobs, 1):
+                        print(f"{i}. {j['title']} | ₹{j['budget']} | {j['status']}")
+            except:
+                print("❌ Error fetching jobs")
+
+        elif choice == "6":
+            # Saved Freelancers - FIXED: This was incorrectly calling Notifications
+            res = requests.get(f"{BASE_URL}/client/saved-freelancers", params={
+                "client_id": current_client_id
+            })
+            print("\n--- SAVED FREELANCERS ---")
+            try:
+                freelancers = res.json()
+                if not freelancers:
+                    print("❌ No saved freelancers")
+                else:
+                    for f in freelancers:
+                        # API returns: {"id": r[0], "name": r[1], "category": r[2] or ""}
+                        freelancer_id = f.get("id", f.get("freelancer_id"))
+                        name = f.get("name")
+                        print(f"{freelancer_id}. {name}")
+            except Exception as e:
+                print("❌ Error fetching saved freelancers:", str(e))
+
+        elif choice == "7":
+            # Notifications - FIXED: This was incorrectly calling Messages
+            res = requests.get(f"{BASE_URL}/client/notifications", params={
+                "client_id": current_client_id
+            })
+            print("\n--- Notifications ---")
+            try:
+                notifications = res.json()
+                if not notifications:
+                    print("❌ No notifications")
+                else:
+                    for n in notifications:
+                        print("*", n)
             except Exception as e:
                 print("❌ Error getting recommendations:", str(e))
+
+        elif choice == "8":
+            # Messages - FIXED: This was incorrectly calling Job Request Status
+            res = requests.get(f"{BASE_URL}/client/messages/threads", params={
+                "client_id": current_client_id
+            })
+            threads = res.json()
+            if not threads:
+                print("📭 No message threads found")
+            else:
+                print("\n--- MESSAGE THREADS ---")
+                for thread in threads:
+                    print(f"\nFreelancer: {thread['name']} (ID: {thread['freelancer_id']})")
+                    print("1. View Chat History")
+                    print("2. Send New Message")
+                    print("3. Voice Call 📞")
+                    print("4. Video Call 🎥")
+                    print("5. Next")
+                    msg_choice = input("Choose: ")
+                    
+                    if msg_choice == "1":
+                        # View chat history
+                        res_history = requests.get(f"{BASE_URL}/message/history", params={
+                            "client_id": current_client_id,
+                            "freelancer_id": thread['freelancer_id']
+                        })
+                        history = res_history.json()
+                        print("\n--- CHAT HISTORY ---")
+                        for msg in history:
+                            sender = "You" if msg['sender_role'] == 'client' else "Freelancer"
+                            print(f"{sender}: {msg['text']}")
+                    elif msg_choice == "2":
+                        # Send new message
+                        message = input("Enter your message: ")
+                        res_send = requests.post(f"{BASE_URL}/client/message/send", json={
+                            "client_id": current_client_id,
+                            "freelancer_id": thread['freelancer_id'],
+                            "text": message
+                        })
+                        print(res_send.json())
+                    elif msg_choice == "3":
+                        start_call("client", thread['freelancer_id'], "voice")
+                    elif msg_choice == "4":
+                        start_call("client", thread['freelancer_id'], "video")
+
+        elif choice == "9":
+            # Job Request Status - FIXED: Remove duplicate, keep only this one
+            client_job_request_status_menu()
 
         elif choice == "10":
             break
 
+# ---------- FREELANCER FLOW ----------
 def freelancer_flow():
     global current_freelancer_id
 
@@ -343,14 +967,14 @@ def freelancer_flow():
         print("4. Messages")
         print("5. Earnings & Performance")
         print("6. Saved Clients")
-        print("7. Account Settings")
-        print("8. Notifications / Activity")
-        print("9. Manage Portfolio")
-        print("10. Upload Profile Photo")
-        print("11. Exit")
+        print("7. Manage Portfolio")
+        print("8. Account Settings")
+        print("9. Notifications / Activity")
+        print("10. Exit")
 
         choice = input("Choose: ")
 
+        # 1️⃣ Create / Update Profile
         if choice == "1":
             print("\nAllowed Categories (example):")
             print("- Graphic Designer")
@@ -376,19 +1000,194 @@ def freelancer_flow():
             except Exception:
                 print("❌ Server error while updating profile")
 
-        elif choice == "9":
+        # 2️⃣ View Hire Requests (Inbox)
+        elif choice == "2":
+            try:
+                res = requests.get(f"{BASE_URL}/freelancer/hire/inbox", params={
+                    "freelancer_id": current_freelancer_id
+                })
+                inbox = res.json()
+            except Exception:
+                inbox = []
+
+            if not inbox:
+                print("❌ No hire requests")
+                continue
+
+            for r in inbox:
+                print("\n--- HIRE REQUEST ---")
+                print("Request ID:", r["request_id"])
+                print("Client:", r["client_name"], "|", r["client_email"])
+                print("Budget:", r["proposed_budget"])
+                print("Note:", r["note"])
+                print("Status:", r["status"])
+
+                if r["status"] == "PENDING":
+                    print("1. Accept")
+                    print("2. Reject")
+                    print("3. Message Client")
+                    print("4. Save Client")
+                    print("5. Next")
+                    a = input("Choose: ")
+
+                    if a == "1":
+                        rr = requests.post(f"{BASE_URL}/freelancer/hire/respond", json={
+                            "freelancer_id": current_freelancer_id,
+                            "request_id": r["request_id"],
+                            "action": "ACCEPT"
+                        })
+                        print(rr.json())
+                    elif a == "2":
+                        rr = requests.post(f"{BASE_URL}/freelancer/hire/respond", json={
+                            "freelancer_id": current_freelancer_id,
+                            "request_id": r["request_id"],
+                            "action": "REJECT"
+                        })
+                        print(rr.json())
+                    elif a == "3":
+                        open_chat_with_client(r["client_id"])
+                    elif a == "4":
+                        rr = requests.post(f"{BASE_URL}/freelancer/save-client", json={
+                            "freelancer_id": current_freelancer_id,
+                            "client_id": r["client_id"]
+                        })
+                        try:
+                            print(rr.json())
+                        except Exception:
+                            print("❌ Failed to save client")
+
+        # 3️⃣ Manage Active Jobs
+        elif choice == "3":
+            try:
+                res = requests.get(f"{BASE_URL}/freelancer/hire/inbox", params={
+                    "freelancer_id": current_freelancer_id
+                })
+                inbox = res.json()
+            except Exception:
+                inbox = []
+
+            active = [r for r in inbox if r.get("status") == "ACCEPTED"]
+            print("\n--- ACTIVE JOBS ---")
+            if not active:
+                print("📭 No active (accepted) jobs")
+            else:
+                for i, j in enumerate(active, 1):
+                    title = j.get("note") or j.get("request_id")
+                    print(f"{i}. Client: {j['client_name']} | Budget: ₹{j['proposed_budget']} | Status: {j['status']}")
+
+        # 4️⃣ Messages
+        elif choice == "4":
+            # List clients you have hire-request history with - Enhanced with call options
+            try:
+                res = requests.get(f"{BASE_URL}/freelancer/hire/inbox", params={
+                    "freelancer_id": current_freelancer_id
+                })
+                inbox = res.json()
+            except Exception:
+                inbox = []
+
+            clients = {}
+            for r in inbox:
+                clients[r["client_id"]] = r["client_name"]
+
+            if not clients:
+                print("📭 No clients to message yet")
+            else:
+                print("\n--- MESSAGE THREADS ---")
+                for cid, name in clients.items():
+                    print(f"\nClient: {name} (ID: {cid})")
+                    print("1. View Chat History")
+                    print("2. Send New Message")
+                    print("3. Voice Call 📞")
+                    print("4. Video Call 🎥")
+                    print("5. Next")
+                    msg_choice = input("Choose: ")
+                    
+                    if msg_choice == "1":
+                        # View chat history
+                        res_history = requests.get(f"{BASE_URL}/message/history", params={
+                            "client_id": cid,
+                            "freelancer_id": current_freelancer_id
+                        })
+                        history = res_history.json()
+                        print("\n--- CHAT HISTORY ---")
+                        for msg in history:
+                            sender = "You" if msg['sender_role'] == 'freelancer' else "Client"
+                            print(f"{sender}: {msg['text']}")
+                    elif msg_choice == "2":
+                        # Send new message
+                        message = input("Enter your message: ")
+                        res_send = requests.post(f"{BASE_URL}/freelancer/message/send", json={
+                            "freelancer_id": current_freelancer_id,
+                            "client_id": cid,
+                            "text": message
+                        })
+                        print(res_send.json())
+                    elif msg_choice == "3":
+                        start_call("freelancer", cid, "voice")
+                    elif msg_choice == "4":
+                        start_call("freelancer", cid, "video")
+
+        # 5️⃣ Earnings & Performance
+        elif choice == "5":
+            try:
+                res = requests.get(f"{BASE_URL}/freelancer/stats", params={
+                    "freelancer_id": current_freelancer_id
+                })
+                data = res.json()
+                if not data.get("success"):
+                    print("❌", data.get("msg", "Could not fetch stats"))
+                else:
+                    print("\n--- EARNINGS & PERFORMANCE ---")
+                    print("Total Earnings: ₹", data["total_earnings"])
+                    print("Completed Jobs:", data["completed_jobs"])
+                    print("Rating: ⭐", data["rating"])
+                    print("Job Success:", f"{data['job_success_percent']}%")
+            except Exception:
+                print("❌ Error fetching stats")
+
+        # 6️⃣ Saved Clients
+        elif choice == "6":
+            try:
+                res = requests.get(f"{BASE_URL}/freelancer/saved-clients", params={
+                    "freelancer_id": current_freelancer_id
+                })
+                clients = res.json()
+            except Exception:
+                clients = []
+
+            print("\n--- SAVED CLIENTS ---")
+            if not clients:
+                print("❌ No saved clients")
+            else:
+                for c in clients:
+                    print(f"{c['client_id']}. {c['name']} - {c['email']}")
+                    print("1. Message 💬")
+                    print("2. Voice Call 📞")
+                    print("3. Video Call 🎥")
+                    print("4. Next")
+                    a = input("Choose: ")
+                    if a == "1":
+                        open_chat_with_client(c["client_id"])
+                    elif a == "2":
+                        start_call("freelancer", c["client_id"], "voice")
+                    elif a == "3":
+                        start_call("freelancer", c["client_id"], "video")
+
+        elif choice == "7":
             while True:
                 print("\n--- MANAGE PORTFOLIO ---")
                 print("1. Add Portfolio Item")
                 print("2. View My Portfolio")
-                print("3. Back")
+                print("3. Upload Profile Photo")
+                print("4. Back")
                 portfolio_choice = input("Choose: ")
                 
                 if portfolio_choice == "1":
-                    title = input("Portfolio Title: ")
+                    # Add Portfolio Item
+                    title = input("Title: ")
                     description = input("Description: ")
                     image_path = input("Image Path (local file): ")
-                    image_path = image_path.strip().strip('"').strip("'")
                     
                     try:
                         res = requests.post(f"{BASE_URL}/freelancer/portfolio/add", json={
@@ -406,58 +1205,106 @@ def freelancer_flow():
                         print("❌ Error adding portfolio item:", str(e))
                 
                 elif portfolio_choice == "2":
+                    # View My Portfolio
                     try:
                         res = requests.get(f"{BASE_URL}/freelancer/portfolio/{current_freelancer_id}")
-                        result = res.json()
-                        if result.get("success") and result.get("portfolio_items"):
+                        data = res.json()
+                        if data.get("success") and data.get("portfolio_items"):
                             print("\n--- MY PORTFOLIO ---")
-                            for item in result["portfolio_items"]:
-                                print(f"\nTitle: {item['title']}")
-                                print(f"Description: {item['description']}")
-                                print(f"Image: {item['image_path']}")
-                                print(f"Added: {item['created_at']}")
-                                print("-" * 30)
+                            for item in data["portfolio_items"]:
+                                print(f"\n📁 {item['title']}")
+                                print(f"   Description: {item['description']}")
+                                print(f"   Image: {item['image_path']}")
+                                print(f"   Added: {item['created_at']}")
                         else:
                             print("📭 No portfolio items found")
                     except Exception as e:
                         print("❌ Error fetching portfolio:", str(e))
                 
                 elif portfolio_choice == "3":
+                    # Upload Profile Photo
+                    image_path = input("Profile Photo Path (local file): ")
+                    try:
+                        res = requests.post(f"{BASE_URL}/freelancer/upload-photo", json={
+                            "freelancer_id": current_freelancer_id,
+                            "image_path": image_path
+                        })
+                        result = res.json()
+                        if result.get("success"):
+                            print("✅ Profile photo uploaded successfully!")
+                            print(f"📁 Saved to: {result.get('image_path')}")
+                        else:
+                            print("❌ Failed to upload photo:", result.get("msg"))
+                    except Exception as e:
+                        print("❌ Error uploading photo:", str(e))
+                
+                elif portfolio_choice == "4":
                     break
 
-        elif choice == "10":
-            image_path = input("Enter image path (local file): ")
-            image_path = image_path.strip().strip('"').strip("'")
-            try:
-                res = requests.post(f"{BASE_URL}/freelancer/upload-photo", json={
-                    "freelancer_id": current_freelancer_id,
-                    "image_path": image_path
-                })
-                result = res.json()
-                if result.get("success"):
-                    print("✅ Profile photo uploaded successfully!")
-                    print(f"Image saved as: {result.get('image_path')}")
-                else:
-                    print("❌ Failed to upload photo:", result.get("msg"))
-            except Exception as e:
-                print("❌ Error uploading photo:", str(e))
+        # 8️⃣ Account Settings
+        elif choice == "8":
+            while True:
+                print("\n--- ACCOUNT SETTINGS ---")
+                print("1. Change Password")
+                print("2. Update Email")
+                print("3. Notification Settings (UI only)")
+                print("4. Logout")
+                print("5. Back")
+                a = input("Choose: ")
 
-        elif choice == "11":
+                if a == "1":
+                    old_pwd = input("Old Password: ")
+                    new_pwd = input("New Password: ")
+                    try:
+                        res = requests.post(f"{BASE_URL}/freelancer/change-password", json={
+                            "freelancer_id": current_freelancer_id,
+                            "old_password": old_pwd,
+                            "new_password": new_pwd
+                        })
+                        print(res.json())
+                    except Exception:
+                        print("❌ Failed to change password")
+                elif a == "2":
+                    new_email = input("New Email: ")
+                    try:
+                        res = requests.post(f"{BASE_URL}/freelancer/update-email", json={
+                            "freelancer_id": current_freelancer_id,
+                            "new_email": new_email
+                        })
+                        print(res.json())
+                    except Exception:
+                        print("❌ Failed to update email")
+                elif a == "3":
+                    print("ℹ Notification settings are UI-only for now.")
+                elif a == "4":
+                    current_freelancer_id = None
+                    print("✅ Logged out")
+                    return
+                elif a == "5":
+                    break
+
+        # 9️⃣ Notifications / Activity
+        elif choice == "9":
+            try:
+                res = requests.get(f"{BASE_URL}/freelancer/notifications", params={
+                    "freelancer_id": current_freelancer_id
+                })
+                notes = res.json()
+            except Exception:
+                notes = []
+
+            print("\n--- NOTIFICATIONS / ACTIVITY ---")
+            if not notes:
+                print("📭 No recent activity")
+            else:
+                for n in notes:
+                    print("✔", n)
+
+        # 10️⃣ Exit
+        elif choice == "10":
             break
 
-def login_or_signup(role):
-    print("\nChoose option:")
-    print("1. Login")
-    print("2. Sign Up")
-    choice = input("Choose: ")
-    
-    if choice == "1":
-        login(role)
-    elif choice == "2":
-        signup_with_role(role)
-    else:
-        print("❌ Invalid choice")
-
+# ---------- MAIN MENU ----------
 # ---------- MAIN MENU ----------
 while True:
     print("\n====== GIGBRIDGE ======")
@@ -476,9 +1323,29 @@ while True:
         r = input("Choose: ")
 
         if r == "1":
-            login("client")
+            print("\nLogin method:")
+            print("1. Continue with Email")
+            print("2. Continue with Google")
+            m = input("Choose: ")
+            if m == "1":
+                login(role="client")
+            elif m == "2":
+                continue_with_google("client")
+            else:
+                print("❌ Invalid choice")
+
         elif r == "2":
-            login("freelancer")
+            print("\nLogin method:")
+            print("1. Continue with Email")
+            print("2. Continue with Google")
+            m = input("Choose: ")
+            if m == "1":
+                login(role="freelancer")
+            elif m == "2":
+                continue_with_google("freelancer")
+            else:
+                print("❌ Invalid choice")
+
         else:
             print("❌ Invalid role choice")
 
@@ -489,9 +1356,29 @@ while True:
         r = input("Choose: ")
 
         if r == "1":
-            signup_with_role("client")
+            print("\nSignup method:")
+            print("1. Continue with Email (OTP)")
+            print("2. Continue with Google")
+            m = input("Choose: ")
+            if m == "1":
+                signup_with_role("client")
+            elif m == "2":
+                continue_with_google("client")
+            else:
+                print("❌ Invalid choice")
+
         elif r == "2":
-            signup_with_role("freelancer")
+            print("\nSignup method:")
+            print("1. Continue with Email (OTP)")
+            print("2. Continue with Google")
+            m = input("Choose: ")
+            if m == "1":
+                signup_with_role("freelancer")
+            elif m == "2":
+                continue_with_google("freelancer")
+            else:
+                print("❌ Invalid choice")
+
         else:
             print("❌ Invalid role choice")
 

@@ -55,6 +55,21 @@ def create_tables():
     )
     """)
 
+    # ---------- CALL SESSION ----------
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS call_session (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        caller_role TEXT,
+        caller_id INTEGER,
+        receiver_role TEXT,
+        receiver_id INTEGER,
+        call_type TEXT,
+        room_name TEXT,
+        status TEXT,
+        created_at INTEGER
+    )
+    """)
+
     db.commit()
     db.close()
 
@@ -163,6 +178,21 @@ def create_tables():
         title TEXT,
         description TEXT,
         image_path TEXT,
+        created_at INTEGER
+    )
+    """)
+
+    # ---------- CALL SESSION ----------
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS call_session (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        caller_role TEXT,
+        caller_id INTEGER,
+        receiver_role TEXT,
+        receiver_id INTEGER,
+        call_type TEXT,
+        room_name TEXT,
+        status TEXT,
         created_at INTEGER
     )
     """)
