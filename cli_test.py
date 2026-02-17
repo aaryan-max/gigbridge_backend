@@ -2,6 +2,8 @@ import requests
 import time
 import sqlite3
 from datetime import datetime
+import webbrowser
+
 
 BASE_URL = "http://127.0.0.1:5000"
 
@@ -96,18 +98,86 @@ def login(role=None):
         else:
             print("❌ Account not found. Please sign up first.")
 
+
+def continue_with_google(role):
+    global current_client_id, current_freelancer_id
+
+    try:
+        res = requests.get(f"{BASE_URL}/auth/google/start", params={"role": role})
+        data = res.json()
+    except Exception:
+        print("❌ Failed to contact server for Google OAuth")
+        return
+
+    if not data.get("success"):
+        print("❌", data.get("msg", "Google OAuth failed to start"))
+        return
+
+    auth_url = data["auth_url"]
+    state = data["state"]
+
+    print("\n🌐 Opening browser for Google login...")
+    print("If browser doesn't open, copy this URL and open manually:\n")
+    print(auth_url)
+
+    try:
+        webbrowser.open(auth_url)
+    except Exception:
+        pass
+
+    print("\n⏳ After login, come back here. Checking status...")
+
+    # Poll status (simple)
+    start = time.time()
+    while True:
+        if time.time() - start > 180:  # 3 minutes timeout
+            print("❌ Timed out waiting for Google login")
+            return
+
+        try:
+            st = requests.get(f"{BASE_URL}/auth/google/status", params={"state": state}).json()
+        except Exception:
+            time.sleep(2)
+            continue
+
+        if st.get("success") and st.get("done") is True:
+            result = st.get("result") or {}
+            if not result.get("success"):
+                print("❌ Google login failed:", result.get("msg", "unknown error"))
+                return
+
+            if role == "client" and result.get("client_id"):
+                current_client_id = result["client_id"]
+                print("✅ Google login successful (Client). client_id =", current_client_id)
+                return
+
+            if role == "freelancer" and result.get("freelancer_id"):
+                current_freelancer_id = result["freelancer_id"]
+                print("✅ Google login successful (Freelancer). freelancer_id =", current_freelancer_id)
+                return
+
+            print("❌ Google login completed but ID not returned")
+            return
+
+        time.sleep(2)            
+
 # ---------- LOGIN OR SIGNUP ----------
+
 def login_or_signup(role):
     print("1. Login")
     print("2. Signup")
+    print("3. Continue with Google")   # ✅ ADD THIS LINE
     choice = input("Choose: ")
 
     if choice == "1":
         login(role=role)
     elif choice == "2":
         signup_with_role(role)
+    elif choice == "3":                # ✅ ADD THIS BLOCK
+        continue_with_google(role)
     else:
         print("❌ Invalid choice")
+
 
 # ---------- CHAT HELPERS ----------
 def format_timestamp(ts):
@@ -385,7 +455,8 @@ def open_chat_with_client(client_id):
 
 # ---------- CLIENT: VIEW DETAILS ----------
 def view_freelancer_details(fid):
-    res = requests.get(f"{BASE_URL}/freelancers/{fid}")
+    # Get freelancer profile with photo (NEW CODE)
+    res = requests.get(f"{BASE_URL}/freelancer/profile/{fid}")
     data = res.json()
     if not data.get("success"):
         print("❌", data.get("msg"))
@@ -395,6 +466,13 @@ def view_freelancer_details(fid):
     print("ID:", data["freelancer_id"])
     print("Name:", data["name"])
     print("Email:", data["email"])
+    
+    # NEW CODE: Show profile photo if available
+    if data.get("profile_image"):
+        print("Profile Photo:", data["profile_image"])
+    else:
+        print("Profile Photo: Not uploaded")
+    
     print("Category:", data["category"])
     print("Title:", data["title"])
     print("Skills:", data["skills"])
@@ -403,6 +481,24 @@ def view_freelancer_details(fid):
     print("Max Budget:", data["max_budget"])
     print("Rating:", data["rating"])
     print("Bio:", data["bio"])
+    
+    # NEW CODE: Show portfolio items
+    try:
+        portfolio_res = requests.get(f"{BASE_URL}/freelancer/portfolio/{fid}")
+        portfolio_data = portfolio_res.json()
+        if portfolio_data.get("success") and portfolio_data.get("portfolio_items"):
+            print("\n--- PORTFOLIO ---")
+            for item in portfolio_data["portfolio_items"]:
+                print(f"\n📸 {item['title']}")
+                print(f"   Description: {item['description']}")
+                print(f"   Image: {item['image_path']}")
+                print(f"   Added: {item['created_at']}")
+        else:
+            print("\n--- PORTFOLIO ---")
+            print("📭 No portfolio items")
+    except Exception as e:
+        print("\n--- PORTFOLIO ---")
+        print("❌ Error loading portfolio")
 
 # ---------- CLIENT: HIRE ----------
 def hire_freelancer(fid):
@@ -531,7 +627,8 @@ def client_flow():
         print("6. Notifications")
         print("7. Messages")
         print("8. Job Request Status")
-        print("9. Exit")
+        print("9. Recommended Freelancers (AI)")  # NEW CODE: AI Recommendations
+        print("10. Exit")
 
         choice = input("Choose: ")
 
@@ -686,6 +783,53 @@ def client_flow():
             client_job_request_status_menu()
 
         elif choice == "9":
+            category = input("Category: ").strip()
+            budget = input("Budget: ").strip()
+            
+            try:
+                res = requests.post(f"{BASE_URL}/freelancers/recommend", json={
+                    "category": category,
+                    "budget": budget
+                })
+                recommendations = res.json()
+                
+                if not recommendations:
+                    print("📭 No recommended freelancers found")
+                    continue
+                
+                print("\n--- AI RECOMMENDED FREELANCERS ---")
+                for i, rec in enumerate(recommendations, 1):
+                    print(f"\n{i}. {rec['name']}")
+                    print(f"   Match Score: {rec['match_score']}%")
+                    print(f"   Rating: {rec['rating']}")
+                    print(f"   Experience: {rec['experience']} years")
+                    print(f"   Budget: {rec['budget_range']}")
+                    print(f"   Category: {rec['category']}")
+                    
+                    print("1. View Details")
+                    print("2. Message")
+                    print("3. Hire")
+                    print("4. Save Freelancer")
+                    print("5. Next")
+                    
+                    action = input("Choose: ")
+                    if action == "1":
+                        view_freelancer_details(rec["freelancer_id"])
+                    elif action == "2":
+                        open_chat_with_freelancer(rec["freelancer_id"])
+                    elif action == "3":
+                        hire_freelancer(rec["freelancer_id"])
+                    elif action == "4":
+                        res = requests.post(f"{BASE_URL}/client/save-freelancer", json={
+                            "client_id": current_client_id,
+                            "freelancer_id": rec["freelancer_id"]
+                        })
+                        print(res.json())
+                        
+            except Exception as e:
+                print("❌ Error getting recommendations:", str(e))
+
+        elif choice == "10":
             break
 
 # ---------- FREELANCER FLOW ----------
@@ -707,7 +851,9 @@ def freelancer_flow():
         print("6. Saved Clients")
         print("7. Account Settings")
         print("8. Notifications / Activity")
-        print("9. Exit")
+        print("9. Manage Portfolio")  # NEW CODE: Portfolio management
+        print("10. Upload Profile Photo")  # NEW CODE: Profile photo upload
+        print("11. Exit")
 
         choice = input("Choose: ")
 
@@ -942,10 +1088,83 @@ def freelancer_flow():
                 for n in notes:
                     print("✔", n)
 
-        # 9️⃣ Exit
+        # 9️⃣ Manage Portfolio
         elif choice == "9":
+            while True:
+                print("\n--- MANAGE PORTFOLIO ---")
+                print("1. Add Portfolio Item")
+                print("2. View My Portfolio")
+                print("3. Back")
+                portfolio_choice = input("Choose: ")
+                
+                if portfolio_choice == "1":
+                    # Add Portfolio Item
+                    title = input("Portfolio Title: ")
+                    description = input("Description: ")
+                    image_path = input("Image Path (local file): ")
+                    # Strip quotes from path
+                    image_path = image_path.strip().strip('"').strip("'")
+                    
+                    try:
+                        res = requests.post(f"{BASE_URL}/freelancer/portfolio/add", json={
+                            "freelancer_id": current_freelancer_id,
+                            "title": title,
+                            "description": description,
+                            "image_path": image_path
+                        })
+                        result = res.json()
+                        if result.get("success"):
+                            print("✅ Portfolio item added successfully!")
+                        else:
+                            print("❌ Failed to add portfolio item:", result.get("msg"))
+                    except Exception as e:
+                        print("❌ Error adding portfolio item:", str(e))
+                
+                elif portfolio_choice == "2":
+                    # View My Portfolio
+                    try:
+                        res = requests.get(f"{BASE_URL}/freelancer/portfolio/{current_freelancer_id}")
+                        result = res.json()
+                        if result.get("success") and result.get("portfolio_items"):
+                            print("\n--- MY PORTFOLIO ---")
+                            for item in result["portfolio_items"]:
+                                print(f"\nTitle: {item['title']}")
+                                print(f"Description: {item['description']}")
+                                print(f"Image: {item['image_path']}")
+                                print(f"Added: {item['created_at']}")
+                                print("-" * 30)
+                        else:
+                            print("📭 No portfolio items found")
+                    except Exception as e:
+                        print("❌ Error fetching portfolio:", str(e))
+                
+                elif portfolio_choice == "3":
+                    break
+        
+        # 10️⃣ Upload Profile Photo
+        elif choice == "10":
+            image_path = input("Enter image path (local file): ")
+            # Strip quotes from path
+            image_path = image_path.strip().strip('"').strip("'")
+            try:
+                res = requests.post(f"{BASE_URL}/freelancer/upload-photo", json={
+                    "freelancer_id": current_freelancer_id,
+                    "image_path": image_path
+                })
+                result = res.json()
+                if result.get("success"):
+                    print("✅ Profile photo uploaded successfully!")
+                    print(f"Image saved as: {result.get('image_path')}")
+                else:
+                    print("❌ Failed to upload photo:", result.get("msg"))
+            except Exception as e:
+                print("❌ Error uploading photo:", str(e))
+
+        # 11️⃣ Exit
+        elif choice == "11":
             break
 
+# ---------- MAIN MENU ----------
 # ---------- MAIN MENU ----------
 while True:
     print("\n====== GIGBRIDGE ======")
@@ -964,9 +1183,31 @@ while True:
         r = input("Choose: ")
 
         if r == "1":
-            login(role="client")
+            print("\nLogin method:")
+            print("1. Continue with Email")
+            print("2. Continue with Google")
+            m = input("Choose: ")
+            if m == "1":
+                login(role="client")
+            elif m == "2":
+                continue_with_google("client")
+            else:
+                print("❌ Invalid choice")
+
         elif r == "2":
-            login(role="freelancer")
+            print("\nLogin method:")
+            print("1. Continue with Email")
+            print("2. Continue with Google")
+            m = input("Choose: ")
+            if m == "1":
+                login(role="freelancer")
+            elif m == "2":
+                continue_with_google("freelancer")
+            else:
+                print("❌ Invalid choice")
+
+        else:
+            print("❌ Invalid role choice")
 
     elif option == "2":
         print("Choose role to signup:")
@@ -975,9 +1216,31 @@ while True:
         r = input("Choose: ")
 
         if r == "1":
-            signup_with_role("client")
+            print("\nSignup method:")
+            print("1. Continue with Email (OTP)")
+            print("2. Continue with Google")
+            m = input("Choose: ")
+            if m == "1":
+                signup_with_role("client")
+            elif m == "2":
+                continue_with_google("client")
+            else:
+                print("❌ Invalid choice")
+
         elif r == "2":
-            signup_with_role("freelancer")
+            print("\nSignup method:")
+            print("1. Continue with Email (OTP)")
+            print("2. Continue with Google")
+            m = input("Choose: ")
+            if m == "1":
+                signup_with_role("freelancer")
+            elif m == "2":
+                continue_with_google("freelancer")
+            else:
+                print("❌ Invalid choice")
+
+        else:
+            print("❌ Invalid role choice")
 
     elif option == "3":
         client_flow()

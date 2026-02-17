@@ -4,11 +4,16 @@ import random
 import time
 import smtplib
 import os
+import requests
+import secrets
+import urllib.parse
+import shutil
 from email.message import EmailMessage
 from werkzeug.security import generate_password_hash, check_password_hash
 
 from database import create_tables
 from categories import is_valid_category
+
 
 # ============================================================
 # APP INIT
@@ -32,6 +37,27 @@ SMTP_PORT = 587
 # ============================================================
 
 OTP_TTL_SECONDS = 5 * 60  # 5 minutes
+
+# ============================================================
+# GOOGLE OAUTH CONFIG (ADDED - DOES NOT CHANGE EXISTING LOGIC)
+# ============================================================
+
+GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID", "")
+GOOGLE_CLIENT_SECRET = os.getenv("GOOGLE_CLIENT_SECRET", "")
+GOOGLE_REDIRECT_URI = os.getenv("GOOGLE_REDIRECT_URI", "http://127.0.0.1:5000/auth/google/callback")
+
+# state -> { role, created_at, done, result }
+GOOGLE_OAUTH_STATES = {}
+
+def _google_state_cleanup():
+    now = now_ts()
+    expired = []
+    for k, v in GOOGLE_OAUTH_STATES.items():
+        if now - int(v.get("created_at", now)) > 10 * 60:  # 10 minutes
+            expired.append(k)
+    for k in expired:
+        GOOGLE_OAUTH_STATES.pop(k, None)
+
 
 # ============================================================
 # HELPERS
@@ -471,27 +497,27 @@ def freelancers_search():
             "category": r[8],
         })
     return jsonify(results)
-
-# ============================================================
 # NEW: VIEW ALL FREELANCERS (even if client didn’t search)
 # ============================================================
 
 @app.route("/freelancers/all", methods=["GET"])
 def freelancers_all():
+    # NEW CODE: Add Row factory for safe column access
     conn = sqlite3.connect("freelancer.db")
+    conn.row_factory = sqlite3.Row
     cur = conn.cursor()
     cur.execute("""
         SELECT
             f.id,
             f.name,
-            COALESCE(fp.title, ''),
-            COALESCE(fp.skills, ''),
-            COALESCE(fp.experience, 0),
-            COALESCE(fp.min_budget, 0),
-            COALESCE(fp.max_budget, 0),
-            COALESCE(fp.rating, 0),
-            COALESCE(fp.category, ''),
-            COALESCE(fp.bio, '')
+            COALESCE(fp.title, '') as title,
+            COALESCE(fp.skills, '') as skills,
+            COALESCE(fp.experience, 0) as experience,
+            COALESCE(fp.min_budget, 0) as min_budget,
+            COALESCE(fp.max_budget, 0) as max_budget,
+            COALESCE(fp.rating, 0) as rating,
+            COALESCE(fp.category, '') as category,
+            COALESCE(fp.bio, '') as bio
         FROM freelancer f
         LEFT JOIN freelancer_profile fp ON fp.freelancer_id = f.id
         ORDER BY f.id DESC
@@ -502,21 +528,17 @@ def freelancers_all():
     out = []
     for r in rows:
         out.append({
-            "freelancer_id": r[0],
-            "name": r[1],
-            "title": r[2],
-            "skills": r[3],
-            "experience": r[4],
-            "budget_range": f"{r[5]} - {r[6]}",
-            "rating": r[7],
-            "category": r[8],
-            "bio": r[9],
+            "freelancer_id": r["id"],
+            "name": r["name"],
+            "title": r["title"],
+            "skills": r["skills"],
+            "experience": r["experience"],
+            "budget_range": f"{r['min_budget']} - {r['max_budget']}",
+            "rating": r["rating"],
+            "category": r["category"],
+            "bio": r["bio"],
         })
     return jsonify(out)
-
-# ============================================================
-# NEW: VIEW ONE FREELANCER (full details)
-# ============================================================
 
 @app.route("/freelancers/<int:freelancer_id>", methods=["GET"])
 def freelancer_details(freelancer_id: int):
@@ -1280,6 +1302,571 @@ def freelancer_notifications():
         if conn:
             conn.close()
         return jsonify({"success": False, "msg": str(e)}), 500
+
+# ============================================================
+# GOOGLE OAUTH ROUTES (ADDED)
+# - DOES NOT TOUCH EXISTING LOGIN/SIGNUP/OTP
+# ============================================================
+
+@app.route("/auth/google/start", methods=["GET"])
+def google_oauth_start():
+    _google_state_cleanup()
+
+    role = (request.args.get("role", "") or "").strip().lower()
+    if role not in ("client", "freelancer"):
+        return jsonify({"success": False, "msg": "role must be client or freelancer"}), 400
+
+    if not GOOGLE_CLIENT_ID or not GOOGLE_CLIENT_SECRET:
+        return jsonify({
+            "success": False,
+            "msg": "Google OAuth not configured. Set GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET."
+        }), 500
+
+    state = secrets.token_urlsafe(24)
+
+    GOOGLE_OAUTH_STATES[state] = {
+        "role": role,
+        "created_at": now_ts(),
+        "done": False,
+        "result": None
+    }
+
+    params = {
+        "client_id": GOOGLE_CLIENT_ID,
+        "redirect_uri": GOOGLE_REDIRECT_URI,
+        "response_type": "code",
+        "scope": "openid email profile",
+        "state": state,
+        "access_type": "online",
+        "prompt": "select_account"
+    }
+
+    auth_url = "https://accounts.google.com/o/oauth2/v2/auth?" + urllib.parse.urlencode(params)
+    return jsonify({"success": True, "auth_url": auth_url, "state": state})
+
+
+@app.route("/auth/google/callback", methods=["GET"])
+def google_oauth_callback():
+    _google_state_cleanup()
+
+    code = request.args.get("code")
+    state = request.args.get("state")
+
+    if not code or not state:
+        return "Missing code/state", 400
+
+    st = GOOGLE_OAUTH_STATES.get(state)
+    if not st:
+        return "Invalid or expired state. Please try again.", 400
+
+    role = st["role"]
+
+    # 1) Exchange code -> tokens
+    token_res = requests.post(
+        "https://oauth2.googleapis.com/token",
+        data={
+            "code": code,
+            "client_id": GOOGLE_CLIENT_ID,
+            "client_secret": GOOGLE_CLIENT_SECRET,
+            "redirect_uri": GOOGLE_REDIRECT_URI,
+            "grant_type": "authorization_code"
+        },
+        timeout=15
+    )
+
+    if token_res.status_code != 200:
+        st["done"] = True
+        st["result"] = {"success": False, "msg": "Token exchange failed"}
+        return "Google token exchange failed. You can close this tab.", 400
+
+    token_data = token_res.json()
+    id_token = token_data.get("id_token")
+    if not id_token:
+        st["done"] = True
+        st["result"] = {"success": False, "msg": "No id_token returned"}
+        return "Google did not return an ID token. You can close this tab.", 400
+
+    # 2) Verify ID token using Google's tokeninfo endpoint (no extra libs needed)
+    info_res = requests.get(
+        "https://oauth2.googleapis.com/tokeninfo",
+        params={"id_token": id_token},
+        timeout=15
+    )
+
+    if info_res.status_code != 200:
+        st["done"] = True
+        st["result"] = {"success": False, "msg": "Token verification failed"}
+        return "Google token verification failed. You can close this tab.", 400
+
+    info = info_res.json()
+
+    # Basic checks
+    aud = info.get("aud")
+    email = (info.get("email") or "").strip().lower()
+    name = (info.get("name") or "").strip()
+    sub = (info.get("sub") or "").strip()
+    email_verified = str(info.get("email_verified", "")).lower()
+
+    if aud != GOOGLE_CLIENT_ID:
+        st["done"] = True
+        st["result"] = {"success": False, "msg": "Invalid token audience"}
+        return "Invalid Google token (audience). You can close this tab.", 400
+
+    if not email or not sub:
+        st["done"] = True
+        st["result"] = {"success": False, "msg": "Email not available"}
+        return "Google email not available. You can close this tab.", 400
+
+    # optional strict check
+    if email_verified and email_verified not in ("true", "1", "yes"):
+        st["done"] = True
+        st["result"] = {"success": False, "msg": "Email not verified"}
+        return "Google email not verified. You can close this tab.", 400
+
+    # 3) Upsert user into correct DB based on role
+    if role == "client":
+        conn = sqlite3.connect("client.db")
+        cur = conn.cursor()
+
+        cur.execute("SELECT id, password, auth_provider, google_sub FROM client WHERE email=?", (email,))
+        row = cur.fetchone()
+
+        if row:
+            client_id, pwd, provider, gsub = row
+            if not provider:
+                provider = "local"
+            if not gsub:
+                cur.execute("UPDATE client SET google_sub=? WHERE id=?", (sub, client_id))
+            conn.commit()
+            conn.close()
+
+            st["done"] = True
+            st["result"] = {"success": True, "role": "client", "client_id": client_id, "email": email}
+
+            return f"""
+            <h3>✅ Google Login Success (Client)</h3>
+            <p>You can close this tab and return to the app.</p>
+            """
+
+        if not name:
+            name = email.split("@")[0]
+
+        # ✅ IMPORTANT FIX: store a random hashed password so existing login logic never crashes
+        random_pwd_hash = generate_password_hash(secrets.token_urlsafe(32))
+
+        cur.execute(
+            "INSERT INTO client (name, email, password, auth_provider, google_sub) VALUES (?,?,?,?,?)",
+            (name, email, random_pwd_hash, "google", sub)
+        )
+        client_id = cur.lastrowid
+        conn.commit()
+        conn.close()
+
+        st["done"] = True
+        st["result"] = {"success": True, "role": "client", "client_id": client_id, "email": email}
+
+        return f"""
+        <h3>✅ Google Signup/Login Success (Client)</h3>
+        <p>You can close this tab and return to the app.</p>
+        """
+
+    else:
+        conn = sqlite3.connect("freelancer.db")
+        cur = conn.cursor()
+
+        cur.execute("SELECT id, password, auth_provider, google_sub FROM freelancer WHERE email=?", (email,))
+        row = cur.fetchone()
+
+        if row:
+            freelancer_id, pwd, provider, gsub = row
+            if not provider:
+                provider = "local"
+            if not gsub:
+                cur.execute("UPDATE freelancer SET google_sub=? WHERE id=?", (sub, freelancer_id))
+            conn.commit()
+            conn.close()
+
+            st["done"] = True
+            st["result"] = {"success": True, "role": "freelancer", "freelancer_id": freelancer_id, "email": email}
+
+            return f"""
+            <h3>✅ Google Login Success (Freelancer)</h3>
+            <p>You can close this tab and return to the app.</p>
+            """
+
+        if not name:
+            name = email.split("@")[0]
+
+        # ✅ IMPORTANT FIX: store a random hashed password so existing login logic never crashes
+        random_pwd_hash = generate_password_hash(secrets.token_urlsafe(32))
+
+        cur.execute(
+            "INSERT INTO freelancer (name, email, password, auth_provider, google_sub) VALUES (?,?,?,?,?)",
+            (name, email, random_pwd_hash, "google", sub)
+        )
+        freelancer_id = cur.lastrowid
+        conn.commit()
+        conn.close()
+
+        st["done"] = True
+        st["result"] = {"success": True, "role": "freelancer", "freelancer_id": freelancer_id, "email": email}
+
+        return f"""
+        <h3>✅ Google Signup/Login Success (Freelancer)</h3>
+        <p>You can close this tab and return to the app.</p>
+        """
+
+
+@app.route("/auth/google/status", methods=["GET"])
+def google_oauth_status():
+    _google_state_cleanup()
+
+    state = request.args.get("state")
+    if not state:
+        return jsonify({"success": False, "msg": "state required"}), 400
+
+    st = GOOGLE_OAUTH_STATES.get(state)
+    if not st:
+        return jsonify({"success": False, "msg": "invalid/expired state"}), 404
+
+    if not st.get("done"):
+        return jsonify({"success": True, "done": False})
+
+    return jsonify({"success": True, "done": True, "result": st.get("result")})
+
+# ============================================================
+# NEW CODE: PROFILE PHOTO SUPPORT
+# ============================================================
+
+# Create uploads folder if it doesn't exist
+UPLOADS_FOLDER = "uploads"
+if not os.path.exists(UPLOADS_FOLDER):
+    os.makedirs(UPLOADS_FOLDER)
+
+def copy_image_to_uploads(image_path):
+    """Copy image to uploads folder and return relative path"""
+    # Strip quotes and whitespace from path
+    image_path = str(image_path).strip().strip('"').strip("'")
+    
+    if not os.path.exists(image_path):
+        print(f"DEBUG: File not found at path: {image_path}")
+        return None
+    
+    filename = os.path.basename(image_path)
+    # Generate unique filename to avoid conflicts
+    name, ext = os.path.splitext(filename)
+    unique_filename = f"{name}_{int(time.time())}{ext}"
+    dest_path = os.path.join(UPLOADS_FOLDER, unique_filename)
+    
+    try:
+        shutil.copy2(image_path, dest_path)
+        print(f"DEBUG: Successfully copied file to: {dest_path}")
+        return dest_path
+    except Exception as e:
+        print(f"DEBUG: Error copying file: {e}")
+        return None
+
+@app.route("/client/upload-photo", methods=["POST"])
+def client_upload_photo():
+    """NEW CODE: Upload profile photo for client"""
+    d = get_json()
+    missing = require_fields(d, ["client_id", "image_path"])
+    if missing:
+        return jsonify({"success": False, "msg": "Missing fields"}), 400
+    
+    client_id = int(d["client_id"])
+    image_path = str(d["image_path"]).strip()
+    
+    # Validate client exists
+    conn = sqlite3.connect("client.db")
+    cur = conn.cursor()
+    cur.execute("SELECT id FROM client WHERE id=?", (client_id,))
+    if not cur.fetchone():
+        conn.close()
+        return jsonify({"success": False, "msg": "Client not found"}), 404
+    
+    # Copy image to uploads
+    uploaded_path = copy_image_to_uploads(image_path)
+    if not uploaded_path:
+        conn.close()
+        return jsonify({"success": False, "msg": "Failed to upload image"}), 400
+    
+    # Update database
+    cur.execute("UPDATE client SET profile_image=? WHERE id=?", (uploaded_path, client_id))
+    conn.commit()
+    conn.close()
+    
+    return jsonify({"success": True, "image_path": uploaded_path})
+
+@app.route("/freelancer/upload-photo", methods=["POST"])
+def freelancer_upload_photo():
+    """NEW CODE: Upload profile photo for freelancer"""
+    d = get_json()
+    missing = require_fields(d, ["freelancer_id", "image_path"])
+    if missing:
+        return jsonify({"success": False, "msg": "Missing fields"}), 400
+    
+    freelancer_id = int(d["freelancer_id"])
+    image_path = str(d["image_path"]).strip()
+    
+    # Validate freelancer exists
+    conn = sqlite3.connect("freelancer.db")
+    cur = conn.cursor()
+    cur.execute("SELECT id FROM freelancer WHERE id=?", (freelancer_id,))
+    if not cur.fetchone():
+        conn.close()
+        return jsonify({"success": False, "msg": "Freelancer not found"}), 404
+    
+    # Copy image to uploads
+    uploaded_path = copy_image_to_uploads(image_path)
+    if not uploaded_path:
+        conn.close()
+        return jsonify({"success": False, "msg": "Failed to upload image"}), 400
+    
+    # Update database
+    cur.execute("UPDATE freelancer SET profile_image=? WHERE id=?", (uploaded_path, freelancer_id))
+    conn.commit()
+    conn.close()
+    
+    return jsonify({"success": True, "image_path": uploaded_path})
+
+@app.route("/client/profile/<int:client_id>", methods=["GET"])
+def get_client_profile(client_id):
+    """NEW CODE: Get client profile with photo"""
+    conn = sqlite3.connect("client.db")
+    conn.row_factory = sqlite3.Row
+    cur = conn.cursor()
+    
+    cur.execute("""
+        SELECT c.id, c.name, c.email, c.profile_image,
+               cp.phone, cp.location, cp.bio
+        FROM client c
+        LEFT JOIN client_profile cp ON cp.client_id = c.id
+        WHERE c.id = ?
+    """, (client_id,))
+    
+    row = cur.fetchone()
+    conn.close()
+    
+    if not row:
+        return jsonify({"success": False, "msg": "Client not found"}), 404
+    
+    return jsonify({
+        "success": True,
+        "client_id": row["id"],
+        "name": row["name"],
+        "email": row["email"],
+        "profile_image": row["profile_image"],
+        "phone": row["phone"],
+        "location": row["location"],
+        "bio": row["bio"]
+    })
+
+@app.route("/freelancer/profile/<int:freelancer_id>", methods=["GET"])
+def get_freelancer_profile(freelancer_id):
+    """NEW CODE: Get freelancer profile with photo"""
+    conn = sqlite3.connect("freelancer.db")
+    conn.row_factory = sqlite3.Row
+    cur = conn.cursor()
+    
+    cur.execute("""
+        SELECT f.id, f.name, f.email, f.profile_image,
+               fp.title, fp.skills, fp.experience, fp.min_budget, fp.max_budget,
+               fp.rating, fp.category, fp.bio
+        FROM freelancer f
+        LEFT JOIN freelancer_profile fp ON fp.freelancer_id = f.id
+        WHERE f.id = ?
+    """, (freelancer_id,))
+    
+    row = cur.fetchone()
+    conn.close()
+    
+    if not row:
+        return jsonify({"success": False, "msg": "Freelancer not found"}), 404
+    
+    return jsonify({
+        "success": True,
+        "freelancer_id": row["id"],
+        "name": row["name"],
+        "email": row["email"],
+        "profile_image": row["profile_image"],
+        "title": row["title"],
+        "skills": row["skills"],
+        "experience": row["experience"],
+        "min_budget": row["min_budget"],
+        "max_budget": row["max_budget"],
+        "rating": row["rating"],
+        "category": row["category"],
+        "bio": row["bio"]
+    })
+
+# ============================================================
+# NEW CODE: PORTFOLIO SYSTEM
+# ============================================================
+
+@app.route("/freelancer/portfolio/add", methods=["POST"])
+def add_portfolio_item():
+    """NEW CODE: Add portfolio item for freelancer"""
+    d = get_json()
+    missing = require_fields(d, ["freelancer_id", "title", "description", "image_path"])
+    if missing:
+        return jsonify({"success": False, "msg": "Missing fields"}), 400
+    
+    freelancer_id = int(d["freelancer_id"])
+    title = str(d["title"]).strip()
+    description = str(d["description"]).strip()
+    image_path = str(d["image_path"]).strip()
+    
+    # Validate freelancer exists
+    conn = sqlite3.connect("freelancer.db")
+    cur = conn.cursor()
+    cur.execute("SELECT id FROM freelancer WHERE id=?", (freelancer_id,))
+    if not cur.fetchone():
+        conn.close()
+        return jsonify({"success": False, "msg": "Freelancer not found"}), 404
+    
+    # Copy image to uploads
+    uploaded_path = copy_image_to_uploads(image_path)
+    if not uploaded_path:
+        conn.close()
+        return jsonify({"success": False, "msg": "Failed to upload image"}), 400
+    
+    # Insert portfolio item
+    cur.execute("""
+        INSERT INTO portfolio (freelancer_id, title, description, image_path, created_at)
+        VALUES (?, ?, ?, ?, ?)
+    """, (freelancer_id, title, description, uploaded_path, now_ts()))
+    
+    portfolio_id = cur.lastrowid
+    conn.commit()
+    conn.close()
+    
+    return jsonify({"success": True, "portfolio_id": portfolio_id})
+
+@app.route("/freelancer/portfolio/<int:freelancer_id>", methods=["GET"])
+def get_freelancer_portfolio(freelancer_id):
+    """NEW CODE: Get all portfolio items for a freelancer"""
+    conn = sqlite3.connect("freelancer.db")
+    conn.row_factory = sqlite3.Row
+    cur = conn.cursor()
+    
+    cur.execute("""
+        SELECT id, title, description, image_path, created_at
+        FROM portfolio
+        WHERE freelancer_id = ?
+        ORDER BY created_at DESC
+    """, (freelancer_id,))
+    
+    rows = cur.fetchall()
+    conn.close()
+    
+    portfolio_items = []
+    for row in rows:
+        portfolio_items.append({
+            "portfolio_id": row["id"],
+            "title": row["title"],
+            "description": row["description"],
+            "image_path": row["image_path"],
+        })
+    
+    return jsonify({"success": True, "portfolio_items": portfolio_items})
+
+# ============================================================
+# ===== NEW: AI Recommendation Engine =====
+# ============================================================
+
+@app.route("/freelancers/recommend", methods=["POST"])
+def recommend_freelancers():
+    """NEW CODE: AI-powered freelancer recommendation engine"""
+    d = get_json()
+    missing = require_fields(d, ["category", "budget"])
+    if missing:
+        return jsonify({"success": False, "msg": "Missing fields"}), 400
+    
+    category = str(d["category"]).strip()
+    budget = float(d["budget"])
+    
+    # Fetch all freelancers with profile data
+    conn = sqlite3.connect("freelancer.db")
+    conn.row_factory = sqlite3.Row
+    cur = conn.cursor()
+    
+    cur.execute("""
+        SELECT f.id, f.name,
+               COALESCE(fp.title, '') as title,
+               COALESCE(fp.skills, '') as skills,
+               COALESCE(fp.experience, 0) as experience,
+               COALESCE(fp.min_budget, 0) as min_budget,
+               COALESCE(fp.max_budget, 0) as max_budget,
+               COALESCE(fp.rating, 0) as rating,
+               COALESCE(fp.category, '') as category,
+               COALESCE(fp.total_projects, 0) as total_projects
+        FROM freelancer f
+        LEFT JOIN freelancer_profile fp ON fp.freelancer_id = f.id
+        WHERE fp.category IS NOT NULL AND fp.category != ''
+        ORDER BY f.id DESC
+    """)
+    
+    rows = cur.fetchall()
+    conn.close()
+    
+    recommendations = []
+    
+    for row in rows:
+        score = 0.0
+        
+        # Category match (+20 points)
+        if row["category"].lower() == category.lower():
+            score += 20
+        
+        # Budget match (+20 points)
+        if row["min_budget"] <= budget <= row["max_budget"]:
+            score += 20
+        
+        # Rating weight (rating * 10)
+        score += row["rating"] * 10
+        
+        # Experience weight (experience * 2)
+        score += row["experience"] * 2
+        
+        # Job success percentage
+        if row["total_projects"] > 0:
+            # Calculate completed jobs from hire_request table
+            conn = sqlite3.connect("freelancer.db")
+            cur = conn.cursor()
+            cur.execute("""
+                SELECT COUNT(*) FROM hire_request 
+                WHERE freelancer_id = ? AND status = 'ACCEPTED'
+            """, (row["id"],))
+            completed_jobs = cur.fetchone()[0]
+            
+            cur.execute("""
+                SELECT COUNT(*) FROM hire_request 
+                WHERE freelancer_id = ? AND status IN ('ACCEPTED', 'REJECTED', 'PENDING')
+            """, (row["id"],))
+            total_jobs = cur.fetchone()[0]
+            conn.close()
+            
+            if total_jobs > 0:
+                success_percentage = (completed_jobs / total_jobs) * 100
+                score += success_percentage * 0.3
+        
+        # Create recommendation entry
+        recommendations.append({
+            "freelancer_id": row["id"],
+            "name": row["name"],
+            "category": row["category"],
+            "rating": row["rating"],
+            "experience": row["experience"],
+            "budget_range": f"{row['min_budget']} - {row['max_budget']}",
+            "match_score": round(score, 1)
+        })
+    
+    # Sort by score descending and return top 5
+    recommendations.sort(key=lambda x: x["match_score"], reverse=True)
+    top_recommendations = recommendations[:5]
+    
+    return jsonify(top_recommendations)
 
 # ============================================================
 # RUN
