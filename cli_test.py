@@ -779,11 +779,14 @@ def client_flow():
                 print(" Phone must be 10 digits")
                 print("❌ Phone must be 10 digits")
 
+            pincode = input("PIN Code (6 digits): ")
+
             res = requests.post(f"{BASE_URL}/client/profile", json={
                 "client_id": current_client_id,
                 "phone": phone,
                 "location": input("Location: "),
-                "bio": input("Bio: ")
+                "bio": input("Bio: "),
+                "pincode": pincode
             })
             print(res.json())
 
@@ -834,7 +837,8 @@ def client_flow():
 
             res = requests.get(f"{BASE_URL}/freelancers/search", params={
                 "category": category,
-                "budget": budget
+                "budget": budget,
+                "client_id": current_client_id
             })
 
             data = res.json()
@@ -1017,15 +1021,26 @@ def freelancer_flow():
             print("- Content Creator")
 
             try:
+                title = input("Title: ")
+                skills = input("Skills: ")
+                experience = int(input("Experience (years): "))
+                min_budget = float(input("Min Budget: "))
+                max_budget = float(input("Max Budget: "))
+                bio = input("Bio: ")
+                pincode = input("PIN Code (6 digits): ")
+                location = input("Location: ")
+                category = input("Category (choose from above): ")
                 res = requests.post(f"{BASE_URL}/freelancer/profile", json={
                     "freelancer_id": current_freelancer_id,
-                    "title": input("Title: "),
-                    "skills": input("Skills: "),
-                    "experience": int(input("Experience (years): ")),
-                    "min_budget": float(input("Min Budget: ")),
-                    "max_budget": float(input("Max Budget: ")),
-                    "bio": input("Bio: "),
-                    "category": input("Category (choose from above): ")
+                    "title": title,
+                    "skills": skills,
+                    "experience": experience,
+                    "min_budget": min_budget,
+                    "max_budget": max_budget,
+                    "bio": bio,
+                    "pincode": pincode,
+                    "location": location,
+                    "category": category
                 })
                 print(res.json())
             except Exception:
@@ -1301,10 +1316,19 @@ def freelancer_flow():
                         data = res.json()
                         if data.get("success") and data.get("portfolio_items"):
                             print("\n--- MY PORTFOLIO ---")
+                            # ===== UPDATED: STORE PORTFOLIO IMAGE AS BLOB =====
                             for item in data["portfolio_items"]:
                                 print(f"\n📁 {item['title']}")
                                 print(f"   Description: {item['description']}")
-                                print(f"   Image: {item['image_path']}")
+                                
+                                # Display image info based on storage type
+                                if "image_base64" in item:
+                                    print("   Image: stored in database (BLOB)")
+                                elif "image_path" in item:
+                                    print(f"   Image: {item['image_path']}")
+                                else:
+                                    print("   Image: not available")
+                                    
                                 print(f"   Added: {item['created_at']}")
                         else:
                             print("📭 No portfolio items found")

@@ -77,6 +77,76 @@ def valid_email(email):
     return ("@" in email) and ("." in email)
 
 # ============================================================
+# GEO HELPERS
+# ============================================================
+
+def geocode_address(address: str):
+    address = (address or "").strip()
+    if not address:
+        return None, None
+    try:
+        resp = requests.get(
+            "https://nominatim.openstreetmap.org/search",
+            params={"q": address, "format": "json", "limit": 1},
+            headers={"User-Agent": "GigBridge/1.0 (contact: support@gigbridge.local)"},
+            timeout=8,
+        )
+        if resp.status_code != 200:
+            return None, None
+        data = resp.json()
+        if not data:
+            return None, None
+        lat = float(data[0]["lat"])
+        lon = float(data[0]["lon"])
+        return lat, lon
+    except Exception:
+        return None, None
+
+def geocode_pincode(pincode: str, location_hint: str = None):
+    pincode = (pincode or "").strip()
+    if not pincode:
+        return None, None
+    try:
+        hint = (location_hint or "").strip()
+        if hint:
+            q = f"{pincode}, {hint}, India"
+        else:
+            q = f"{pincode}, Mumbai, India"
+        resp = requests.get(
+            "https://nominatim.openstreetmap.org/search",
+            params={"q": q, "format": "json", "limit": 1},
+            headers={"User-Agent": "GigBridge/1.0 (contact: support@gigbridge.local)"},
+            timeout=8,
+        )
+        if resp.status_code != 200:
+            print(f"[geo] Nominatim HTTP {resp.status_code} for pincode={pincode} hint={hint}")
+            return None, None
+        data = resp.json()
+        if not data:
+            print(f"[geo] No results from Nominatim for pincode={pincode} hint={hint}")
+            return None, None
+        lat = float(data[0]["lat"])
+        lon = float(data[0]["lon"])
+        return lat, lon
+    except Exception as e:
+        print(f"[geo] Exception geocoding pincode={pincode}: {e}")
+        return None, None
+
+def calculate_distance(lat1, lon1, lat2, lon2):
+    try:
+        import math
+        R = 6371.0
+        phi1 = math.radians(float(lat1))
+        phi2 = math.radians(float(lat2))
+        d_phi = math.radians(float(lat2) - float(lat1))
+        d_lambda = math.radians(float(lon2) - float(lon1))
+        a = math.sin(d_phi / 2) ** 2 + math.cos(phi1) * math.cos(phi2) * math.sin(d_lambda / 2) ** 2
+        c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+        return R * c
+    except Exception:
+        return 999999.0
+
+# ============================================================
 # EMAIL HELPERS
 # ============================================================
 
@@ -460,15 +530,28 @@ def client_profile():
     missing = require_fields(d, ["client_id", "phone", "location", "bio"])
     if missing:
         return jsonify({"success": False, "msg": "Missing fields"}), 400
+    pincode = str(d.get("pincode", "") or "").strip()
+    lat = lon = None
+    if pincode:
+        if (len(pincode) != 6) or (not pincode.isdigit()):
+            return jsonify({"success": False, "msg": "Invalid pincode"}), 400
+        lat, lon = geocode_pincode(pincode, d.get("location"))
+    if (lat is None or lon is None) and d.get("location"):
+        lat, lon = geocode_address(d["location"])
 
     conn = sqlite3.connect("client.db")
     cur = conn.cursor()
     cur.execute("""
-        INSERT INTO client_profile (client_id, phone, location, bio)
-        VALUES (?, ?, ?, ?)
+        INSERT INTO client_profile (client_id, phone, location, bio, pincode, latitude, longitude)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(client_id) DO UPDATE SET
-        phone=excluded.phone, location=excluded.location, bio=excluded.bio
-    """, (d["client_id"], d["phone"], d["location"], d["bio"]))
+        phone=excluded.phone,
+        location=excluded.location,
+        bio=excluded.bio,
+        pincode=excluded.pincode,
+        latitude=excluded.latitude,
+        longitude=excluded.longitude
+    """, (d["client_id"], d["phone"], d["location"], d["bio"], pincode, lat, lon))
     conn.commit()
     conn.close()
 
@@ -487,19 +570,31 @@ def client_profile():
 @app.route("/freelancer/profile", methods=["POST"])
 def freelancer_profile():
     d = get_json()
-    missing = require_fields(d, ["freelancer_id","title","skills","experience","min_budget","max_budget","bio","category"])
+    missing = require_fields(d, ["freelancer_id","title","skills","experience","min_budget","max_budget","bio","category","location"])
     if missing:
         return jsonify({"success": False, "msg": "Missing fields"}), 400
 
     if not is_valid_category(d["category"]):
         return jsonify({"success": False, "msg": "Invalid category"}), 400
 
+    # Optional location support for geocoding
+    lat, lon = (None, None)
+    pincode = str(d.get("pincode", "") or "").strip()
+    if pincode:
+        if (len(pincode) != 6) or (not pincode.isdigit()):
+            return jsonify({"success": False, "msg": "Invalid pincode"}), 400
+        lat, lon = geocode_pincode(pincode, d.get("location"))
+    loc_str = d.get("location")
+    if loc_str:
+        if lat is None or lon is None:
+            lat, lon = geocode_address(str(loc_str))
+
     conn = sqlite3.connect("freelancer.db")
     cur = conn.cursor()
     cur.execute("""
         INSERT INTO freelancer_profile
-        (freelancer_id,title,skills,experience,min_budget,max_budget,bio,category)
-        VALUES (?,?,?,?,?,?,?,?)
+        (freelancer_id,title,skills,experience,min_budget,max_budget,bio,category,location,pincode,latitude,longitude)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
         ON CONFLICT(freelancer_id) DO UPDATE SET
         title=excluded.title,
         skills=excluded.skills,
@@ -507,11 +602,15 @@ def freelancer_profile():
         min_budget=excluded.min_budget,
         max_budget=excluded.max_budget,
         bio=excluded.bio,
-        category=excluded.category
+        category=excluded.category,
+        location=excluded.location,
+        pincode=excluded.pincode,
+        latitude=excluded.latitude,
+        longitude=excluded.longitude
     """, (
         d["freelancer_id"], d["title"], d["skills"],
         int(d["experience"]), float(d["min_budget"]), float(d["max_budget"]),
-        d["bio"], d["category"]
+        d["bio"], d["category"], d["location"], pincode, lat, lon
     ))
     conn.commit()
     conn.close()
@@ -531,6 +630,22 @@ def freelancers_search():
     except (ValueError, TypeError):
         return jsonify({"success": False, "msg": "Invalid budget"}), 400
 
+    # Optional client_id for location-based sorting
+    client_id = request.args.get("client_id")
+    client_lat = client_lon = None
+    if client_id:
+        try:
+            cid = int(client_id)
+            cconn = sqlite3.connect("client.db")
+            ccur = cconn.cursor()
+            ccur.execute("SELECT latitude, longitude FROM client_profile WHERE client_id=?", (cid,))
+            row = ccur.fetchone()
+            cconn.close()
+            if row:
+                client_lat, client_lon = row[0], row[1]
+        except Exception:
+            client_lat = client_lon = None
+
     conn = sqlite3.connect("freelancer.db")
     cur = conn.cursor()
     cur.execute("""
@@ -543,7 +658,9 @@ def freelancers_search():
             fp.min_budget,
             fp.max_budget,
             fp.rating,
-            fp.category
+            fp.category,
+            fp.latitude,
+            fp.longitude
         FROM freelancer_profile fp
         JOIN freelancer f ON f.id = fp.freelancer_id
         WHERE fp.min_budget <= ?
@@ -553,11 +670,16 @@ def freelancers_search():
     rows = cur.fetchall()
     conn.close()
 
-    results = []
+    enriched = []
     for r in rows:
         if category and (category != str(r[8]).strip().lower()):
             continue
-        results.append({
+        f_lat, f_lon = r[9], r[10]
+        if (client_lat is not None) and (client_lon is not None) and (f_lat is not None) and (f_lon is not None):
+            dist = calculate_distance(client_lat, client_lon, f_lat, f_lon)
+        else:
+            dist = 999999.0
+        enriched.append({
             "freelancer_id": r[0],
             "name": r[1],
             "title": r[2],
@@ -566,8 +688,10 @@ def freelancers_search():
             "budget_range": f"{r[5]} - {r[6]}",
             "rating": r[7],
             "category": r[8],
+            "distance": round(dist, 2)
         })
-    return jsonify({"success": True, "results": results})
+    enriched.sort(key=lambda x: x["distance"])
+    return jsonify({"success": True, "results": enriched})
 # NEW: VIEW ALL FREELANCERS (even if client didn’t search)
 # ============================================================
 
@@ -1801,17 +1925,20 @@ def add_portfolio_item():
         conn.close()
         return jsonify({"success": False, "msg": "Freelancer not found"}), 404
     
-    # Copy image to uploads
-    uploaded_path = copy_image_to_uploads(image_path)
-    if not uploaded_path:
+    # ===== UPDATED: STORE PORTFOLIO IMAGE AS BLOB =====
+    # Read image file as binary data instead of copying to uploads folder
+    try:
+        with open(image_path, "rb") as f:
+            image_binary = f.read()
+    except Exception as e:
         conn.close()
-        return jsonify({"success": False, "msg": "Failed to upload image"}), 400
+        return jsonify({"success": False, "msg": f"Failed to read image file: {str(e)}"}), 400
     
-    # Insert portfolio item
+    # Insert portfolio item with BLOB data
     cur.execute("""
-        INSERT INTO portfolio (freelancer_id, title, description, image_path, created_at)
-        VALUES (?, ?, ?, ?, ?)
-    """, (freelancer_id, title, description, uploaded_path, now_ts()))
+        INSERT INTO portfolio (freelancer_id, title, description, image_path, image_data, created_at)
+        VALUES (?, ?, ?, ?, ?, ?)
+    """, (freelancer_id, title, description, image_path, image_binary, now_ts()))
     
     portfolio_id = cur.lastrowid
     conn.commit()
@@ -1826,8 +1953,9 @@ def get_freelancer_portfolio(freelancer_id):
     conn.row_factory = sqlite3.Row
     cur = conn.cursor()
     
+    # ===== UPDATED: STORE PORTFOLIO IMAGE AS BLOB =====
     cur.execute("""
-        SELECT id, title, description, image_path, created_at
+        SELECT id, title, description, image_path, image_data, created_at
         FROM portfolio
         WHERE freelancer_id = ?
         ORDER BY created_at DESC
@@ -1836,15 +1964,25 @@ def get_freelancer_portfolio(freelancer_id):
     rows = cur.fetchall()
     conn.close()
     
+    import base64
+    
     portfolio_items = []
     for row in rows:
-        portfolio_items.append({
+        item_data = {
             "portfolio_id": row["id"],
             "title": row["title"],
             "description": row["description"],
-            "image_path": row["image_path"],
             "created_at": row["created_at"]
-        })
+        }
+        
+        # Return image as Base64 if BLOB data exists, otherwise fallback to image_path
+        if row["image_data"] is not None:
+            encoded_image = base64.b64encode(row["image_data"]).decode("utf-8")
+            item_data["image_base64"] = encoded_image
+        else:
+            item_data["image_path"] = row["image_path"]
+        
+        portfolio_items.append(item_data)
     
     return jsonify({"success": True, "portfolio_items": portfolio_items})
 

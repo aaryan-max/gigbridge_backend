@@ -46,6 +46,10 @@ def create_tables():
         bio TEXT
     )
     """)
+    _try_add_column(cur, "client_profile", "pincode TEXT")
+    # Add geolocation columns (safe, idempotent)
+    _try_add_column(cur, "client_profile", "latitude REAL")
+    _try_add_column(cur, "client_profile", "longitude REAL")
 
     cur.execute("""
     CREATE TABLE IF NOT EXISTS client_otp (
@@ -107,6 +111,11 @@ def create_tables():
         category TEXT
     )
     """)
+    _try_add_column(cur, "freelancer_profile", "location TEXT")
+    _try_add_column(cur, "freelancer_profile", "pincode TEXT")
+    # Add geolocation columns (safe, idempotent)
+    _try_add_column(cur, "freelancer_profile", "latitude REAL")
+    _try_add_column(cur, "freelancer_profile", "longitude REAL")
 
     cur.execute("""
     CREATE TABLE IF NOT EXISTS freelancer_otp (
@@ -181,6 +190,10 @@ def create_tables():
         created_at INTEGER
     )
     """)
+    
+    # ===== UPDATED: STORE PORTFOLIO IMAGE AS BLOB =====
+    # Add image_data column for BLOB storage while keeping image_path for backward compatibility
+    _try_add_column(cur, "portfolio", "image_data BLOB")
 
     # ---------- CALL SESSION ----------
     cur.execute("""
