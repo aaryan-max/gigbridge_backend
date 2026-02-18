@@ -59,6 +59,16 @@ def create_tables():
     )
     """)
 
+    # ---------- NOTIFICATIONS (client side) ----------
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS notification (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        client_id INTEGER,
+        message TEXT,
+        created_at INTEGER
+    )
+    """)
+
     # ---------- CALL SESSION ----------
     cur.execute("""
     CREATE TABLE IF NOT EXISTS call_session (

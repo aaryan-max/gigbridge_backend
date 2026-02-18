@@ -256,7 +256,7 @@ def client_send_otp():
     except:
         pass
 
-    return jsonify({"success": True})
+    return jsonify({"success": True, "msg": "OTP sent"})
 
 @app.route("/client/verify-otp", methods=["POST"])
 def client_verify_otp():
@@ -344,7 +344,7 @@ def freelancer_send_otp():
     except:
         pass
 
-    return jsonify({"success": True})
+    return jsonify({"success": True, "msg": "OTP sent"})
 
 @app.route("/freelancer/verify-otp", methods=["POST"])
 def freelancer_verify_otp():
@@ -555,15 +555,15 @@ def client_profile():
     conn.commit()
     conn.close()
 
-    # Add notification
-    conn = sqlite3.connect("freelancer.db")
-    cur = conn.cursor()
-    cur.execute("""
+    # Add notification (store in client.db)
+    c2 = sqlite3.connect("client.db")
+    cur2 = c2.cursor()
+    cur2.execute("""
         INSERT INTO notification (client_id, message, created_at)
         VALUES (?, ?, ?)
     """, (d["client_id"], "Profile updated successfully", now_ts()))
-    conn.commit()
-    conn.close()
+    c2.commit()
+    c2.close()
 
     return jsonify({"success": True})
 
@@ -800,15 +800,19 @@ def client_send_message():
         VALUES (?, ?, ?, ?, ?)
     """, ("client", int(d["client_id"]), int(d["freelancer_id"]), str(d["text"]), now_ts()))
 
-    # Add notification - get freelancer name
+    # Add notification for client in client.db - get freelancer name
     cur.execute("SELECT name FROM freelancer WHERE id=?", (int(d["freelancer_id"]),))
     freelancer_row = cur.fetchone()
     freelancer_name = freelancer_row[0] if freelancer_row else "Freelancer"
     
-    cur.execute("""
+    cconn = sqlite3.connect("client.db")
+    ccur = cconn.cursor()
+    ccur.execute("""
         INSERT INTO notification (client_id, message, created_at)
         VALUES (?, ?, ?)
     """, (int(d["client_id"]), f"You messaged {freelancer_name}", now_ts()))
+    cconn.commit()
+    cconn.close()
 
     conn.commit()
     conn.close()
@@ -896,12 +900,16 @@ def client_hire():
     """, (client_id, freelancer_id, job_title, proposed_budget, note, now_ts()))
     req_id = cur.lastrowid
 
-    # Add notification
+    # Add notification for client in client.db
     notification_msg = f'Job "{job_title if job_title else "Untitled"}" posted'
-    cur.execute("""
+    cconn = sqlite3.connect("client.db")
+    ccur = cconn.cursor()
+    ccur.execute("""
         INSERT INTO notification (client_id, message, created_at)
         VALUES (?, ?, ?)
     """, (client_id, notification_msg, now_ts()))
+    cconn.commit()
+    cconn.close()
 
     conn.commit()
     conn.close()
@@ -1214,7 +1222,7 @@ def client_notifications():
         return jsonify({"success": False, "msg": "Invalid client_id"}), 400
 
     try:
-        conn = sqlite3.connect("freelancer.db")
+        conn = sqlite3.connect("client.db")
         cur = conn.cursor()
         cur.execute("""
             SELECT message
