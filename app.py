@@ -405,7 +405,7 @@ def client_login():
     d = get_json()
     missing = require_fields(d, ["email", "password"])
     if missing:
-        return jsonify({}), 400
+        return jsonify({"success": False, "msg": "Missing fields"}), 400
 
     email = str(d["email"]).strip().lower()
     password = str(d["password"])
@@ -421,16 +421,16 @@ def client_login():
             send_login_email(email, row[2], "Client", "login")
         except:
             pass
-        return jsonify({"client_id": row[0]})
+        return jsonify({"success": True, "client_id": row[0]})
 
-    return jsonify({})
+    return jsonify({"success": False, "msg": "Invalid credentials"})
 
 @app.route("/freelancer/login", methods=["POST"])
 def freelancer_login():
     d = get_json()
     missing = require_fields(d, ["email", "password"])
     if missing:
-        return jsonify({}), 400
+        return jsonify({"success": False, "msg": "Missing fields"}), 400
 
     email = str(d["email"]).strip().lower()
     password = str(d["password"])
@@ -446,9 +446,9 @@ def freelancer_login():
             send_login_email(email, row[2], "Freelancer", "login")
         except:
             pass
-        return jsonify({"freelancer_id": row[0]})
+        return jsonify({"success": True, "freelancer_id": row[0]})
 
-    return jsonify({})
+    return jsonify({"success": False, "msg": "Invalid credentials"})
 
 # ============================================================
 # PROFILES
@@ -524,7 +524,12 @@ def freelancer_profile():
 @app.route("/freelancers/search", methods=["GET"])
 def freelancers_search():
     category = (request.args.get("category", "") or "").strip().lower()
-    budget = float(request.args.get("budget", 0))
+    
+    # Safe budget conversion
+    try:
+        budget = float(request.args.get("budget", 0))
+    except (ValueError, TypeError):
+        return jsonify({"success": False, "msg": "Invalid budget"}), 400
 
     conn = sqlite3.connect("freelancer.db")
     cur = conn.cursor()
@@ -562,7 +567,7 @@ def freelancers_search():
             "rating": r[7],
             "category": r[8],
         })
-    return jsonify(results)
+    return jsonify({"success": True, "results": results})
 # NEW: VIEW ALL FREELANCERS (even if client didn’t search)
 # ============================================================
 
@@ -604,7 +609,7 @@ def freelancers_all():
             "category": r["category"],
             "bio": r["bio"],
         })
-    return jsonify(out)
+    return jsonify({"success": True, "results": out})
 
 @app.route("/freelancers/<int:freelancer_id>", methods=["GET"])
 def freelancer_details(freelancer_id: int):
@@ -647,6 +652,11 @@ def freelancer_details(freelancer_id: int):
         "category": r[9],
         "bio": r[10],
     })
+
+@app.route("/freelancer/profile/<int:freelancer_id>", methods=["GET"])
+def freelancer_profile_alias(freelancer_id: int):
+    """Alias route for freelancer profile - calls existing function"""
+    return freelancer_details(freelancer_id)
 
 # ============================================================
 # NEW: CHAT (Client <-> Freelancer)
@@ -1993,17 +2003,23 @@ def start_call():
         "room_name": room_name
     })
 
-@app.route("/call/incoming", methods=["GET"])
+@app.route("/call/incoming", methods=["GET", "POST"])
 def get_incoming_calls():
     """NEW CODE: Get incoming calls for a user"""
-    role = request.args.get("role")
-    user_id = request.args.get("user_id")
+    # Support both GET and POST methods
+    if request.method == "GET":
+        receiver_role = request.args.get("receiver_role")
+        receiver_id = request.args.get("receiver_id")
+    else:  # POST
+        data = request.get_json() or {}
+        receiver_role = data.get("receiver_role")
+        receiver_id = data.get("receiver_id")
     
-    if not role or not user_id:
+    if not receiver_role or not receiver_id:
         return jsonify({"success": False, "msg": "Missing parameters"}), 400
     
     try:
-        user_id = int(user_id)
+        receiver_id = int(receiver_id)
     except ValueError:
         return jsonify({"success": False, "msg": "Invalid user ID"}), 400
     
@@ -2016,7 +2032,7 @@ def get_incoming_calls():
         FROM call_session
         WHERE receiver_role = ? AND receiver_id = ? AND status = 'PENDING'
         ORDER BY created_at DESC
-    """, (role, user_id))
+    """, (receiver_role, receiver_id))
     
     rows = cur.fetchall()
     conn.close()

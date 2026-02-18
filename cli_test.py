@@ -57,10 +57,18 @@ def check_incoming_calls():
             role = "freelancer"
             user_id = current_freelancer_id
         
-        res = requests.get(f"{BASE_URL}/call/incoming", params={
-            "role": role,
-            "user_id": user_id
-        })
+        # Safe guard for user_id
+        if not user_id:
+            print("❌ Please login first")
+            return
+        
+        res = requests.get(
+            f"{BASE_URL}/call/incoming",
+            params={
+                "receiver_role": role,
+                "receiver_id": user_id
+            }
+        )
         
         data = res.json()
         if data.get("success") and data.get("calls"):
@@ -71,6 +79,8 @@ def check_incoming_calls():
                 print(f"   Room: {call['room_name']}")
                 print("1. Accept")
                 print("2. Reject")
+                print("3. Skip this call")
+                print("4. Back to Dashboard")
                 
                 action = input("Choose: ")
                 if action == "1":
@@ -89,6 +99,15 @@ def check_incoming_calls():
                         "action": "reject"
                     })
                     print("❌ Call rejected")
+                elif action == "3":
+                    print("⏭️ Call skipped")
+                    continue
+                elif action == "4":
+                    print("🔙 Returning to dashboard...")
+                    return
+                else:
+                    print("❌ Invalid choice, skipping call")
+                    continue
         else:
             print("📭 No incoming calls")
     except Exception as e:
@@ -738,16 +757,17 @@ def client_flow():
 
     while True:
         print("\n--- CLIENT DASHBOARD ---")
-        print("1. Create / Update Profile")
-        print("2. View All Freelancers")
-        print("3. Search Freelancers")
-        print("4. Recommended Freelancers (AI)")
-        print("5. View My Jobs")
-        print("6. Saved Freelancers")
-        print("7. Notifications")
-        print("8. Messages")
-        print("9. Job Request Status")
-        print("10. Exit")
+        print("1. Create/Update")
+        print("2. View All")
+        print("3. Search")
+        print("4. View My Jobs")
+        print("5. Saved Freelancers")
+        print("6. Notifications")
+        print("7. Messages")
+        print("8. Job Request Status")
+        print("9. Recommended Freelancers (AI)")
+        print("10. Check Incoming Calls ")
+        print("11. Exit")
 
         choice = input("Choose: ")
         
@@ -769,7 +789,12 @@ def client_flow():
 
         elif choice == "2":
             res = requests.get(f"{BASE_URL}/freelancers/all")
-            freelancers = res.json()
+            data = res.json()
+            if not data.get("success"):
+                print("❌ Error fetching freelancers:", data.get("msg", "Unknown error"))
+                continue
+            
+            freelancers = data.get("results", [])
             if not freelancers:
                 print("❌ No freelancers found")
                 continue
@@ -812,7 +837,12 @@ def client_flow():
                 "budget": budget
             })
 
-            freelancers = res.json()
+            data = res.json()
+            if not data.get("success"):
+                print("❌ Error searching freelancers:", data.get("msg", "Unknown error"))
+                continue
+
+            freelancers = data.get("results", [])
             if not freelancers:
                 print("❌ No freelancers found")
                 continue
@@ -847,9 +877,6 @@ def client_flow():
                     print(res.json())
 
         elif choice == "4":
-            client_ai_recommendations()
-
-        elif choice == "5":
             res = requests.get(f"{BASE_URL}/client/jobs", params={
                 "client_id": current_client_id
             })
@@ -864,8 +891,7 @@ def client_flow():
             except:
                 print("❌ Error fetching jobs")
 
-        elif choice == "6":
-            # Saved Freelancers - FIXED: This was incorrectly calling Notifications
+        elif choice == "5":
             res = requests.get(f"{BASE_URL}/client/saved-freelancers", params={
                 "client_id": current_client_id
             })
@@ -883,8 +909,7 @@ def client_flow():
             except Exception as e:
                 print("❌ Error fetching saved freelancers:", str(e))
 
-        elif choice == "7":
-            # Notifications - FIXED: This was incorrectly calling Messages
+        elif choice == "6":
             res = requests.get(f"{BASE_URL}/client/notifications", params={
                 "client_id": current_client_id
             })
@@ -899,8 +924,7 @@ def client_flow():
             except Exception as e:
                 print("❌ Error getting recommendations:", str(e))
 
-        elif choice == "8":
-            # Messages - FIXED: This was incorrectly calling Job Request Status
+        elif choice == "7":
             res = requests.get(f"{BASE_URL}/client/messages/threads", params={
                 "client_id": current_client_id
             })
@@ -943,11 +967,16 @@ def client_flow():
                     elif msg_choice == "4":
                         start_call("client", thread['freelancer_id'], "video")
 
-        elif choice == "9":
-            # Job Request Status - FIXED: Remove duplicate, keep only this one
+        elif choice == "8":
             client_job_request_status_menu()
 
+        elif choice == "9":
+            client_ai_recommendations()
+
         elif choice == "10":
+            check_incoming_calls()
+
+        elif choice == "11":
             break
 
 # ---------- FREELANCER FLOW ----------
@@ -961,16 +990,18 @@ def freelancer_flow():
 
     while True:
         print("\n--- FREELANCER DASHBOARD ---")
-        print("1. Create / Update Profile")
-        print("2. View Hire Requests (Inbox)")
+        print("1. Create/Update Profile")
+        print("2. View Hire Requests")
         print("3. Manage Active Jobs")
         print("4. Messages")
-        print("5. Earnings & Performance")
+        print("5. Earnings")
         print("6. Saved Clients")
-        print("7. Manage Portfolio")
-        print("8. Account Settings")
-        print("9. Notifications / Activity")
-        print("10. Exit")
+        print("7. Account Settings")
+        print("8. Notifications")
+        print("9. Manage Portfolio")
+        print("10. Upload Profile Photo")
+        print("11. Check Incoming Calls 📞")
+        print("12. Exit")
 
         choice = input("Choose: ")
 
@@ -1174,13 +1205,72 @@ def freelancer_flow():
                     elif a == "3":
                         start_call("freelancer", c["client_id"], "video")
 
+        # 7️⃣ Account Settings
         elif choice == "7":
+            while True:
+                print("\n--- ACCOUNT SETTINGS ---")
+                print("1. Change Password")
+                print("2. Update Email")
+                print("3. Notification Settings (UI only)")
+                print("4. Logout")
+                print("5. Back")
+                a = input("Choose: ")
+
+                if a == "1":
+                    old_pwd = input("Old Password: ")
+                    new_pwd = input("New Password: ")
+                    try:
+                        res = requests.post(f"{BASE_URL}/freelancer/change-password", json={
+                            "freelancer_id": current_freelancer_id,
+                            "old_password": old_pwd,
+                            "new_password": new_pwd
+                        })
+                        print(res.json())
+                    except Exception:
+                        print("❌ Failed to change password")
+                elif a == "2":
+                    new_email = input("New Email: ")
+                    try:
+                        res = requests.post(f"{BASE_URL}/freelancer/update-email", json={
+                            "freelancer_id": current_freelancer_id,
+                            "new_email": new_email
+                        })
+                        print(res.json())
+                    except Exception:
+                        print("❌ Failed to update email")
+                elif a == "3":
+                    print("ℹ Notification settings are UI-only for now.")
+                elif a == "4":
+                    current_freelancer_id = None
+                    print("✅ Logged out")
+                    return
+                elif a == "5":
+                    break
+
+        # 8️⃣ Notifications / Activity
+        elif choice == "8":
+            try:
+                res = requests.get(f"{BASE_URL}/freelancer/notifications", params={
+                    "freelancer_id": current_freelancer_id
+                })
+                notes = res.json()
+            except Exception:
+                notes = []
+
+            print("\n--- NOTIFICATIONS / ACTIVITY ---")
+            if not notes:
+                print("📭 No recent activity")
+            else:
+                for n in notes:
+                    print("✔", n)
+
+        # 9️⃣ Manage Portfolio
+        elif choice == "9":
             while True:
                 print("\n--- MANAGE PORTFOLIO ---")
                 print("1. Add Portfolio Item")
                 print("2. View My Portfolio")
-                print("3. Upload Profile Photo")
-                print("4. Back")
+                print("3. Back")
                 portfolio_choice = input("Choose: ")
                 
                 if portfolio_choice == "1":
@@ -1222,86 +1312,31 @@ def freelancer_flow():
                         print("❌ Error fetching portfolio:", str(e))
                 
                 elif portfolio_choice == "3":
-                    # Upload Profile Photo
-                    image_path = input("Profile Photo Path (local file): ")
-                    try:
-                        res = requests.post(f"{BASE_URL}/freelancer/upload-photo", json={
-                            "freelancer_id": current_freelancer_id,
-                            "image_path": image_path
-                        })
-                        result = res.json()
-                        if result.get("success"):
-                            print("✅ Profile photo uploaded successfully!")
-                            print(f"📁 Saved to: {result.get('image_path')}")
-                        else:
-                            print("❌ Failed to upload photo:", result.get("msg"))
-                    except Exception as e:
-                        print("❌ Error uploading photo:", str(e))
-                
-                elif portfolio_choice == "4":
                     break
 
-        # 8️⃣ Account Settings
-        elif choice == "8":
-            while True:
-                print("\n--- ACCOUNT SETTINGS ---")
-                print("1. Change Password")
-                print("2. Update Email")
-                print("3. Notification Settings (UI only)")
-                print("4. Logout")
-                print("5. Back")
-                a = input("Choose: ")
-
-                if a == "1":
-                    old_pwd = input("Old Password: ")
-                    new_pwd = input("New Password: ")
-                    try:
-                        res = requests.post(f"{BASE_URL}/freelancer/change-password", json={
-                            "freelancer_id": current_freelancer_id,
-                            "old_password": old_pwd,
-                            "new_password": new_pwd
-                        })
-                        print(res.json())
-                    except Exception:
-                        print("❌ Failed to change password")
-                elif a == "2":
-                    new_email = input("New Email: ")
-                    try:
-                        res = requests.post(f"{BASE_URL}/freelancer/update-email", json={
-                            "freelancer_id": current_freelancer_id,
-                            "new_email": new_email
-                        })
-                        print(res.json())
-                    except Exception:
-                        print("❌ Failed to update email")
-                elif a == "3":
-                    print("ℹ Notification settings are UI-only for now.")
-                elif a == "4":
-                    current_freelancer_id = None
-                    print("✅ Logged out")
-                    return
-                elif a == "5":
-                    break
-
-        # 9️⃣ Notifications / Activity
-        elif choice == "9":
-            try:
-                res = requests.get(f"{BASE_URL}/freelancer/notifications", params={
-                    "freelancer_id": current_freelancer_id
-                })
-                notes = res.json()
-            except Exception:
-                notes = []
-
-            print("\n--- NOTIFICATIONS / ACTIVITY ---")
-            if not notes:
-                print("📭 No recent activity")
-            else:
-                for n in notes:
-                    print("✔", n)
-
-        # 10️⃣ Exit
+        # 10️⃣ Upload Profile Photo
         elif choice == "10":
+            image_path = input("Profile Photo Path (local file): ")
+            try:
+                res = requests.post(f"{BASE_URL}/freelancer/upload-photo", json={
+                    "freelancer_id": current_freelancer_id,
+                    "image_path": image_path
+                })
+                result = res.json()
+                if result.get("success"):
+                    print("✅ Profile photo uploaded successfully!")
+                    print(f"📁 Saved to: {result.get('image_path')}")
+                else:
+                    print("❌ Failed to upload photo:", result.get("msg"))
+            except Exception as e:
+                print("❌ Error uploading photo:", str(e))
+
+        # 11️⃣ Check Incoming Calls
+        elif choice == "11":
+            check_incoming_calls()
+
+        # 12️⃣ Exit
+        elif choice == "12":
             break
 
 # ---------- MAIN MENU ----------
