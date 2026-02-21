@@ -10,6 +10,7 @@ import urllib.parse
 import shutil
 from email.message import EmailMessage
 from werkzeug.security import generate_password_hash, check_password_hash
+from llm_chatbot import generate_ai_response, PENDING_ACTIONS, execute_agent_action
 
 from database import create_tables
 from categories import is_valid_category
@@ -21,6 +22,11 @@ from categories import is_valid_category
 
 app = Flask(__name__)
 create_tables()
+
+# ============================================================
+# AGENT: PENDING ACTION MEMORY
+# ============================================================
+PENDING_ACTIONS = {}
 
 # ============================================================
 # EMAIL CONFIG
@@ -2244,6 +2250,113 @@ def end_call():
 # ============================================================
 # RUN
 # ============================================================
+
+@app.route("/ai/health", methods=["GET"])
+def ai_health():
+    try:
+        res = generate_ai_response(0, "__health__", "__ping__")
+        health = res.get("health") or {}
+        status_code = 200 if health.get("ollama") == "ok" else 503
+        return jsonify(health), status_code
+    except Exception:
+        return jsonify({"ollama": "down", "model": ""}), 503
+
+@app.route("/ai/chat", methods=["POST"])
+def ai_chat():
+    d = request.get_json() or {}
+    if not all(k in d for k in ("user_id", "role", "message")):
+        return jsonify({"success": False, "msg": "Missing fields"}), 400
+    try:
+        user_id = int(d["user_id"])
+    except Exception:
+        return jsonify({"success": False, "msg": "user_id must be int"}), 400
+    role = str(d["role"]).strip().lower()
+    if role not in ("client", "freelancer"):
+        return jsonify({"success": False, "msg": "role must be client or freelancer"}), 400
+    message = str(d["message"]).strip()
+    if not message:
+        return jsonify({"success": False, "msg": "message required"}), 400
+    if role == "client":
+        from database import get_client_profile
+        if not get_client_profile(user_id):
+            return jsonify({"success": False, "msg": "Client not found"}), 404
+    else:
+        from database import get_freelancer_profile
+        if not get_freelancer_profile(user_id):
+            return jsonify({"success": False, "msg": "Freelancer not found"}), 404
+
+    # Check pending action confirmation
+    if user_id in PENDING_ACTIONS:
+        user_reply = message.strip().lower()
+        if user_reply in ["yes", "confirm"]:
+            action_data = PENDING_ACTIONS.pop(user_id)
+            exec_res = execute_agent_action(user_id, role, action_data.get("action", ""), action_data.get("parameters") or {})
+            return jsonify({
+                "success": True,
+                "mode": "action",
+                "result": exec_res
+            })
+        elif user_reply in ["no", "cancel"]:
+            PENDING_ACTIONS.pop(user_id, None)
+            return jsonify({
+                "success": True,
+                "mode": "answer",
+                "answer": "Action cancelled."
+            })
+
+    result = generate_ai_response(user_id, role, message)
+    
+    # If the AI system already executed an action, return the result
+    if isinstance(result, dict) and result.get("type") == "action":
+        # This means the AI system returned an action that needs to be executed
+        action = str(result.get("action") or "").strip()
+        params = result.get("parameters") or {}
+        requires_confirmation = action in {"hire_freelancer", "accept_request", "reject_request", "send_message"}
+        if requires_confirmation:
+            PENDING_ACTIONS[user_id] = {
+                "action": action,
+                "parameters": params
+            }
+            confirm_msg = "You are about to perform an action. Confirm? (yes/no)"
+            if action == "hire_freelancer":
+                fname = params.get("name", "Unknown")
+                confirm_msg = f"You are about to hire {fname}. Confirm? (yes/no)"
+            elif action == "accept_request":
+                rid = params.get("request_id")
+                confirm_msg = f"You are about to accept Request ID {rid}. Confirm? (yes/no)"
+            elif action == "reject_request":
+                rid = params.get("request_id")
+                confirm_msg = f"You are about to reject Request ID {rid}. Confirm? (yes/no)"
+            elif action == "send_message":
+                if role == "client":
+                    fid = params.get("freelancer_id")
+                    confirm_msg = f"You are about to send a message to Freelancer ID {fid}. Confirm? (yes/no)"
+                else:
+                    cid = params.get("client_id")
+                    confirm_msg = f"You are about to send a message to Client ID {cid}. Confirm? (yes/no)"
+            return jsonify({
+                "success": True,
+                "mode": "answer",
+                "answer": confirm_msg
+            })
+        else:
+            # Execute action immediately without confirmation
+            exec_res = execute_agent_action(user_id, role, action, params)
+            return jsonify({
+                "success": True,
+                "mode": "action",
+                "result": exec_res,
+                "answer": ""
+            })
+    else:
+        # This is already an answer response (either from AI system or from executed action)
+        text = str(result.get("text", ""))
+        return jsonify({
+            "success": True,
+            "mode": "answer",
+            "answer": text,
+            "sources": result.get("sources", ["kb"])
+        })
 
 if __name__ == "__main__":
     app.run(debug=True)
