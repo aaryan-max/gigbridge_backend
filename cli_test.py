@@ -267,17 +267,39 @@ def continue_with_google(role):
 # ---------- LOGIN OR SIGNUP ----------
 
 def login_or_signup(role):
+    # Step 1: Only action (Login / Signup)
     print("1. Login")
     print("2. Signup")
-    print("3. Continue with Google")   # ✅ ADD THIS LINE
-    choice = input("Choose: ")
+    choice = input("Choose: ").strip()
 
     if choice == "1":
-        login(role=role)
+        # Step 2: Login method
+        print("\nLogin method:")
+        print("1. Continue with Email")
+        print("2. Continue with Google")
+        m = input("Choose: ").strip()
+
+        if m == "1":
+            login(role=role)
+        elif m == "2":
+            continue_with_google(role)
+        else:
+            print("❌ Invalid choice")
+
     elif choice == "2":
-        signup_with_role(role)
-    elif choice == "3":                # ✅ ADD THIS BLOCK
-        continue_with_google(role)
+        # Step 2: Signup method
+        print("\nSignup method:")
+        print("1. Continue with Email (OTP)")
+        print("2. Continue with Google")
+        m = input("Choose: ").strip()
+
+        if m == "1":
+            signup_with_role(role)
+        elif m == "2":
+            continue_with_google(role)
+        else:
+            print("❌ Invalid choice")
+
     else:
         print("❌ Invalid choice")
 
@@ -832,14 +854,25 @@ def client_flow():
                     print(res.json())
 
         elif choice == "3":
-            category = input("Category: ").strip()
-            budget = input("Max Budget: ").strip()
+            category = input("Category (e.g., Dancer, Singer, Photographer): ").strip()
+            specialization = input("Specialization : ").strip()
+            budget_in = input("Max Budget: ").strip()
 
-            res = requests.get(f"{BASE_URL}/freelancers/search", params={
+            try:
+                budget = float(budget_in)
+            except Exception:
+                print("❌ Invalid budget")
+                continue
+
+            params = {
                 "category": category,
                 "budget": budget,
                 "client_id": current_client_id
-            })
+            }
+            if specialization:
+                params["q"] = specialization
+
+            res = requests.get(f"{BASE_URL}/freelancers/search", params=params)
 
             data = res.json()
             if not data.get("success"):

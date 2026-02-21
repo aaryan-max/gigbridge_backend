@@ -6,13 +6,14 @@ import smtplib
 import os
 import requests
 import secrets
+from rapidfuzz import fuzz
 import urllib.parse
 import shutil
 from email.message import EmailMessage
 from werkzeug.security import generate_password_hash, check_password_hash
 from llm_chatbot import generate_ai_response, PENDING_ACTIONS, execute_agent_action
 
-from database import create_tables
+from database import create_tables, rebuild_freelancer_search_index
 from categories import is_valid_category
 
 
@@ -26,7 +27,6 @@ create_tables()
 # ============================================================
 # AGENT: PENDING ACTION MEMORY
 # ============================================================
-PENDING_ACTIONS = {}
 
 # ============================================================
 # EMAIL CONFIG
@@ -63,6 +63,10 @@ def _google_state_cleanup():
             expired.append(k)
     for k in expired:
         GOOGLE_OAUTH_STATES.pop(k, None)
+
+def fuzzy_score(query: str, text: str) -> int:
+    # token_set_ratio is very good for search-like matching
+    return fuzz.token_set_ratio(query or "", text or "")        
 
 
 # ============================================================
@@ -620,71 +624,195 @@ def freelancer_profile():
     ))
     conn.commit()
     conn.close()
+
+    # Rebuild FTS index for better search
+    rebuild_freelancer_search_index(int(d["freelancer_id"]))
+
     return jsonify({"success": True})
 
 # ============================================================
 # SEARCH (Category + Budget) + includes freelancer NAME
 # ============================================================
 
+
+# ============================================================
+# SEARCH (Category + Budget) + specialization via FTS5 (q)
+# ============================================================
+
 @app.route("/freelancers/search", methods=["GET"])
 def freelancers_search():
     category = (request.args.get("category", "") or "").strip().lower()
-    
-    # Safe budget conversion
+    q = (request.args.get("q", "") or "").strip().lower()
+
     try:
         budget = float(request.args.get("budget", 0))
     except (ValueError, TypeError):
         return jsonify({"success": False, "msg": "Invalid budget"}), 400
 
-    # Optional client_id for location-based sorting
     client_id = request.args.get("client_id")
     client_lat = client_lon = None
+
     if client_id:
         try:
             cid = int(client_id)
             cconn = sqlite3.connect("client.db")
             ccur = cconn.cursor()
-            ccur.execute("SELECT latitude, longitude FROM client_profile WHERE client_id=?", (cid,))
+            ccur.execute(
+                "SELECT latitude, longitude FROM client_profile WHERE client_id=?",
+                (cid,),
+            )
             row = ccur.fetchone()
             cconn.close()
+
             if row:
                 client_lat, client_lon = row[0], row[1]
         except Exception:
-            client_lat = client_lon = None
+            pass
 
-    conn = sqlite3.connect("freelancer.db")
-    cur = conn.cursor()
-    cur.execute("""
-        SELECT
-            fp.freelancer_id,
-            f.name,
-            fp.title,
-            fp.skills,
-            fp.experience,
-            fp.min_budget,
-            fp.max_budget,
-            fp.rating,
-            fp.category,
-            fp.latitude,
-            fp.longitude
-        FROM freelancer_profile fp
-        JOIN freelancer f ON f.id = fp.freelancer_id
-        WHERE fp.min_budget <= ?
-          AND fp.max_budget >= ?
-    """, (budget, budget))
+    try:
+        conn = sqlite3.connect("freelancer.db")
+        cur = conn.cursor()
 
-    rows = cur.fetchall()
-    conn.close()
+        # ============================================
+        # IF SPECIALIZATION QUERY EXISTS → USE FTS5
+        # ============================================
+        if q:
+
+            tokens = [t.strip() for t in q.split() if t.strip()]
+            fts_query = " ".join([t + "*" for t in tokens])
+
+            sql = """
+                SELECT
+                    fp.freelancer_id,
+                    f.name,
+                    fp.title,
+                    fp.skills,
+                    fp.experience,
+                    fp.min_budget,
+                    fp.max_budget,
+                    fp.rating,
+                    fp.category,
+                    fp.latitude,
+                    fp.longitude,
+                    bm25(freelancer_search) as rank
+                FROM freelancer_search
+                JOIN freelancer_profile fp
+                    ON fp.freelancer_id = freelancer_search.freelancer_id
+                JOIN freelancer f
+                    ON f.id = fp.freelancer_id
+                WHERE freelancer_search MATCH ?
+                  AND fp.min_budget <= ?
+                  AND fp.max_budget >= ?
+            """
+
+            cur.execute(sql, (fts_query, budget, budget))
+            rows = cur.fetchall()
+
+            # ============================================
+            # FUZZY FALLBACK IF FTS RETURNS NOTHING
+            # ============================================
+            if not rows:
+
+                cur.execute("""
+                    SELECT
+                        fp.freelancer_id,
+                        f.name,
+                        fp.title,
+                        fp.skills,
+                        fp.experience,
+                        fp.min_budget,
+                        fp.max_budget,
+                        fp.rating,
+                        fp.category,
+                        fp.latitude,
+                        fp.longitude
+                    FROM freelancer_profile fp
+                    JOIN freelancer f
+                        ON f.id = fp.freelancer_id
+                    WHERE fp.min_budget <= ?
+                      AND fp.max_budget >= ?
+                """, (budget, budget))
+
+                candidates = cur.fetchall()
+
+                scored = []
+
+                for r in candidates:
+                    combined = f"{r[2] or ''} {r[3] or ''} {r[8] or ''}".lower()
+                    score = fuzzy_score(q, combined)
+                    scored.append((score, r))
+
+                scored.sort(key=lambda x: x[0], reverse=True)
+
+                scored = [x for x in scored if x[0] >= 60]
+
+                rows = [x[1] + (999999.0,) for x in scored[:20]]
+
+        # ============================================
+        # NO SPECIALIZATION → BUDGET ONLY SEARCH
+        # ============================================
+        else:
+
+            cur.execute("""
+                SELECT
+                    fp.freelancer_id,
+                    f.name,
+                    fp.title,
+                    fp.skills,
+                    fp.experience,
+                    fp.min_budget,
+                    fp.max_budget,
+                    fp.rating,
+                    fp.category,
+                    fp.latitude,
+                    fp.longitude,
+                    999999.0 as rank
+                FROM freelancer_profile fp
+                JOIN freelancer f
+                    ON f.id = fp.freelancer_id
+                WHERE fp.min_budget <= ?
+                  AND fp.max_budget >= ?
+            """, (budget, budget))
+
+            rows = cur.fetchall()
+
+        conn.close()
+
+    except sqlite3.Error as e:
+        return jsonify({
+            "success": False,
+            "msg": "DB error in /freelancers/search",
+            "error": str(e)
+        }), 500
+
+    # ============================================
+    # FORMAT RESULTS
+    # ============================================
 
     enriched = []
+
     for r in rows:
-        if category and (category != str(r[8]).strip().lower()):
-            continue
+
+        if category:
+            cat_db = (r[8] or "").lower()
+            if fuzzy_score(category, cat_db) < 70:
+                continue
+
+        spec = (q or "").strip().lower()
+        if spec:
+             spec_db = (r[3] or "").strip().lower()
+             if fuzzy_score(spec, spec_db) < 70:
+               continue   
+
         f_lat, f_lon = r[9], r[10]
-        if (client_lat is not None) and (client_lon is not None) and (f_lat is not None) and (f_lon is not None):
-            dist = calculate_distance(client_lat, client_lon, f_lat, f_lon)
+
+        if client_lat and client_lon and f_lat and f_lon:
+            dist = calculate_distance(
+                client_lat, client_lon, f_lat, f_lon
+            )
         else:
             dist = 999999.0
+
         enriched.append({
             "freelancer_id": r[0],
             "name": r[1],
@@ -694,10 +822,19 @@ def freelancers_search():
             "budget_range": f"{r[5]} - {r[6]}",
             "rating": r[7],
             "category": r[8],
-            "distance": round(dist, 2)
+            "distance": round(dist, 2),
+            "rank": r[11],
         })
-    enriched.sort(key=lambda x: x["distance"])
-    return jsonify({"success": True, "results": enriched})
+
+    enriched.sort(key=lambda x: (x["rank"], x["distance"]))
+
+    for e in enriched:
+        e.pop("rank", None)
+
+    return jsonify({
+        "success": True,
+        "results": enriched
+    })
 # NEW: VIEW ALL FREELANCERS (even if client didn’t search)
 # ============================================================
 
@@ -782,11 +919,6 @@ def freelancer_details(freelancer_id: int):
         "category": r[9],
         "bio": r[10],
     })
-
-@app.route("/freelancer/profile/<int:freelancer_id>", methods=["GET"])
-def freelancer_profile_alias(freelancer_id: int):
-    """Alias route for freelancer profile - calls existing function"""
-    return freelancer_details(freelancer_id)
 
 # ============================================================
 # NEW: CHAT (Client <-> Freelancer)
@@ -873,7 +1005,7 @@ def message_history():
             "text": r[2],
             "timestamp": r[3]
         })
-    return jsonify(chat)
+    return jsonify({"success": True, "messages": chat})
 
 # ============================================================
 # NEW: HIRE (Client -> Freelancer)
@@ -1957,7 +2089,7 @@ def add_portfolio_item():
     portfolio_id = cur.lastrowid
     conn.commit()
     conn.close()
-    
+    rebuild_freelancer_search_index(freelancer_id)
     return jsonify({"success": True, "portfolio_id": portfolio_id})
 
 @app.route("/freelancer/portfolio/<int:freelancer_id>", methods=["GET"])
