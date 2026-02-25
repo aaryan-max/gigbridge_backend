@@ -17,9 +17,8 @@ from database import (
 )
 
 # === AI CHATBOT ADDITION ===
-# Ollama config (hardcoded for stability)
-OLLAMA_MODEL = "qwen2.5:3b"
-OLLAMA_URL = "http://localhost:11434"
+# Gemini config
+# API key loaded from environment variable GEMINI_API_KEY
 
 # Lightweight in-memory conversation memory (per user_id)
 CONVERSATION_MEMORY = {}
@@ -193,39 +192,6 @@ def _build_llm_prompt(user_msg: str, kb_snips: List[Dict[str, Any]], db_payload:
     return prompt
 
 
-def _call_ollama(prompt: str) -> str:
-    try:
-        res = requests.post(
-            f"{OLLAMA_URL}/api/generate",
-            json={"model": OLLAMA_MODEL, "prompt": prompt, "stream": False},
-            timeout=30,
-        )
-        if res.status_code == 200:
-            data = res.json()
-            if isinstance(data, dict):
-                try:
-                    print("RAW LLM OUTPUT:", data.get("response"))
-                except Exception:
-                    pass
-                return (data.get("response") or "").strip()
-        else:
-            try:
-                print("Ollama error:", res.status_code)
-            except Exception:
-                pass
-    except Exception:
-        pass
-    return ""
-
-
-def _ollama_health() -> Dict[str, str]:
-    try:
-        r = requests.get(f"{OLLAMA_URL}/api/tags", timeout=3)
-        if r.status_code == 200:
-            return {"ollama": "ok", "model": OLLAMA_MODEL}
-        return {"ollama": "down", "model": OLLAMA_MODEL}
-    except Exception:
-        return {"ollama": "down", "model": OLLAMA_MODEL}
 
 
 # In-memory storage for pending actions (confirmations)
@@ -456,9 +422,10 @@ def _handle_send_message(user_id: int, role: str, parameters: Dict[str, Any]) ->
 
 
 def generate_ai_response(user_id: int, role: str, message: str) -> Dict[str, Any]:
-    # health mode (used by /ai/health to avoid extra imports)
+    # health mode (used by /ai/health to avoid imports)
     if role == "__health__":
-        return {"health": _ollama_health()}
+        from gemini_agent import gemini_health
+        return {"health": gemini_health()}
 
     # Greeting handling - detect greetings before calling LLM
     if message.lower() in ["hi", "hello", "hii", "hey"]:
@@ -499,7 +466,10 @@ def generate_ai_response(user_id: int, role: str, message: str) -> Dict[str, Any
     db_payload, sources = _intent_route_and_fetch(user_id, role, message)
     prompt = _build_llm_prompt(message, kb, db_payload, memory)
 
-    answer = _call_ollama(prompt)
+    # Call Gemini API
+    from gemini_agent import call_gemini
+    user_context = {"user_id": user_id, "role": role}
+    answer = call_gemini(prompt, user_context)
     if not answer:
         answer = kb[0]["content"] if kb else "I can help with GigBridge features and your account info."
 

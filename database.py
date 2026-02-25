@@ -129,6 +129,9 @@ def create_tables():
     _try_add_column(cur, "freelancer_profile", "latitude REAL")
     _try_add_column(cur, "freelancer_profile", "longitude REAL")
     _try_add_column(cur, "freelancer_profile", "tags TEXT")
+    _try_add_column(cur, "freelancer_profile", "current_plan TEXT DEFAULT 'FREE'")
+    _try_add_column(cur, "freelancer_profile", "job_applies_used INTEGER DEFAULT 0")
+    _try_add_column(cur, "freelancer_profile", "job_applies_reset_date INTEGER")
 
     cur.execute("""
     CREATE TABLE IF NOT EXISTS freelancer_otp (
@@ -232,6 +235,37 @@ def create_tables():
         bio,
         tags,
         portfolio_text
+    )
+    """)
+
+    # ==========================
+    # FREELANCER VERIFICATION
+    # ==========================
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS freelancer_verification (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        freelancer_id INTEGER UNIQUE,
+        government_id_path TEXT,
+        pan_card_path TEXT,
+        artist_proof_path TEXT,
+        status TEXT DEFAULT 'PENDING',
+        submitted_at INTEGER,
+        reviewed_at INTEGER,
+        rejection_reason TEXT
+    )
+    """)
+
+    # ==========================
+    # FREELANCER SUBSCRIPTION
+    # ==========================
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS freelancer_subscription (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        freelancer_id INTEGER UNIQUE,
+        plan_name TEXT DEFAULT 'FREE',
+        start_date INTEGER,
+        end_date INTEGER,
+        status TEXT DEFAULT 'ACTIVE'
     )
     """)
 
@@ -578,5 +612,378 @@ def get_freelancer_profile(freelancer_id: int):
         }
     except Exception:
         return None
+    finally:
+        conn.close()
+
+
+# ============================================================
+# FREELANCER VERIFICATION FUNCTIONS
+# ============================================================
+
+def get_freelancer_verification(freelancer_id: int):
+    """Get verification status for a freelancer"""
+    try:
+        fid = int(freelancer_id)
+    except Exception:
+        return None
+    
+    conn = freelancer_db()
+    try:
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT id, freelancer_id, government_id_path, pan_card_path, artist_proof_path,
+                   status, submitted_at, reviewed_at, rejection_reason
+            FROM freelancer_verification
+            WHERE freelancer_id=?
+        """, (fid,))
+        r = cur.fetchone()
+        if not r:
+            return None
+        return {
+            "id": r[0],
+            "freelancer_id": r[1],
+            "government_id_path": r[2],
+            "pan_card_path": r[3],
+            "artist_proof_path": r[4],
+            "status": r[5],
+            "submitted_at": r[6],
+            "reviewed_at": r[7],
+            "rejection_reason": r[8],
+        }
+    except Exception:
+        return None
+    finally:
+        conn.close()
+
+
+def update_freelancer_verification(freelancer_id: int, government_id_path: str, pan_card_path: str, artist_proof_path: str = None):
+    """Update or create verification record for freelancer"""
+    try:
+        fid = int(freelancer_id)
+    except Exception:
+        return False
+    
+    conn = freelancer_db()
+    try:
+        cur = conn.cursor()
+        import time
+        current_time = int(time.time())
+        
+        # Check if record exists
+        cur.execute("SELECT id FROM freelancer_verification WHERE freelancer_id=?", (fid,))
+        existing = cur.fetchone()
+        
+        if existing:
+            # Update existing record
+            cur.execute("""
+                UPDATE freelancer_verification 
+                SET government_id_path=?, pan_card_path=?, artist_proof_path=?, 
+                    status='PENDING', submitted_at=?
+                WHERE freelancer_id=?
+            """, (government_id_path, pan_card_path, artist_proof_path, current_time, fid))
+        else:
+            # Create new record
+            cur.execute("""
+                INSERT INTO freelancer_verification 
+                (freelancer_id, government_id_path, pan_card_path, artist_proof_path, status, submitted_at)
+                VALUES (?, ?, ?, ?, 'PENDING', ?)
+            """, (fid, government_id_path, pan_card_path, artist_proof_path, current_time))
+        
+        conn.commit()
+        return True
+    except Exception:
+        return False
+    finally:
+        conn.close()
+
+
+# FREELANCER SUBSCRIPTION FUNCTIONS
+# ============================================================
+
+def get_freelancer_plan(freelancer_id: int):
+    """Safely get freelancer plan, creating BASIC record if needed"""
+    try:
+        fid = int(freelancer_id)
+    except Exception:
+        return "BASIC"
+    
+    conn = freelancer_db()
+    try:
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT plan_name
+            FROM freelancer_subscription
+            WHERE freelancer_id=?
+        """, (fid,))
+        result = cur.fetchone()
+        
+        if result is None:
+            # No subscription record exists, create BASIC
+            import time
+            current_time = int(time.time())
+            cur.execute("""
+                INSERT INTO freelancer_subscription 
+                (freelancer_id, plan_name, status, start_date)
+                VALUES (?, 'BASIC', 'ACTIVE', ?)
+            """, (fid, current_time))
+            
+            # Also update profile
+            cur.execute("""
+                UPDATE freelancer_profile 
+                SET current_plan='BASIC'
+                WHERE freelancer_id=?
+            """, (fid,))
+            
+            conn.commit()
+            return "BASIC"
+        
+        # Record exists, get plan safely
+        plan_name = result[0] if isinstance(result, (tuple, list)) else result['plan_name']
+        
+        # Handle NULL plan_name
+        if not plan_name:
+            cur.execute("""
+                UPDATE freelancer_subscription 
+                SET plan_name='BASIC'
+                WHERE freelancer_id=?
+            """, (fid,))
+            cur.execute("""
+                UPDATE freelancer_profile 
+                SET current_plan='BASIC'
+                WHERE freelancer_id=?
+            """, (fid,))
+            conn.commit()
+            return "BASIC"
+        
+        # Migrate old plans
+        if plan_name == "FREE":
+            plan_name = "BASIC"
+        elif plan_name == "PRO":
+            plan_name = "PREMIUM"
+        
+        return plan_name
+        
+    except Exception:
+        return "BASIC"
+    finally:
+        conn.close()
+
+
+def get_freelancer_subscription(freelancer_id: int):
+    """Get subscription details for freelancer"""
+    try:
+        fid = int(freelancer_id)
+    except Exception:
+        return None
+    
+    conn = freelancer_db()
+    try:
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT id, freelancer_id, plan_name, start_date, end_date, status
+            FROM freelancer_subscription
+            WHERE freelancer_id=?
+        """, (fid,))
+        r = cur.fetchone()
+        if not r:
+            # Return default BASIC subscription
+            return {
+                "id": None,
+                "freelancer_id": fid,
+                "plan_name": "BASIC",
+                "start_date": None,
+                "end_date": None,
+                "status": "ACTIVE"
+            }
+        
+        plan_name = r[2]
+        # Migrate old plans
+        if plan_name == "FREE":
+            plan_name = "BASIC"
+        elif plan_name == "PRO":
+            plan_name = "PREMIUM"
+        
+        return {
+            "id": r[0],
+            "freelancer_id": r[1],
+            "plan_name": plan_name,
+            "start_date": r[3],
+            "end_date": r[4],
+            "status": r[5],
+        }
+    except Exception:
+        return None
+    finally:
+        conn.close()
+
+
+def update_freelancer_subscription(freelancer_id: int, plan_name: str, days: int = 30):
+    """Update or create subscription record for freelancer"""
+    try:
+        fid = int(freelancer_id)
+    except Exception:
+        return False
+    
+    conn = freelancer_db()
+    try:
+        cur = conn.cursor()
+        import time
+        current_time = int(time.time())
+        end_time = current_time + (days * 24 * 60 * 60)
+        
+        # Check if record exists
+        cur.execute("SELECT id FROM freelancer_subscription WHERE freelancer_id=?", (fid,))
+        existing = cur.fetchone()
+        
+        if existing:
+            # Update existing record
+            cur.execute("""
+                UPDATE freelancer_subscription 
+                SET plan_name=?, start_date=?, end_date=?, status='ACTIVE'
+                WHERE freelancer_id=?
+            """, (plan_name, current_time, end_time, fid))
+        else:
+            # Create new record
+            cur.execute("""
+                INSERT INTO freelancer_subscription 
+                (freelancer_id, plan_name, start_date, end_date, status)
+                VALUES (?, ?, ?, ?, 'ACTIVE')
+            """, (fid, plan_name, current_time, end_time))
+        
+        # Update profile
+        cur.execute("""
+            UPDATE freelancer_profile 
+            SET current_plan=?
+            WHERE freelancer_id=?
+        """, (plan_name, fid))
+        
+        # Reset job applies for paid plans
+        if plan_name in ["PRO", "PREMIUM"]:
+            cur.execute("""
+                UPDATE freelancer_profile 
+                SET job_applies_used=0
+                WHERE freelancer_id=?
+            """, (fid,))
+        
+        conn.commit()
+        return True
+    except Exception:
+        return False
+    finally:
+        conn.close()
+
+
+def get_freelancer_job_applies(freelancer_id: int):
+    """Get job applies count and limits for freelancer"""
+    try:
+        fid = int(freelancer_id)
+    except Exception:
+        return None
+    
+    conn = freelancer_db()
+    try:
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT current_plan, job_applies_used, job_applies_reset_date
+            FROM freelancer_profile
+            WHERE freelancer_id=?
+        """, (fid,))
+        r = cur.fetchone()
+        if not r:
+            return None
+        
+        current_plan = r[0] or "BASIC"
+        applies_used = r[1] or 0
+        reset_date = r[2]
+        
+        # Reset monthly counter if needed
+        import time
+        current_time = int(time.time())
+        if reset_date and current_time > reset_date:
+            applies_used = 0
+            cur.execute("""
+                UPDATE freelancer_profile 
+                SET job_applies_used=0, job_applies_reset_date=?
+                WHERE freelancer_id=?
+            """, (current_time + (30 * 24 * 60 * 60), fid))
+            conn.commit()
+        
+        # Get limits
+        if current_plan == "BASIC":
+            limit = 10
+        else:
+            limit = float('inf')  # Unlimited for PREMIUM
+        
+        return {
+            "current_plan": current_plan,
+            "applies_used": applies_used,
+            "limit": limit,
+            "remaining": max(0, limit - applies_used)
+        }
+    except Exception:
+        return None
+    finally:
+        conn.close()
+
+
+def increment_job_applies(freelancer_id: int):
+    """Increment job applies count for freelancer"""
+    try:
+        fid = int(freelancer_id)
+    except Exception:
+        return False
+    
+    conn = freelancer_db()
+    try:
+        cur = conn.cursor()
+        cur.execute("""
+            UPDATE freelancer_profile 
+            SET job_applies_used = job_applies_used + 1
+            WHERE freelancer_id=?
+        """, (fid,))
+        conn.commit()
+        return True
+    except Exception:
+        return False
+    finally:
+        conn.close()
+
+
+def check_subscription_expiry():
+    """Check and update expired subscriptions"""
+    conn = freelancer_db()
+    try:
+        cur = conn.cursor()
+        import time
+        current_time = int(time.time())
+        
+        # Find expired subscriptions
+        cur.execute("""
+            SELECT freelancer_id 
+            FROM freelancer_subscription 
+            WHERE end_date < ? AND plan_name != 'BASIC'
+        """, (current_time,))
+        expired = cur.fetchall()
+        
+        for fid in expired:
+            freelancer_id = fid[0]
+            # Reset to BASIC
+            cur.execute("""
+                UPDATE freelancer_subscription 
+                SET plan_name='BASIC', status='ACTIVE', start_date=NULL, end_date=NULL
+                WHERE freelancer_id=?
+            """, (freelancer_id,))
+            
+            # Update profile
+            cur.execute("""
+                UPDATE freelancer_profile 
+                SET current_plan='BASIC', job_applies_used=0
+                WHERE freelancer_id=?
+            """, (freelancer_id,))
+        
+        conn.commit()
+        return len(expired)
+    except Exception:
+        return 0
     finally:
         conn.close()

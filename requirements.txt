@@ -1,3 +1,8 @@
-flask==3.0.0
-requests==2.31.0
-werkzeug==3.0.1
+flask
+requests
+werkzeug
+rapidfuzz
+numpy
+faiss-cpu
+sentence-transformers
+google-generativeai

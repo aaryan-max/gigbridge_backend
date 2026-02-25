@@ -12,8 +12,21 @@ import shutil
 from email.message import EmailMessage
 from werkzeug.security import generate_password_hash, check_password_hash
 from llm_chatbot import generate_ai_response, PENDING_ACTIONS, execute_agent_action
+from admin_db import ensure_admin_tables
+from admin_routes import admin_bp
+from kyc_routes import kyc_bp
 
 from database import create_tables, rebuild_freelancer_search_index
+from settings import (
+    FEATURE_HIDE_UNVERIFIED_FROM_SEARCH,
+    FEATURE_BLOCK_DISABLED_USERS,
+    FEATURE_ENFORCE_VERIFIED_FOR_HIRE_MESSAGE,
+)
+from categories import is_valid_category
+
+# Semantic (RAG-style) search helpers
+from semantic_search import load_or_build, semantic_search, upsert_freelancer
+from database import create_tables, rebuild_freelancer_search_index, get_freelancer_verification, update_freelancer_verification, get_freelancer_subscription, update_freelancer_subscription, get_freelancer_job_applies, increment_job_applies, check_subscription_expiry, get_freelancer_plan
 from categories import is_valid_category
 
 
@@ -23,6 +36,15 @@ from categories import is_valid_category
 
 app = Flask(__name__)
 create_tables()
+ensure_admin_tables()
+app.register_blueprint(admin_bp)
+app.register_blueprint(kyc_bp)
+
+# Try to load semantic index (optional; app still works without it)
+try:
+    load_or_build()
+except Exception as _e:
+    print("Semantic index not loaded:", _e)
 
 # ============================================================
 # AGENT: PENDING ACTION MEMORY
@@ -497,6 +519,17 @@ def client_login():
     conn.close()
 
     if row and check_password_hash(row[1], password):
+        if FEATURE_BLOCK_DISABLED_USERS:
+            try:
+                c2 = sqlite3.connect("client.db")
+                cur2 = c2.cursor()
+                cur2.execute("SELECT COALESCE(is_enabled,1) FROM client WHERE id=?", (row[0],))
+                en = cur2.fetchone()
+                c2.close()
+                if en and int(en[0]) != 1:
+                    return jsonify({"success": False, "msg": "Account disabled"}), 403
+            except Exception:
+                pass
         try:
             send_login_email(email, row[2], "Client", "login")
         except:
@@ -522,6 +555,17 @@ def freelancer_login():
     conn.close()
 
     if row and check_password_hash(row[1], password):
+        if FEATURE_BLOCK_DISABLED_USERS:
+            try:
+                f2 = sqlite3.connect("freelancer.db")
+                cur2 = f2.cursor()
+                cur2.execute("SELECT COALESCE(is_enabled,1) FROM freelancer WHERE id=?", (row[0],))
+                en = cur2.fetchone()
+                f2.close()
+                if en and int(en[0]) != 1:
+                    return jsonify({"success": False, "msg": "Account disabled"}), 403
+            except Exception:
+                pass
         try:
             send_login_email(email, row[2], "Freelancer", "login")
         except:
@@ -546,9 +590,13 @@ def client_profile():
         if (len(pincode) != 6) or (not pincode.isdigit()):
             return jsonify({"success": False, "msg": "Invalid pincode"}), 400
         lat, lon = geocode_pincode(pincode, d.get("location"))
+
+        if lat is None or lon is None:
+            return jsonify({"success": False, "msg": "Enter valid pincode"}), 400
+
     if (lat is None or lon is None) and d.get("location"):
         lat, lon = geocode_address(d["location"])
-
+        
     conn = sqlite3.connect("client.db")
     cur = conn.cursor()
     cur.execute("""
@@ -580,7 +628,7 @@ def client_profile():
 @app.route("/freelancer/profile", methods=["POST"])
 def freelancer_profile():
     d = get_json()
-    missing = require_fields(d, ["freelancer_id","title","skills","experience","min_budget","max_budget","bio","category","location"])
+    missing = require_fields(d, ["freelancer_id", "title", "skills", "experience", "min_budget", "max_budget", "bio", "category", "location"])
     if missing:
         return jsonify({"success": False, "msg": "Missing fields"}), 400
 
@@ -594,39 +642,62 @@ def freelancer_profile():
         if (len(pincode) != 6) or (not pincode.isdigit()):
             return jsonify({"success": False, "msg": "Invalid pincode"}), 400
         lat, lon = geocode_pincode(pincode, d.get("location"))
-    loc_str = d.get("location")
-    if loc_str:
+
         if lat is None or lon is None:
-            lat, lon = geocode_address(str(loc_str))
+            return jsonify({"success": False, "msg": "Enter valid pincode"}), 400
+
+    loc_str = d.get("location")
+    if loc_str and (lat is None or lon is None):
+        lat, lon = geocode_address(str(loc_str))
+
+    freelancer_id = int(d["freelancer_id"])
 
     conn = sqlite3.connect("freelancer.db")
     cur = conn.cursor()
-    cur.execute("""
+    cur.execute(
+        """
         INSERT INTO freelancer_profile
-        (freelancer_id,title,skills,experience,min_budget,max_budget,bio,category,location,pincode,latitude,longitude)
-        VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+        (freelancer_id, title, skills, experience, min_budget, max_budget, bio, category, location, pincode, latitude, longitude)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(freelancer_id) DO UPDATE SET
-        title=excluded.title,
-        skills=excluded.skills,
-        experience=excluded.experience,
-        min_budget=excluded.min_budget,
-        max_budget=excluded.max_budget,
-        bio=excluded.bio,
-        category=excluded.category,
-        location=excluded.location,
-        pincode=excluded.pincode,
-        latitude=excluded.latitude,
-        longitude=excluded.longitude
-    """, (
-        d["freelancer_id"], d["title"], d["skills"],
-        int(d["experience"]), float(d["min_budget"]), float(d["max_budget"]),
-        d["bio"], d["category"], d["location"], pincode, lat, lon
-    ))
+            title=excluded.title,
+            skills=excluded.skills,
+            experience=excluded.experience,
+            min_budget=excluded.min_budget,
+            max_budget=excluded.max_budget,
+            bio=excluded.bio,
+            category=excluded.category,
+            location=excluded.location,
+            pincode=excluded.pincode,
+            latitude=excluded.latitude,
+            longitude=excluded.longitude
+        """,
+        (
+            freelancer_id,
+            d["title"],
+            d["skills"],
+            int(d["experience"]),
+            float(d["min_budget"]),
+            float(d["max_budget"]),
+            d["bio"],
+            d["category"],
+            d["location"],
+            pincode,
+            lat,
+            lon,
+        ),
+    )
     conn.commit()
     conn.close()
 
-    # Rebuild FTS index for better search
-    rebuild_freelancer_search_index(int(d["freelancer_id"]))
+    # Rebuild FTS index for better keyword search
+    rebuild_freelancer_search_index(freelancer_id)
+
+    # Update semantic index (optional)
+    try:
+        upsert_freelancer(freelancer_id)
+    except Exception:
+        pass
 
     return jsonify({"success": True})
 
@@ -667,53 +738,24 @@ def freelancers_search():
             if row:
                 client_lat, client_lon = row[0], row[1]
         except Exception:
-            pass
+            client_lat = client_lon = None
 
     try:
         conn = sqlite3.connect("freelancer.db")
         cur = conn.cursor()
 
+        rows = []
+
         # ============================================
         # IF SPECIALIZATION QUERY EXISTS → USE FTS5
         # ============================================
         if q:
-
             tokens = [t.strip() for t in q.split() if t.strip()]
-            fts_query = " ".join([t + "*" for t in tokens])
+            fts_query = " ".join([t + "*" for t in tokens]) if tokens else ""
 
-            sql = """
-                SELECT
-                    fp.freelancer_id,
-                    f.name,
-                    fp.title,
-                    fp.skills,
-                    fp.experience,
-                    fp.min_budget,
-                    fp.max_budget,
-                    fp.rating,
-                    fp.category,
-                    fp.latitude,
-                    fp.longitude,
-                    bm25(freelancer_search) as rank
-                FROM freelancer_search
-                JOIN freelancer_profile fp
-                    ON fp.freelancer_id = freelancer_search.freelancer_id
-                JOIN freelancer f
-                    ON f.id = fp.freelancer_id
-                WHERE freelancer_search MATCH ?
-                  AND fp.min_budget <= ?
-                  AND fp.max_budget >= ?
-            """
-
-            cur.execute(sql, (fts_query, budget, budget))
-            rows = cur.fetchall()
-
-            # ============================================
-            # FUZZY FALLBACK IF FTS RETURNS NOTHING
-            # ============================================
-            if not rows:
-
-                cur.execute("""
+            if fts_query:
+                cond_verified = " AND COALESCE(fp.is_verified,0)=1" if FEATURE_HIDE_UNVERIFIED_FROM_SEARCH else ""
+                sql = f"""
                     SELECT
                         fp.freelancer_id,
                         f.name,
@@ -725,16 +767,55 @@ def freelancers_search():
                         fp.rating,
                         fp.category,
                         fp.latitude,
-                        fp.longitude
+                        fp.longitude,
+                        COALESCE(fs.plan_name, 'BASIC') as subscription_plan,
+                        bm25(freelancer_search) as rank
+                    FROM freelancer_search
+                    JOIN freelancer_profile fp
+                        ON fp.freelancer_id = freelancer_search.freelancer_id
+                    JOIN freelancer f
+                        ON f.id = fp.freelancer_id
+                    LEFT JOIN freelancer_subscription fs
+                        ON fs.freelancer_id = fp.freelancer_id
+                    WHERE freelancer_search MATCH ?
+                      AND fp.min_budget <= ?
+                      AND fp.max_budget >= ?{cond_verified}
+                """
+                cur.execute(sql, (fts_query, budget, budget))
+                rows = cur.fetchall()
+
+            # ============================================
+            # FUZZY FALLBACK IF FTS RETURNS NOTHING
+            # ============================================
+            if not rows:
+                cond_verified = " AND COALESCE(fp.is_verified,0)=1" if FEATURE_HIDE_UNVERIFIED_FROM_SEARCH else ""
+                cur.execute(
+                    f"""
+                    SELECT
+                        fp.freelancer_id,
+                        f.name,
+                        fp.title,
+                        fp.skills,
+                        fp.experience,
+                        fp.min_budget,
+                        fp.max_budget,
+                        fp.rating,
+                        fp.category,
+                        fp.latitude,
+                        fp.longitude,
+                        COALESCE(fs.plan_name, 'BASIC') as subscription_plan
                     FROM freelancer_profile fp
                     JOIN freelancer f
                         ON f.id = fp.freelancer_id
+                    LEFT JOIN freelancer_subscription fs
+                        ON fs.freelancer_id = fp.freelancer_id
                     WHERE fp.min_budget <= ?
-                      AND fp.max_budget >= ?
-                """, (budget, budget))
+                      AND fp.max_budget >= ?{cond_verified}
+                    """,
+                    (budget, budget),
+                )
 
                 candidates = cur.fetchall()
-
                 scored = []
 
                 for r in candidates:
@@ -743,17 +824,59 @@ def freelancers_search():
                     scored.append((score, r))
 
                 scored.sort(key=lambda x: x[0], reverse=True)
-
                 scored = [x for x in scored if x[0] >= 60]
 
+                # Add a fake 'rank' column at the end, so formatting stays consistent
                 rows = [x[1] + (999999.0,) for x in scored[:20]]
+
+            # ============================================
+            # SEMANTIC FALLBACK (RAG-style retrieval)
+            # ============================================
+            if not rows:
+                try:
+                    sem_ids = semantic_search(q, top_k=30)
+                    print("✅ SEMANTIC USED:", q, sem_ids[:10])
+                except Exception:
+                    sem_ids = []
+
+                if sem_ids:
+                    placeholders = ",".join(["?"] * len(sem_ids))
+                    cond_verified = " AND COALESCE(fp.is_verified,0)=1" if FEATURE_HIDE_UNVERIFIED_FROM_SEARCH else ""
+                    cur.execute(
+                        f"""
+                        SELECT
+                            fp.freelancer_id,
+                            f.name,
+                            fp.title,
+                            fp.skills,
+                            fp.experience,
+                            fp.min_budget,
+                            fp.max_budget,
+                            fp.rating,
+                            fp.category,
+                            fp.latitude,
+                            fp.longitude,
+                            COALESCE(fs.plan_name, 'BASIC') as subscription_plan,
+                            999999.0 as rank
+                        FROM freelancer_profile fp
+                        JOIN freelancer f ON f.id = fp.freelancer_id
+                        LEFT JOIN freelancer_subscription fs
+                            ON fs.freelancer_id = fp.freelancer_id
+                        WHERE fp.freelancer_id IN ({placeholders})
+                          AND fp.min_budget <= ?
+                          AND fp.max_budget >= ?{cond_verified}
+                        """,
+                        (*sem_ids, budget, budget),
+                    )
+                    rows = cur.fetchall()
 
         # ============================================
         # NO SPECIALIZATION → BUDGET ONLY SEARCH
         # ============================================
         else:
-
-            cur.execute("""
+            cond_verified = " AND COALESCE(fp.is_verified,0)=1" if FEATURE_HIDE_UNVERIFIED_FROM_SEARCH else ""
+            cur.execute(
+                f"""
                 SELECT
                     fp.freelancer_id,
                     f.name,
@@ -766,24 +889,30 @@ def freelancers_search():
                     fp.category,
                     fp.latitude,
                     fp.longitude,
+                    COALESCE(fs.plan_name, 'BASIC') as subscription_plan,
                     999999.0 as rank
                 FROM freelancer_profile fp
                 JOIN freelancer f
                     ON f.id = fp.freelancer_id
+                LEFT JOIN freelancer_subscription fs
+                    ON fs.freelancer_id = fp.freelancer_id
                 WHERE fp.min_budget <= ?
-                  AND fp.max_budget >= ?
-            """, (budget, budget))
-
+                  AND fp.max_budget >= ?{cond_verified}
+                """,
+                (budget, budget),
+            )
             rows = cur.fetchall()
 
         conn.close()
 
     except sqlite3.Error as e:
-        return jsonify({
-            "success": False,
-            "msg": "DB error in /freelancers/search",
-            "error": str(e)
-        }), 500
+        return jsonify(
+            {
+                "success": False,
+                "msg": "DB error in /freelancers/search",
+                "error": str(e),
+            }
+        ), 500
 
     # ============================================
     # FORMAT RESULTS
@@ -813,6 +942,27 @@ def freelancers_search():
         else:
             dist = 999999.0
 
+        # Apply rank boost based on subscription
+        rank_boost = 0
+        subscription_plan = r[11]  # subscription_plan field
+        
+        # Migrate old plans
+        if subscription_plan == "FREE":
+            subscription_plan = "BASIC"
+        elif subscription_plan == "PRO":
+            subscription_plan = "PREMIUM"
+        
+        if subscription_plan == "PREMIUM":
+            rank_boost = 1
+        
+        # Adjust rank with boost
+        adjusted_rank = r[12] - (rank_boost * 100)  # Lower rank number = higher position
+        
+        # Add badge
+        badge = None
+        if subscription_plan == "PREMIUM":
+            badge = "🟣 PREMIUM"
+        
         enriched.append({
             "freelancer_id": r[0],
             "name": r[1],
@@ -823,10 +973,60 @@ def freelancers_search():
             "rating": r[7],
             "category": r[8],
             "distance": round(dist, 2),
-            "rank": r[11],
+            "rank": adjusted_rank,
+            "badge": badge,
+            "subscription_plan": subscription_plan
         })
+        
+    # ============================================
+    # GRID PRIORITY SYSTEM
+    # ============================================
+    
+    # Split into premium and basic lists
+    premium_list = []
+    basic_list = []
+    
+    for item in enriched:
+        if item["subscription_plan"] == "PREMIUM":
+            premium_list.append(item)
+        else:
+            basic_list.append(item)
+    
+    # Sort both lists by rating DESC, then rank ASC, then distance ASC
+    premium_list.sort(key=lambda x: (-x["rating"], x["rank"], x["distance"]))
+    basic_list.sort(key=lambda x: (-x["rating"], x["rank"], x["distance"]))
+    
+    # Build final result list with grid priority
+    final_list = []
+    premium_idx = 0
+    basic_idx = 0
+    
+    position = 1
+    total_count = len(premium_list) + len(basic_list)
+    
+    while position <= total_count:
+        if position % 3 == 0:  # Every 3rd position
+            if premium_idx < len(premium_list):
+                # Take highest rated premium
+                final_list.append(premium_list[premium_idx])
+                premium_idx += 1
+            else:
+                # No premium left, take from basic
+                if basic_idx < len(basic_list):
+                    final_list.append(basic_list[basic_idx])
+                    basic_idx += 1
+        else:
+            # Take from basic if available, otherwise from premium
+            if basic_idx < len(basic_list):
+                final_list.append(basic_list[basic_idx])
+                basic_idx += 1
+            elif premium_idx < len(premium_list):
+                final_list.append(premium_list[premium_idx])
+                premium_idx += 1
+        
+        position += 1
 
-    enriched.sort(key=lambda x: (x["rank"], x["distance"]))
+    enriched = final_list
 
     for e in enriched:
         e.pop("rank", None)
@@ -1030,6 +1230,15 @@ def client_hire():
     if not cur.fetchone():
         conn.close()
         return jsonify({"success": False, "msg": "Freelancer not found"}), 404
+    if FEATURE_ENFORCE_VERIFIED_FOR_HIRE_MESSAGE:
+        try:
+            cur.execute("SELECT COALESCE(is_verified,0) FROM freelancer_profile WHERE freelancer_id=?", (freelancer_id,))
+            vr = cur.fetchone()
+            if not vr or int(vr[0]) != 1:
+                conn.close()
+                return jsonify({"success": False, "msg": "Freelancer not verified"}), 403
+        except Exception:
+            pass
 
     job_title = str(d.get("job_title", "")).strip()
     cur.execute("""
@@ -2489,6 +2698,201 @@ def ai_chat():
             "answer": text,
             "sources": result.get("sources", ["kb"])
         })
+
+
+# ============================================================
+# FREELANCER VERIFICATION
+# ============================================================
+
+@app.route("/freelancer/verification/upload", methods=["POST"])
+def freelancer_verification_upload():
+    """Upload verification documents for freelancer"""
+    data = request.get_json() or {}
+    freelancer_id = data.get("freelancer_id")
+    government_id_path = data.get("government_id_path")
+    pan_card_path = data.get("pan_card_path")
+    artist_proof_path = data.get("artist_proof_path")  # Optional
+    
+    if not all([freelancer_id, government_id_path, pan_card_path]):
+        return jsonify({"success": False, "msg": "Missing required fields: freelancer_id, government_id_path, pan_card_path"}), 400
+    
+    # Validate freelancer exists
+    from database import get_freelancer_profile
+    if not get_freelancer_profile(freelancer_id):
+        return jsonify({"success": False, "msg": "Freelancer not found"}), 404
+    
+    # Validate file extensions
+    allowed_extensions = {'.pdf', '.jpg', '.jpeg', '.png'}
+    
+    def validate_file_path(file_path):
+        if not file_path:
+            return True  # Optional file
+        ext = os.path.splitext(file_path)[1].lower()
+        return ext in allowed_extensions
+    
+    if not validate_file_path(government_id_path):
+        return jsonify({"success": False, "msg": "Invalid government ID file type. Allowed: PDF, JPG, PNG"}), 400
+    
+    if not validate_file_path(pan_card_path):
+        return jsonify({"success": False, "msg": "Invalid PAN card file type. Allowed: PDF, JPG, PNG"}), 400
+    
+    if artist_proof_path and not validate_file_path(artist_proof_path):
+        return jsonify({"success": False, "msg": "Invalid artist proof file type. Allowed: PDF, JPG, PNG"}), 400
+    
+    # Create upload directory if not exists
+    upload_dir = f"uploads/verification/{freelancer_id}"
+    os.makedirs(upload_dir, exist_ok=True)
+    
+    # Update verification record
+    success = update_freelancer_verification(
+        freelancer_id, 
+        government_id_path, 
+        pan_card_path, 
+        artist_proof_path
+    )
+    
+    if success:
+        return jsonify({
+            "success": True, 
+            "msg": "Documents submitted successfully. Status: PENDING"
+        })
+    else:
+        return jsonify({
+            "success": False, 
+            "msg": "Failed to save verification documents"
+        }), 500
+
+
+@app.route("/freelancer/verification/status", methods=["GET"])
+def freelancer_verification_status():
+    """Get verification status for freelancer"""
+    freelancer_id = request.args.get("freelancer_id")
+    
+    if not freelancer_id:
+        return jsonify({"success": False, "msg": "freelancer_id required"}), 400
+    
+    # Validate freelancer exists
+    from database import get_freelancer_profile
+    if not get_freelancer_profile(freelancer_id):
+        return jsonify({"success": False, "msg": "Freelancer not found"}), 404
+    
+    verification = get_freelancer_verification(freelancer_id)
+    
+    if not verification:
+        return jsonify({
+            "success": True,
+            "status": None,
+            "submitted_at": None,
+            "rejection_reason": None,
+            "msg": "Verification not submitted yet"
+        })
+    
+    return jsonify({
+        "success": True,
+        "status": verification["status"],
+        "submitted_at": verification["submitted_at"],
+        "rejection_reason": verification["rejection_reason"]
+    })
+
+
+# ============================================================
+# FREELANCER SUBSCRIPTION
+# ============================================================
+
+@app.route("/freelancer/subscription/plans", methods=["GET"])
+def freelancer_subscription_plans():
+    """Get available subscription plans"""
+    return jsonify({
+        "success": True,
+        "plans": {
+            "BASIC": {
+                "name": "BASIC",
+                "price": 0,
+                "portfolio_limit": 5,
+                "job_applies_limit": 10,
+                "rank_boost": 0,
+                "badge": None,
+                "features": [
+                    "5 Portfolio Projects",
+                    "10 Job Applies per Month",
+                    "Standard Search Visibility",
+                    "Full Messaging Access"
+                ]
+            },
+            "PREMIUM": {
+                "name": "PREMIUM",
+                "price": 699,
+                "portfolio_limit": float('inf'),
+                "job_applies_limit": float('inf'),
+                "rank_boost": 1,
+                "badge": "🔵 PREMIUM",
+                "features": [
+                    "Unlimited Portfolio",
+                    "Unlimited Job Applies",
+                    "Moderate Rank Boost",
+                    "PREMIUM Badge",
+                    "Highlight 3 Projects",
+                    "Featured Grid Priority Placement",
+                    "Basic Analytics",
+                    "Early Job Alerts"
+                ]
+            }
+        }
+    })
+
+
+@app.route("/freelancer/subscription/upgrade", methods=["POST"])
+def freelancer_subscription_upgrade():
+    """Upgrade freelancer subscription"""
+    data = request.get_json() or {}
+    freelancer_id = data.get("freelancer_id")
+    plan_name = data.get("plan_name")
+    
+    if not all([freelancer_id, plan_name]):
+        return jsonify({"success": False, "msg": "Missing fields: freelancer_id, plan_name"}), 400
+    
+    if plan_name != "PREMIUM":
+        return jsonify({"success": False, "msg": "Only PREMIUM plan is available for upgrade"}), 400
+    
+    # Validate freelancer exists
+    from database import get_freelancer_profile
+    if not get_freelancer_profile(freelancer_id):
+        return jsonify({"success": False, "msg": "Freelancer not found"}), 404
+    
+    # Simulate payment (always succeed for now)
+    success = update_freelancer_subscription(freelancer_id, plan_name, 30)
+    
+    if success:
+        import time
+        end_date = int(time.time()) + (30 * 24 * 60 * 60)
+        from datetime import datetime
+        expiry_date = datetime.fromtimestamp(end_date)
+        
+        # Add notification for subscription upgrade
+        try:
+            conn = sqlite3.connect("freelancer.db")
+            cur = conn.cursor()
+            cur.execute("""
+                INSERT INTO notification (freelancer_id, message, created_at)
+                VALUES (?, ?, ?)
+            """, (freelancer_id, f"Successfully upgraded to {plan_name}! Active until {expiry_date.strftime('%Y-%m-%d')}", int(time.time())))
+            conn.commit()
+            conn.close()
+        except:
+            pass  # Don't fail the upgrade if notification fails
+        
+        return jsonify({
+            "success": True,
+            "msg": f"Successfully upgraded to {plan_name}!",
+            "plan_name": plan_name,
+            "active_until": expiry_date.strftime("%Y-%m-%d")
+        })
+    else:
+        return jsonify({
+            "success": False,
+            "msg": "Failed to upgrade subscription"
+        }), 500
+
 
 if __name__ == "__main__":
     app.run(debug=True)

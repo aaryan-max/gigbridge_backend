@@ -171,11 +171,99 @@ def signup_with_role(role):
 
     return
 
+# ---------- FORGOT PASSWORD ----------
+def forgot_password(role):
+    """Handle forgot password flow"""
+    print(f"\n--- {role.title()} FORGOT PASSWORD ---")
+    
+    email = input("Enter your registered email: ")
+    if not valid_email(email):
+        print("❌ Invalid email format")
+        return
+    
+    print(f"📩 Sending OTP to {email}...")
+    
+    # Send OTP
+    try:
+        if role == "client":
+            res = requests.post(f"{BASE_URL}/client/send-otp", json={"email": email})
+        else:
+            res = requests.post(f"{BASE_URL}/freelancer/send-otp", json={"email": email})
+        
+        if res.json().get("success"):
+            print("✅ OTP sent successfully!")
+        else:
+            print("❌ Failed to send OTP")
+            return
+    except Exception:
+        print("❌ Network error while sending OTP")
+        return
+    
+    # Get OTP
+    otp = input("Enter OTP: ")
+    
+    # Verify OTP and get new password
+    try:
+        if role == "client":
+            res = requests.post(f"{BASE_URL}/client/verify-otp-for-reset", json={"email": email, "otp": otp})
+        else:
+            res = requests.post(f"{BASE_URL}/freelancer/verify-otp-for-reset", json={"email": email, "otp": otp})
+        
+        result = res.json()
+        if result.get("success"):
+            print("✅ OTP verified! You can now set a new password.")
+            
+            # Get new password
+            while True:
+                new_password = input("Enter new password: ")
+                if len(new_password) < 6:
+                    print("❌ Password must be at least 6 characters")
+                    continue
+                
+                confirm_password = input("Confirm new password: ")
+                if new_password != confirm_password:
+                    print("❌ Passwords do not match")
+                    continue
+                
+                # Reset password
+                reset_res = requests.post(f"{BASE_URL}/client/reset-password" if role == "client" else f"{BASE_URL}/freelancer/reset-password", 
+                                       json={"email": email, "new_password": new_password})
+                
+                if reset_res.json().get("success"):
+                    print("✅ Password reset successful! You can now login with your new password.")
+                    return
+                else:
+                    print("❌ Failed to reset password")
+                    return
+        else:
+            print("❌ Invalid OTP or OTP expired")
+    except Exception as e:
+        print("❌ Error during password reset:", str(e))
+
+
 # ---------- LOGIN ----------
 def login(role=None):
     global current_client_id, current_freelancer_id
 
     while True:
+        print("\nLogin method:")
+        print("1. Login")
+        print("2. Forgot Password")
+        print("3. Back")
+        choice = input("Choose: ").strip()
+        
+        if choice == "3":
+            return
+        
+        if choice == "2":
+            # Forgot Password flow
+            forgot_password(role)
+            return
+        
+        if choice != "1":
+            print("❌ Invalid choice")
+            continue
+            
         email = input("Email: ")
         if valid_email(email):
             break
@@ -780,7 +868,7 @@ def client_flow():
     while True:
         print("\n--- CLIENT DASHBOARD ---")
         print("1. Create/Update")
-        print("2. View All")
+        print("2. View All");
         print("3. Search")
         print("4. View My Jobs")
         print("5. Saved Freelancers")
@@ -789,9 +877,14 @@ def client_flow():
         print("8. Job Request Status")
         print("9. Recommended Freelancers (AI)")
         print("10. Check Incoming Calls ")
-        print("11. Exit")
+        print("11. Logout")
 
         choice = input("Choose: ")
+        
+        if choice == "11":
+            current_client_id = None
+            print("✅ Logged out successfully")
+            return
         
         if choice == "1":
             while True:
@@ -1016,6 +1109,342 @@ def client_flow():
         elif choice == "11":
             break
 
+# ---------- FREELANCER VERIFICATION ----------
+def freelancer_verification_status():
+    """Show verification status for freelancer"""
+    if not current_freelancer_id:
+        print("❌ Please login as freelancer first")
+        return
+    
+    try:
+        res = requests.get(f"{BASE_URL}/freelancer/verification/status", params={
+            "freelancer_id": current_freelancer_id
+        })
+        data = res.json()
+        
+        if not data.get("success"):
+            print("❌ Error:", data.get("msg", "Unknown error"))
+            return
+        
+        print("\n--- VERIFICATION STATUS ---")
+        status = data.get("status")
+        submitted_at = data.get("submitted_at")
+        rejection_reason = data.get("rejection_reason")
+        
+        if status is None:
+            print("Status: Not submitted yet")
+            print("\n📋 Submit your verification documents to get verified.")
+        else:
+            print(f"Status: {status}")
+            
+            if submitted_at:
+                from datetime import datetime
+                submitted_date = datetime.fromtimestamp(submitted_at)
+                print(f"Submitted on: {submitted_date.strftime('%Y-%m-%d %H:%M')}")
+            
+            if status == "PENDING":
+                print("\n📋 Your documents are under review.")
+                print("   Admin module will process this in future updates.")
+            elif status == "REJECTED" and rejection_reason:
+                print(f"\n❌ Rejection reason: {rejection_reason}")
+            elif status == "APPROVED":
+                print("\n✅ Congratulations! Your verification is approved.")
+        
+    except Exception as e:
+        print("❌ Error checking verification status:", str(e))
+
+
+def freelancer_upload_verification():
+    """Upload verification documents for freelancer"""
+    if not current_freelancer_id:
+        print("❌ Please login as freelancer first")
+        return
+    
+    print("\n--- UPLOAD VERIFICATION DOCUMENTS ---")
+    print("📋 Required Documents:")
+    print("   1. Government ID (Aadhaar, Passport, Driver's License)")
+    print("   2. PAN Card")
+    print("   3. Artist Proof (Optional - Certificate, Portfolio, etc.)")
+    print("\n📁 Allowed formats: PDF, JPG, PNG")
+    print("📁 Maximum file size: 5MB")
+    print("📁 Files will be stored securely")
+    
+    # Check if already submitted
+    try:
+        res = requests.get(f"{BASE_URL}/freelancer/verification/status", params={
+            "freelancer_id": current_freelancer_id
+        })
+        status_data = res.json()
+        
+        if status_data.get("success") and status_data.get("status") == "PENDING":
+            print("\n⚠️  You already have a pending verification request.")
+            print("1. Re-upload documents")
+            print("2. Cancel")
+            choice = input("Choose: ").strip()
+            
+            if choice != "1":
+                print("❌ Upload cancelled")
+                return
+    except:
+        pass
+    
+    # Get file paths
+    print("\n📂 Enter file paths (local file paths):")
+    
+    government_id = input("Government ID file path: ").strip()
+    if not government_id:
+        print("❌ Government ID is required")
+        return
+    
+    pan_card = input("PAN Card file path: ").strip()
+    if not pan_card:
+        print("❌ PAN Card is required")
+        return
+    
+    artist_proof = input("Artist Proof file path (optional): ").strip()
+    if not artist_proof:
+        artist_proof = None
+    
+    # Validate file extensions
+    def validate_file_ext(file_path):
+        if not file_path:
+            return True
+        ext = file_path.lower().split('.')[-1]
+        return ext in ['pdf', 'jpg', 'jpeg', 'png']
+    
+    if not validate_file_ext(government_id):
+        print("❌ Invalid Government ID file type. Use PDF, JPG, or PNG")
+        return
+    
+    if not validate_file_ext(pan_card):
+        print("❌ Invalid PAN Card file type. Use PDF, JPG, or PNG")
+        return
+    
+    if artist_proof and not validate_file_ext(artist_proof):
+        print("❌ Invalid Artist Proof file type. Use PDF, JPG, or PNG")
+        return
+    
+    # Confirm upload
+    print("\n📋 Upload Summary:")
+    print(f"   Government ID: {government_id}")
+    print(f"   PAN Card: {pan_card}")
+    if artist_proof:
+        print(f"   Artist Proof: {artist_proof}")
+    
+    confirm = input("\nConfirm upload? (yes/no): ").strip().lower()
+    if confirm != "yes":
+        print("❌ Upload cancelled")
+        return
+    
+    # Upload documents
+    try:
+        res = requests.post(f"{BASE_URL}/freelancer/verification/upload", json={
+            "freelancer_id": current_freelancer_id,
+            "government_id_path": government_id,
+            "pan_card_path": pan_card,
+            "artist_proof_path": artist_proof
+        })
+        
+        result = res.json()
+        if result.get("success"):
+            print("✅ Documents submitted successfully!")
+            print("📋 Status: PENDING")
+            print("   Your documents are under review.")
+            print("   Admin module will process this in future updates.")
+        else:
+            print("❌ Upload failed:", result.get("msg", "Unknown error"))
+    
+    except Exception as e:
+        print("❌ Error uploading documents:", str(e))
+
+
+# ---------- FREELANCER SUBSCRIPTION ----------
+def freelancer_subscription_plans():
+    """Show available subscription plans"""
+    print("\n--- SUBSCRIPTION PLANS ---")
+    
+    try:
+        res = requests.get(f"{BASE_URL}/freelancer/subscription/plans")
+        data = res.json()
+        
+        if not data.get("success"):
+            print("❌ Error:", data.get("msg", "Unknown error"))
+            return
+        
+        plans = data.get("plans", {})
+        
+        # Get current subscription
+        try:
+            status_res = requests.get(f"{BASE_URL}/freelancer/subscription/status", params={
+                "freelancer_id": current_freelancer_id
+            })
+            status_data = status_res.json()
+            current_plan = status_data.get("subscription", {}).get("plan_name", "BASIC")
+        except:
+            current_plan = "BASIC"
+        
+        # Display plans
+        for plan_key, plan_data in plans.items():
+            badge = plan_data.get("badge", "")
+            if plan_key == current_plan:
+                print(f"\n🟢 {plan_data['name']} (Current Plan)")
+            else:
+                print(f"\n{badge} {plan_data['name']} - ₹{plan_data['price']}/month")
+            
+            print("   Features:")
+            for feature in plan_data.get("features", []):
+                print(f"   • {feature}")
+            print()
+        
+        print("\nOptions:")
+        print("1. Upgrade to PREMIUM")
+        print("2. Back")
+        
+        choice = input("Choose: ").strip()
+        
+        if choice == "1":
+            upgrade_subscription("PREMIUM")
+        elif choice == "2":
+            return
+        else:
+            print("❌ Invalid choice")
+    
+    except Exception as e:
+        print("❌ Error loading plans:", str(e))
+
+
+def freelancer_my_subscription():
+    """Show current subscription details"""
+    if not current_freelancer_id:
+        print("❌ Please login as freelancer first")
+        return
+    
+    try:
+        res = requests.get(f"{BASE_URL}/freelancer/subscription/status", params={
+            "freelancer_id": current_freelancer_id
+        })
+        data = res.json()
+        
+        if not data.get("success"):
+            print("❌ Error:", data.get("msg", "Unknown error"))
+            return
+        
+        subscription = data.get("subscription", {})
+        job_applies = data.get("job_applies", {})
+        
+        # Handle case where subscription might be None
+        if not subscription:
+            print("❌ Error: Unable to load subscription details")
+            return
+        
+        print("\n--- MY SUBSCRIPTION ---")
+        print(f"Current Plan: {subscription.get('plan_name', 'BASIC')}")
+        
+        if subscription.get("start_date"):
+            from datetime import datetime
+            start_date = datetime.fromtimestamp(subscription["start_date"])
+            print(f"Start Date: {start_date.strftime('%Y-%m-%d')}")
+        
+        if subscription.get("end_date"):
+            from datetime import datetime
+            expiry_date = datetime.fromtimestamp(subscription["end_date"])
+            print(f"Expiry Date: {expiry_date.strftime('%Y-%m-%d')}")
+        
+        print(f"Status: {subscription.get('status', 'ACTIVE')}")
+        
+        # Show job applies info
+        current_plan = job_applies.get("current_plan", "BASIC")
+        applies_used = job_applies.get("applies_used", 0)
+        limit = job_applies.get("limit", 10)
+        
+        if current_plan == "BASIC":
+            print(f"\nJob Applies: {applies_used} / {limit}")
+        else:
+            print(f"\nJob Applies: Unlimited")
+        
+        print("\nOptions:")
+        print("1. Renew")
+        print("2. Cancel")
+        print("3. Back")
+        
+        choice = input("Choose: ").strip()
+        
+        if choice == "1":
+            # Renew current plan
+            current_plan = subscription.get("plan_name", "BASIC")
+            if current_plan == "PREMIUM":
+                upgrade_subscription("PREMIUM")
+            else:
+                print("❌ BASIC plan cannot be renewed")
+        elif choice == "2":
+            # Cancel subscription
+            if subscription.get("plan_name") != "BASIC":
+                print("⚠️  Cancelling subscription...")
+                # This would set to BASIC in a real system
+                print("✅ Subscription cancelled. You are now on BASIC plan.")
+            else:
+                print("❌ You are already on BASIC plan")
+        elif choice == "3":
+            return
+        else:
+            print("❌ Invalid choice")
+    
+    except Exception as e:
+        print(f"❌ Error loading subscription: {str(e)}")
+
+
+def upgrade_subscription(plan_name):
+    """Upgrade freelancer subscription"""
+    try:
+        res = requests.post(f"{BASE_URL}/freelancer/subscription/upgrade", json={
+            "freelancer_id": current_freelancer_id,
+            "plan_name": plan_name
+        })
+        
+        result = res.json()
+        if result.get("success"):
+            print(f"\n✅ {result.get('msg', 'Upgrade successful')}")
+            print(f"Active until: {result.get('active_until', 'N/A')}")
+        else:
+            print("❌ Upgrade failed:", result.get("msg", "Unknown error"))
+    
+    except Exception as e:
+        print("❌ Error upgrading subscription:", str(e))
+
+
+def show_freelancer_dashboard_header():
+    """Show subscription info at top of dashboard"""
+    try:
+        res = requests.get(f"{BASE_URL}/freelancer/subscription/status", params={
+            "freelancer_id": current_freelancer_id
+        })
+        data = res.json()
+        
+        if data.get("success"):
+            subscription = data.get("subscription", {})
+            job_applies = data.get("job_applies", {})
+            
+            # Handle case where subscription might be None
+            if not subscription:
+                print("\nPlan: BASIC")
+                print("Job Applies Used: 0 / 10")
+                return
+            
+            current_plan = subscription.get("plan_name", "BASIC")
+            applies_used = job_applies.get("applies_used", 0)
+            limit = job_applies.get("limit", 10)
+            
+            print(f"\nPlan: {current_plan}")
+            if current_plan == "BASIC":
+                print(f"Job Applies Used: {applies_used} / {limit}")
+            else:
+                print("Job Applies Used: Unlimited")
+    except Exception as e:
+        print(f"Error loading subscription: {str(e)}")
+        print("\nPlan: BASIC")
+        print("Job Applies Used: 0 / 10")
+
+
 # ---------- FREELANCER FLOW ----------
 def freelancer_flow():
     global current_freelancer_id
@@ -1026,6 +1455,9 @@ def freelancer_flow():
             return
 
     while True:
+        # Show subscription info at top
+        show_freelancer_dashboard_header()
+        
         print("\n--- FREELANCER DASHBOARD ---")
         print("1. Create/Update Profile")
         print("2. View Hire Requests")
@@ -1038,9 +1470,18 @@ def freelancer_flow():
         print("9. Manage Portfolio")
         print("10. Upload Profile Photo")
         print("11. Check Incoming Calls 📞")
-        print("12. Exit")
+        print("12. Verification Status 🏅")
+        print("13. Upload Verification Documents")
+        print("14. Subscription Plans 💎")
+        print("15. My Subscription")
+        print("16. Logout")
 
         choice = input("Choose: ")
+
+        if choice == "16":
+            current_freelancer_id = None
+            print("✅ Logged out successfully")
+            return
 
         # 1️⃣ Create / Update Profile
         if choice == "1":
@@ -1392,8 +1833,24 @@ def freelancer_flow():
         elif choice == "11":
             check_incoming_calls()
 
-        # 12️⃣ Exit
+        # 12️⃣ Verification Status
         elif choice == "12":
+            freelancer_verification_status()
+
+        # 13️⃣ Upload Verification Documents
+        elif choice == "13":
+            freelancer_upload_verification()
+
+        # 14️⃣ Subscription Plans
+        elif choice == "14":
+            freelancer_subscription_plans()
+
+        # 15️⃣ My Subscription
+        elif choice == "15":
+            freelancer_my_subscription()
+
+        # 16️⃣ Exit
+        elif choice == "16":
             break
 
 # ---------- MAIN MENU ----------
