@@ -272,6 +272,8 @@ def create_tables():
     )
     """)
     _try_add_column(cur, "portfolio", "image_data BLOB")
+    _try_add_column(cur, "portfolio", "media_type TEXT DEFAULT 'IMAGE'")
+    _try_add_column(cur, "portfolio", "media_url TEXT")
 
     # Call session (freelancer.db copy)
     cur.execute("""
@@ -284,6 +286,36 @@ def create_tables():
         call_type TEXT,
         room_name TEXT,
         status TEXT,
+        created_at INTEGER
+    )
+    """)
+
+    # Project posting tables
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS project_post (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        client_id INTEGER,
+        title TEXT,
+        description TEXT,
+        category TEXT,
+        skills TEXT,
+        budget_type TEXT,
+        budget_min REAL,
+        budget_max REAL,
+        status TEXT DEFAULT 'OPEN',
+        created_at INTEGER
+    )
+    """)
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS project_application (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        project_id INTEGER,
+        freelancer_id INTEGER,
+        proposal_text TEXT,
+        bid_amount REAL,
+        hourly_rate REAL,
+        event_base_fee REAL,
+        status TEXT DEFAULT 'APPLIED',
         created_at INTEGER
     )
     """)

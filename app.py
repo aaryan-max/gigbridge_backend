@@ -2432,14 +2432,28 @@ def get_freelancer_profile(freelancer_id):
 def add_portfolio_item():
     """NEW CODE: Add portfolio item for freelancer"""
     d = get_json()
-    missing = require_fields(d, ["freelancer_id", "title", "description", "image_path"])
-    if missing:
+    # Always require freelancer_id, title, description
+    base_missing = require_fields(d, ["freelancer_id", "title", "description"])
+    if base_missing:
         return jsonify({"success": False, "msg": "Missing fields"}), 400
+    media_type = (str(d.get("media_type") or "IMAGE")).strip().upper()
+    if media_type not in ("IMAGE", "VIDEO", "DOC"):
+        media_type = "IMAGE"
+    # Validate media specific requirements
+    if media_type == "IMAGE":
+        missing = require_fields(d, ["image_path"])
+        if missing:
+            return jsonify({"success": False, "msg": "Missing fields"}), 400
+    else:
+        # VIDEO/DOC require media_url
+        if not str(d.get("media_url") or "").strip():
+            return jsonify({"success": False, "msg": "media_url required"}), 400
     
     freelancer_id = int(d["freelancer_id"])
     title = str(d["title"]).strip()
     description = str(d["description"]).strip()
-    image_path = str(d["image_path"]).strip()
+    image_path = str(d.get("image_path") or "").strip()
+    media_url = str(d.get("media_url") or "").strip() if media_type in ("VIDEO", "DOC") else None
     
     # Validate freelancer exists
     conn = sqlite3.connect("freelancer.db")
@@ -2449,20 +2463,22 @@ def add_portfolio_item():
         conn.close()
         return jsonify({"success": False, "msg": "Freelancer not found"}), 404
     
-    # ===== UPDATED: STORE PORTFOLIO IMAGE AS BLOB =====
-    # Read image file as binary data instead of copying to uploads folder
-    try:
-        with open(image_path, "rb") as f:
-            image_binary = f.read()
-    except Exception as e:
-        conn.close()
-        return jsonify({"success": False, "msg": f"Failed to read image file: {str(e)}"}), 400
-    
-    # Insert portfolio item with BLOB data
+    image_binary = None
+    if media_type == "IMAGE":
+        # Read image file as binary data instead of copying to uploads folder
+        try:
+            with open(image_path, "rb") as f:
+                image_binary = f.read()
+        except Exception as e:
+            conn.close()
+            return jsonify({"success": False, "msg": f"Failed to read image file: {str(e)}"}), 400
+    else:
+        image_path = ""  # not required for link types
+    # Insert portfolio item with media columns
     cur.execute("""
-        INSERT INTO portfolio (freelancer_id, title, description, image_path, image_data, created_at)
-        VALUES (?, ?, ?, ?, ?, ?)
-    """, (freelancer_id, title, description, image_path, image_binary, now_ts()))
+        INSERT INTO portfolio (freelancer_id, title, description, image_path, image_data, created_at, media_type, media_url)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    """, (freelancer_id, title, description, image_path, image_binary, now_ts(), media_type, media_url))
     
     portfolio_id = cur.lastrowid
     conn.commit()
@@ -2477,9 +2493,8 @@ def get_freelancer_portfolio(freelancer_id):
     conn.row_factory = sqlite3.Row
     cur = conn.cursor()
     
-    # ===== UPDATED: STORE PORTFOLIO IMAGE AS BLOB =====
     cur.execute("""
-        SELECT id, title, description, image_path, image_data, created_at
+        SELECT id, title, description, image_path, image_data, created_at, media_type, media_url
         FROM portfolio
         WHERE freelancer_id = ?
         ORDER BY created_at DESC
@@ -2496,7 +2511,9 @@ def get_freelancer_portfolio(freelancer_id):
             "portfolio_id": row["id"],
             "title": row["title"],
             "description": row["description"],
-            "created_at": row["created_at"]
+            "created_at": row["created_at"],
+            "media_type": row["media_type"] if "media_type" in row.keys() else "IMAGE",
+            "media_url": row["media_url"] if "media_url" in row.keys() else None
         }
         
         # Return image as Base64 if BLOB data exists, otherwise fallback to image_path
@@ -3097,6 +3114,261 @@ def freelancer_subscription_status():
         "job_applies": job_applies or {"applies_used": 0, "limit": 10, "current_plan": current_plan}
     })
 
+
+# ============================================================
+# PROJECT POSTING (Optional Hiring Flow)
+# ============================================================
+
+@app.route("/client/projects/create", methods=["POST"])
+def client_projects_create():
+    d = get_json()
+    missing = require_fields(d, ["client_id", "title", "description", "category", "skills", "budget_type", "budget_min", "budget_max"])
+    if missing:
+        return jsonify({"success": False, "msg": "Missing fields"}), 400
+    try:
+        client_id = int(d["client_id"])
+        title = str(d["title"]).strip()
+        description = str(d["description"]).strip()
+        category = str(d["category"]).strip()
+        skills = str(d["skills"]).strip()
+        budget_type = str(d["budget_type"]).strip().upper()
+        if budget_type not in ("FIXED", "HOURLY", "EVENT"):
+            return jsonify({"success": False, "msg": "Invalid budget_type"}), 400
+        budget_min = float(d["budget_min"])
+        budget_max = float(d["budget_max"])
+    except Exception:
+        return jsonify({"success": False, "msg": "Invalid payload"}), 400
+    conn = sqlite3.connect("freelancer.db")
+    try:
+        cur = conn.cursor()
+        cur.execute("""
+            INSERT INTO project_post (client_id, title, description, category, skills, budget_type, budget_min, budget_max, status, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'OPEN', ?)
+        """, (client_id, title, description, category, skills, budget_type, budget_min, budget_max, now_ts()))
+        pid = cur.lastrowid
+        conn.commit()
+        return jsonify({"success": True, "project_id": pid})
+    finally:
+        conn.close()
+
+
+@app.route("/client/projects", methods=["GET"])
+def client_projects_list():
+    client_id = request.args.get("client_id", "")
+    try:
+        cid = int(client_id)
+    except Exception:
+        return jsonify({"success": False, "msg": "client_id required"}), 400
+    conn = sqlite3.connect("freelancer.db")
+    conn.row_factory = sqlite3.Row
+    try:
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT id, title, description, category, skills, budget_type, budget_min, budget_max, status, created_at
+            FROM project_post
+            WHERE client_id=?
+            ORDER BY created_at DESC
+        """, (cid,))
+        rows = cur.fetchall()
+        projects = []
+        for r in rows:
+            projects.append({
+                "project_id": r["id"],
+                "title": r["title"],
+                "description": r["description"],
+                "category": r["category"],
+                "skills": r["skills"],
+                "budget_type": r["budget_type"],
+                "budget_min": r["budget_min"],
+                "budget_max": r["budget_max"],
+                "status": r["status"],
+                "created_at": r["created_at"],
+            })
+        return jsonify({"success": True, "projects": projects})
+    finally:
+        conn.close()
+
+
+@app.route("/client/projects/applicants", methods=["GET"])
+def client_projects_applicants():
+    client_id = request.args.get("client_id", "")
+    project_id = request.args.get("project_id", "")
+    try:
+        cid = int(client_id)
+        pid = int(project_id)
+    except Exception:
+        return jsonify({"success": False, "msg": "client_id and project_id required"}), 400
+    conn = sqlite3.connect("freelancer.db")
+    conn.row_factory = sqlite3.Row
+    try:
+        cur = conn.cursor()
+        cur.execute("SELECT client_id FROM project_post WHERE id=?", (pid,))
+        r = cur.fetchone()
+        if not r or int(r["client_id"]) != cid:
+            return jsonify({"success": False, "msg": "Not authorized"}), 403
+        cur.execute("""
+            SELECT id, freelancer_id, proposal_text, bid_amount, hourly_rate, event_base_fee, status, created_at
+            FROM project_application
+            WHERE project_id=?
+            ORDER BY created_at DESC
+        """, (pid,))
+        rows = cur.fetchall()
+        applicants = []
+        for a in rows:
+            applicants.append({
+                "application_id": a["id"],
+                "freelancer_id": a["freelancer_id"],
+                "proposal_text": a["proposal_text"],
+                "bid_amount": a["bid_amount"],
+                "hourly_rate": a["hourly_rate"],
+                "event_base_fee": a["event_base_fee"],
+                "status": a["status"],
+                "created_at": a["created_at"],
+            })
+        return jsonify({"success": True, "applicants": applicants})
+    finally:
+        conn.close()
+
+
+@app.route("/client/projects/close", methods=["POST"])
+def client_projects_close():
+    d = get_json()
+    missing = require_fields(d, ["client_id", "project_id"])
+    if missing:
+        return jsonify({"success": False, "msg": "Missing fields"}), 400
+    try:
+        cid = int(d["client_id"])
+        pid = int(d["project_id"])
+    except Exception:
+        return jsonify({"success": False, "msg": "Invalid payload"}), 400
+    conn = sqlite3.connect("freelancer.db")
+    try:
+        cur = conn.cursor()
+        cur.execute("SELECT client_id FROM project_post WHERE id=?", (pid,))
+        r = cur.fetchone()
+        if not r or int(r[0]) != cid:
+            return jsonify({"success": False, "msg": "Not authorized"}), 403
+        cur.execute("UPDATE project_post SET status='CLOSED' WHERE id=?", (pid,))
+        conn.commit()
+        return jsonify({"success": True})
+    finally:
+        conn.close()
+
+
+@app.route("/client/projects/accept_application", methods=["POST"])
+def client_projects_accept_application():
+    d = get_json()
+    missing = require_fields(d, ["client_id", "project_id", "application_id"])
+    if missing:
+        return jsonify({"success": False, "msg": "Missing fields"}), 400
+    try:
+        cid = int(d["client_id"])
+        pid = int(d["project_id"])
+        aid = int(d["application_id"])
+    except Exception:
+        return jsonify({"success": False, "msg": "Invalid payload"}), 400
+    conn = sqlite3.connect("freelancer.db")
+    try:
+        cur = conn.cursor()
+        cur.execute("SELECT client_id, title, budget_type FROM project_post WHERE id=?", (pid,))
+        pr = cur.fetchone()
+        if not pr or int(pr[0]) != cid:
+            return jsonify({"success": False, "msg": "Not authorized"}), 403
+        project_title = pr[1]
+        budget_type = (pr[2] or "FIXED").upper()
+        cur.execute("""
+            SELECT freelancer_id, bid_amount, hourly_rate, event_base_fee, status
+            FROM project_application
+            WHERE id=? AND project_id=?
+        """, (aid, pid))
+        ar = cur.fetchone()
+        if not ar:
+            return jsonify({"success": False, "msg": "Application not found"}), 404
+        if ar[4] != "APPLIED":
+            return jsonify({"success": False, "msg": "Application not in APPLIED state"}), 400
+        freelancer_id = int(ar[0])
+        bid_amount = ar[1] or 0
+        hourly_rate = ar[2] or 0
+        event_base_fee = ar[3] or 0
+        if budget_type == "FIXED":
+            proposed_budget = bid_amount
+        elif budget_type == "HOURLY":
+            proposed_budget = hourly_rate
+        else:
+            proposed_budget = event_base_fee
+        cur.execute("UPDATE project_application SET status='ACCEPTED' WHERE id=?", (aid,))
+        cur.execute("UPDATE project_post SET status='HIRED' WHERE id=?", (pid,))
+        cur.execute("""
+            INSERT INTO hire_request (client_id, freelancer_id, job_title, proposed_budget, note, status, created_at, contract_type)
+            VALUES (?, ?, ?, ?, ?, 'PENDING', ?, ?)
+        """, (cid, freelancer_id, project_title, proposed_budget, f"Created from project application #{aid}", now_ts(), budget_type))
+        conn.commit()
+        return jsonify({"success": True})
+    finally:
+        conn.close()
+
+
+@app.route("/freelancer/projects/feed", methods=["GET"])
+def freelancer_projects_feed():
+    conn = sqlite3.connect("freelancer.db")
+    conn.row_factory = sqlite3.Row
+    try:
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT id, client_id, title, description, category, skills, budget_type, budget_min, budget_max, created_at
+            FROM project_post
+            WHERE status='OPEN'
+            ORDER BY created_at DESC
+        """)
+        rows = cur.fetchall()
+        feed = []
+        for r in rows:
+            feed.append({
+                "project_id": r["id"],
+                "client_id": r["client_id"],
+                "title": r["title"],
+                "description": r["description"],
+                "category": r["category"],
+                "skills": r["skills"],
+                "budget_type": r["budget_type"],
+                "budget_min": r["budget_min"],
+                "budget_max": r["budget_max"],
+                "created_at": r["created_at"],
+            })
+        return jsonify({"success": True, "projects": feed})
+    finally:
+        conn.close()
+
+
+@app.route("/freelancer/projects/apply", methods=["POST"])
+def freelancer_projects_apply():
+    d = get_json()
+    missing = require_fields(d, ["freelancer_id", "project_id", "proposal_text"])
+    if missing:
+        return jsonify({"success": False, "msg": "Missing fields"}), 400
+    try:
+        fid = int(d["freelancer_id"])
+        pid = int(d["project_id"])
+        proposal_text = str(d["proposal_text"]).strip()
+        bid_amount = float(d.get("bid_amount")) if d.get("bid_amount") is not None else None
+        hourly_rate = float(d.get("hourly_rate")) if d.get("hourly_rate") is not None else None
+        event_base_fee = float(d.get("event_base_fee")) if d.get("event_base_fee") is not None else None
+    except Exception:
+        return jsonify({"success": False, "msg": "Invalid payload"}), 400
+    conn = sqlite3.connect("freelancer.db")
+    try:
+        cur = conn.cursor()
+        cur.execute("SELECT 1 FROM project_application WHERE project_id=? AND freelancer_id=?", (pid, fid))
+        if cur.fetchone():
+            return jsonify({"success": False, "msg": "Already applied"}), 400
+        cur.execute("""
+            INSERT INTO project_application (project_id, freelancer_id, proposal_text, bid_amount, hourly_rate, event_base_fee, status, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, 'APPLIED', ?)
+        """, (pid, fid, proposal_text, bid_amount, hourly_rate, event_base_fee, now_ts()))
+        conn.commit()
+        return jsonify({"success": True})
+    finally:
+        conn.close()
 
 @app.route("/client/rate", methods=["POST"])
 def client_rate():

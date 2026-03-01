@@ -1070,6 +1070,10 @@ def client_flow():
         print("11. Check Incoming Calls ")
         print("0. Exit")
         print("12. Logout")
+        print("13. Post Project")
+        print("14. My Projects")
+        print("15. View Applicants")
+        print("16. Accept Applicant")
 
         choice = input("Choose: ")
         
@@ -1265,6 +1269,78 @@ def client_flow():
                             print("❌ Invalid job selection")
             except Exception as e:
                 print("❌ Error fetching jobs:", str(e))
+
+        elif choice == "13":
+            # Post Project
+            title = input("Project Title: ").strip()
+            description = input("Description: ").strip()
+            category = input("Category: ").strip()
+            skills = input("Skills: ").strip()
+            print("Budget Type: 1) FIXED  2) HOURLY  3) EVENT")
+            bt_choice = input("Choose: ").strip()
+            budget_type = "FIXED" if bt_choice == "1" else "HOURLY" if bt_choice == "2" else "EVENT"
+            try:
+                budget_min = float(input("Budget Min: "))
+                budget_max = float(input("Budget Max: "))
+            except Exception:
+                print("❌ Invalid budget values")
+                continue
+            res = requests.post(f"{BASE_URL}/client/projects/create", json={
+                "client_id": current_client_id,
+                "title": title,
+                "description": description,
+                "category": category,
+                "skills": skills,
+                "budget_type": budget_type,
+                "budget_min": budget_min,
+                "budget_max": budget_max
+            })
+            print(res.json())
+
+        elif choice == "14":
+            # My Projects
+            res = requests.get(f"{BASE_URL}/client/projects", params={"client_id": current_client_id})
+            try:
+                data = res.json()
+                if data.get("success"):
+                    print("\n--- My Projects ---")
+                    for p in data.get("projects", []):
+                        print(f"{p['project_id']}. {p['title']} [{p['status']}] {p['budget_type']} {p['budget_min']}-{p['budget_max']}")
+                else:
+                    print("❌", data.get("msg"))
+            except Exception as e:
+                print("❌ Error:", str(e))
+
+        elif choice == "15":
+            # View Applicants
+            pid = input("Project ID: ").strip()
+            res = requests.get(f"{BASE_URL}/client/projects/applicants", params={
+                "client_id": current_client_id,
+                "project_id": pid
+            })
+            try:
+                data = res.json()
+                if data.get("success"):
+                    print("\n--- Applicants ---")
+                    for a in data.get("applicants", []):
+                        print(f"{a['application_id']}. Freelancer {a['freelancer_id']} | {a['status']}")
+                        print(f"   Proposal: {a['proposal_text']}")
+                        print(f"   Bid: {a.get('bid_amount')} Hourly: {a.get('hourly_rate')} Event: {a.get('event_base_fee')}")
+                else:
+                    print("❌", data.get("msg"))
+            except Exception as e:
+                print("❌ Error:", str(e))
+
+        elif choice == "16":
+            # Accept Applicant
+            pid = input("Project ID: ").strip()
+            aid = input("Application ID: ").strip()
+            res = requests.post(f"{BASE_URL}/client/projects/accept_application", json={
+                "client_id": current_client_id,
+                "project_id": pid,
+                "application_id": aid
+            })
+            print(res.json())
 
         elif choice == "6":
             res = requests.get(f"{BASE_URL}/client/saved-freelancers", params={
@@ -1732,6 +1808,8 @@ def freelancer_flow():
         print("17. Update Availability Status")
         print("18. Exit")
         print("19. Logout")
+        print("20. Browse Projects")
+        print("21. Apply to Project")
 
         choice = input("Choose: ")
 
@@ -2061,13 +2139,15 @@ def freelancer_flow():
         elif choice == "10":
             while True:
                 print("\n--- MANAGE PORTFOLIO ---")
-                print("1. Add Portfolio Item")
-                print("2. View My Portfolio")
-                print("3. Back")
+                print("1. Add Image")
+                print("2. Add Video Link")
+                print("3. Add Document Link")
+                print("4. View My Portfolio")
+                print("5. Back")
                 portfolio_choice = input("Choose: ")
                 
                 if portfolio_choice == "1":
-                    # Add Portfolio Item
+                    # Add Image
                     title = input("Title: ")
                     description = input("Description: ")
                     image_path = input("Image Path (local file): ")
@@ -2077,27 +2157,73 @@ def freelancer_flow():
                             "freelancer_id": current_freelancer_id,
                             "title": title,
                             "description": description,
-                            "image_path": image_path
+                            "image_path": image_path,
+                            "media_type": "IMAGE"
                         })
                         result = res.json()
                         if result.get("success"):
-                            print("✅ Portfolio item added successfully!")
+                            print("✅ Portfolio image added!")
                         else:
-                            print("❌ Failed to add portfolio item:", result.get("msg"))
+                            print("❌ Failed:", result.get("msg"))
                     except Exception as e:
                         print("❌ Error adding portfolio item:", str(e))
                 
                 elif portfolio_choice == "2":
+                    # Add Video Link
+                    title = input("Title: ")
+                    description = input("Description: ")
+                    media_url = input("Video URL: ")
+                    try:
+                        res = requests.post(f"{BASE_URL}/freelancer/portfolio/add", json={
+                            "freelancer_id": current_freelancer_id,
+                            "title": title,
+                            "description": description,
+                            "media_type": "VIDEO",
+                            "media_url": media_url
+                        })
+                        result = res.json()
+                        if result.get("success"):
+                            print("✅ Video link added!")
+                        else:
+                            print("❌ Failed:", result.get("msg"))
+                    except Exception as e:
+                        print("❌ Error adding video link:", str(e))
+                
+                elif portfolio_choice == "3":
+                    # Add Document Link
+                    title = input("Title: ")
+                    description = input("Description: ")
+                    media_url = input("Document URL: ")
+                    try:
+                        res = requests.post(f"{BASE_URL}/freelancer/portfolio/add", json={
+                            "freelancer_id": current_freelancer_id,
+                            "title": title,
+                            "description": description,
+                            "media_type": "DOC",
+                            "media_url": media_url
+                        })
+                        result = res.json()
+                        if result.get("success"):
+                            print("✅ Document link added!")
+                        else:
+                            print("❌ Failed:", result.get("msg"))
+                    except Exception as e:
+                        print("❌ Error adding document link:", str(e))
+                
+                elif portfolio_choice == "4":
                     # View My Portfolio
                     try:
                         res = requests.get(f"{BASE_URL}/freelancer/portfolio/{current_freelancer_id}")
                         data = res.json()
                         if data.get("success") and data.get("portfolio_items"):
                             print("\n--- MY PORTFOLIO ---")
-                            # ===== UPDATED: STORE PORTFOLIO IMAGE AS BLOB =====
                             for item in data["portfolio_items"]:
                                 print(f"\n📁 {item['title']}")
                                 print(f"   Description: {item['description']}")
+                                mt = item.get("media_type", "IMAGE")
+                                print(f"   Type: {mt}")
+                                if mt in ("VIDEO","DOC"):
+                                    print(f"   URL: {item.get('media_url','')}")
                                 
                                 # Display image info based on storage type
                                 if "image_base64" in item:
@@ -2113,7 +2239,7 @@ def freelancer_flow():
                     except Exception as e:
                         print("❌ Error fetching portfolio:", str(e))
                 
-                elif portfolio_choice == "3":
+                elif portfolio_choice == "5":
                     break
 
         # 11️⃣ Upload Profile Photo
@@ -2191,6 +2317,47 @@ def freelancer_flow():
                     print("❌ Failed to update availability:", result.get("msg"))
             except Exception as e:
                 print("❌ Error updating availability:", str(e))
+
+        elif choice == "20":
+            # Browse Projects
+            try:
+                res = requests.get(f"{BASE_URL}/freelancer/projects/feed")
+                data = res.json()
+                if data.get("success"):
+                    print("\n--- OPEN PROJECTS ---")
+                    for p in data.get("projects", []):
+                        print(f"{p['project_id']}. {p['title']} [{p['budget_type']}] {p['budget_min']}-{p['budget_max']}")
+                        print(f"   {p['category']} | Skills: {p['skills']}")
+                        print(f"   {p['description']}")
+                else:
+                    print("❌", data.get("msg"))
+            except Exception as e:
+                print("❌ Error:", str(e))
+
+        elif choice == "21":
+            # Apply to Project
+            pid = input("Project ID: ").strip()
+            proposal = input("Proposal Text: ").strip()
+            print("Optional bid fields: leave blank if not applicable")
+            bid_amount = input("Bid Amount (FIXED): ").strip()
+            hourly_rate = input("Hourly Rate (HOURLY): ").strip()
+            event_base_fee = input("Event Base Fee (EVENT): ").strip()
+            payload = {
+                "freelancer_id": current_freelancer_id,
+                "project_id": pid,
+                "proposal_text": proposal
+            }
+            if bid_amount:
+                try: payload["bid_amount"] = float(bid_amount)
+                except: pass
+            if hourly_rate:
+                try: payload["hourly_rate"] = float(hourly_rate)
+                except: pass
+            if event_base_fee:
+                try: payload["event_base_fee"] = float(event_base_fee)
+                except: pass
+            res = requests.post(f"{BASE_URL}/freelancer/projects/apply", json=payload)
+            print(res.json())
 
         # ---------- MAIN MENU ----------
 # ---------- MAIN MENU ----------
