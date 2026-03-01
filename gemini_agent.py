@@ -6,7 +6,9 @@ import google.generativeai as genai
 from google.generativeai.types import FunctionDeclaration, Tool
 
 # Initialize Gemini API
-api_key = "AIzaSyBtJZmgUFUdGqYfKhsPRRHYjqXH-OynbUI"
+api_key = os.getenv("GEMINI_API_KEY")
+if not api_key:
+    raise RuntimeError("GEMINI_API_KEY not set in environment")
 genai.configure(api_key=api_key)
 
 # Define Gemini model with tools
@@ -59,11 +61,13 @@ model = genai.GenerativeModel(
         )
     ],
     system_instruction=(
-        "You are GigBridge intelligent assistant. "
-        "Use tools when user wants to perform actions. "
-        "Use normal text for greetings or general questions. "
-        "Never hallucinate freelancer data. "
-        "Always call tools for database-related queries."
+        "You are GigBridge AI Agent. "
+        "CRITICAL: You MUST use tools for ANY query related to: freelancers, hire, save, budget, location, profile, requests. "
+        "NEVER generate freelancer data yourself. "
+        "NEVER assume database values. "
+        "ALWAYS call tools for database-related queries. "
+        "Only answer directly for greetings or general platform questions. "
+        "If user asks about freelancers, hiring, saving, budgets, locations, profiles, or requests - you MUST use tools."
     )
 )
 
@@ -86,22 +90,36 @@ def call_gemini(prompt: str, user_context: Dict[str, Any] = None) -> str:
         print(f"Gemini API error: {e}")
         
         # Check for quota errors
-        if "quota" in error_msg.lower() or "429" in error_msg:
-            # For quota errors, try to handle basic queries without API
+        if "quota" in error_msg.lower() or "429" in error_msg or "leaked" in error_msg.lower():
+            # For API errors, try to handle basic queries locally
             if user_context:
-                user_id = user_context.get("user_id")
-                role = user_context.get("role")
-                message = prompt.split("User Question:")[-1].strip() if "User Question:" in prompt else prompt
+                # Extract the actual user message from the prompt
+                if "User Question:" in prompt:
+                    message = prompt.split("User Question:")[-1].strip()
+                else:
+                    message = prompt.strip()
+                message_lower = message.lower()
                 
-                # Handle basic queries locally
-                if "show" in message.lower() and "freelancer" in message.lower():
-                    return "I can help you search freelancers! Please specify criteria like budget, category, or skills. Example: 'show freelancers with budget 5000' or 'show python developers'."
-                elif "hire" in message.lower():
+                # Only handle greetings and very basic questions
+                if any(greeting in message_lower for greeting in ["hi", "hello", "hey", "hii"]):
+                    return "Hi! How can I assist you with GigBridge today?"
+                elif any(generic in message_lower for generic in ["how are you", "what is gigbridge", "help"]):
+                    return "I'm your GigBridge AI assistant. I can help you search freelancers, hire talent, and manage your requests. What would you like to do?"
+                elif "show" in message_lower and "freelancer" in message_lower:
+                    # Try to call the freelancer query function directly
+                    try:
+                        from llm_chatbot import _handle_query_freelancers
+                        result = _handle_query_freelancers({})
+                        return result.get("text", "Unable to fetch freelancers at the moment.")
+                    except Exception as e:
+                        print(f"Local freelancer query error: {e}")
+                        return "I'm currently experiencing high demand. Please try again later or use the search endpoints directly."
+                elif "hire" in message_lower:
                     return "I can help you hire freelancers! Please specify who you want to hire. Example: 'hire freelancer John' or provide their ID."
-                elif "save" in message.lower() and "freelancer" in message.lower():
+                elif "save" in message_lower and "freelancer" in message_lower:
                     return "I can help you save freelancers to your favorites! Please specify which freelancer. Example: 'save freelancer John' or provide their ID."
                 else:
-                    return "I'm currently experiencing high demand. You can still use the search endpoints directly or try again later."
+                    return "I'm currently experiencing high demand. For freelancer searches, hiring, or account-specific questions, please try again later or use the search endpoints directly."
             else:
                 return "I'm currently experiencing high demand. Please try again later."
         

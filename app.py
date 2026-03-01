@@ -24,6 +24,33 @@ from settings import (
 )
 from categories import is_valid_category
 
+
+# ============================================================
+# AGE VALIDATION UTILITIES
+# ============================================================
+
+def calculate_age(dob_str):
+    """Calculate age from DOB string in YYYY-MM-DD format"""
+    from datetime import datetime
+    try:
+        dob_date = datetime.strptime(dob_str, "%Y-%m-%d").date()
+        today = datetime.now().date()
+        age = today.year - dob_date.year - ((today.month, today.day) < (dob_date.month, dob_date.day))
+        return age
+    except ValueError:
+        return None
+
+
+def validate_age(age):
+    """Validate age is between 18 and 60 years inclusive"""
+    if age < 18:
+        return False, "User must be at least 18 years old."
+    if age > 60:
+        return False, "Maximum allowed age is 60 years."
+    return True, None
+
+
+# ============================================================
 # Semantic (RAG-style) search helpers
 from semantic_search import load_or_build, semantic_search, upsert_freelancer
 from database import create_tables, rebuild_freelancer_search_index, get_freelancer_verification, update_freelancer_verification, get_freelancer_subscription, update_freelancer_subscription, get_freelancer_job_applies, increment_job_applies, check_subscription_expiry, get_freelancer_plan
@@ -581,9 +608,19 @@ def freelancer_login():
 @app.route("/client/profile", methods=["POST"])
 def client_profile():
     d = get_json()
-    missing = require_fields(d, ["client_id", "phone", "location", "bio"])
+    missing = require_fields(d, ["client_id", "phone", "location", "bio", "dob"])
     if missing:
         return jsonify({"success": False, "msg": "Missing fields"}), 400
+    
+    # Validate DOB format and calculate age
+    age = calculate_age(d["dob"])
+    if age is None:
+        return jsonify({"success": False, "msg": "Invalid DOB format. Use YYYY-MM-DD"}), 400
+    
+    # Apply age restriction (18-60 years)
+    is_valid_age, age_error_msg = validate_age(age)
+    if not is_valid_age:
+        return jsonify({"success": False, "msg": age_error_msg}), 400
     pincode = str(d.get("pincode", "") or "").strip()
     lat = lon = None
     if pincode:
@@ -600,16 +637,17 @@ def client_profile():
     conn = sqlite3.connect("client.db")
     cur = conn.cursor()
     cur.execute("""
-        INSERT INTO client_profile (client_id, phone, location, bio, pincode, latitude, longitude)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO client_profile (client_id, phone, location, bio, pincode, latitude, longitude, dob)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(client_id) DO UPDATE SET
         phone=excluded.phone,
         location=excluded.location,
         bio=excluded.bio,
         pincode=excluded.pincode,
         latitude=excluded.latitude,
-        longitude=excluded.longitude
-    """, (d["client_id"], d["phone"], d["location"], d["bio"], pincode, lat, lon))
+        longitude=excluded.longitude,
+        dob=excluded.dob
+    """, (d["client_id"], d["phone"], d["location"], d["bio"], pincode, lat, lon, d["dob"]))
     conn.commit()
     conn.close()
 
@@ -628,12 +666,48 @@ def client_profile():
 @app.route("/freelancer/profile", methods=["POST"])
 def freelancer_profile():
     d = get_json()
-    missing = require_fields(d, ["freelancer_id", "title", "skills", "experience", "min_budget", "max_budget", "bio", "category", "location"])
+    missing = require_fields(d, ["freelancer_id", "title", "skills", "years", "months", "min_budget", "max_budget", "bio", "category", "location", "dob"])
     if missing:
         return jsonify({"success": False, "msg": "Missing fields"}), 400
 
+    # Validate years and months
+    try:
+        years = int(d["years"])
+        months = int(d["months"])
+    except (ValueError, TypeError):
+        return jsonify({"success": False, "msg": "Years and months must be integers"}), 400
+    
+    if years < 0 or years > 40:
+        return jsonify({"success": False, "msg": "Years must be between 0 and 40"}), 400
+    if months < 0 or months > 11:
+        return jsonify({"success": False, "msg": "Months must be between 0 and 11"}), 400
+
+    # Validate DOB format and calculate age
+    age = calculate_age(d["dob"])
+    if age is None:
+        return jsonify({"success": False, "msg": "Invalid DOB format. Use YYYY-MM-DD"}), 400
+    
+    # Apply age restriction (18-60 years)
+    is_valid_age, age_error_msg = validate_age(age)
+    if not is_valid_age:
+        return jsonify({"success": False, "msg": age_error_msg}), 400
+    
+    # Calculate total experience in years
+    total_experience = years + (months / 12)
+    
+    # Validate experience against age (minimum working age is 18)
+    max_experience = age - 18
+    if total_experience > max_experience:
+        return jsonify({"success": False, "msg": "Experience exceeds logical age limit"}), 400
+
     if not is_valid_category(d["category"]):
         return jsonify({"success": False, "msg": "Invalid category"}), 400
+
+    # Validate availability_status if provided
+    availability_status = d.get("availability_status", "AVAILABLE")
+    allowed_statuses = ["AVAILABLE", "BUSY", "ON_LEAVE"]
+    if availability_status not in allowed_statuses:
+        return jsonify({"success": False, "msg": "Invalid availability status"}), 400
 
     # Optional location support for geocoding
     lat, lon = (None, None)
@@ -657,8 +731,8 @@ def freelancer_profile():
     cur.execute(
         """
         INSERT INTO freelancer_profile
-        (freelancer_id, title, skills, experience, min_budget, max_budget, bio, category, location, pincode, latitude, longitude)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        (freelancer_id, title, skills, experience, min_budget, max_budget, bio, category, location, pincode, latitude, longitude, dob, availability_status)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(freelancer_id) DO UPDATE SET
             title=excluded.title,
             skills=excluded.skills,
@@ -670,13 +744,15 @@ def freelancer_profile():
             location=excluded.location,
             pincode=excluded.pincode,
             latitude=excluded.latitude,
-            longitude=excluded.longitude
+            longitude=excluded.longitude,
+            dob=excluded.dob,
+            availability_status=excluded.availability_status
         """,
         (
             freelancer_id,
             d["title"],
             d["skills"],
-            int(d["experience"]),
+            total_experience,  # Store as decimal
             float(d["min_budget"]),
             float(d["max_budget"]),
             d["bio"],
@@ -685,6 +761,8 @@ def freelancer_profile():
             pincode,
             lat,
             lon,
+            d["dob"],
+            availability_status,
         ),
     )
     conn.commit()
@@ -700,6 +778,41 @@ def freelancer_profile():
         pass
 
     return jsonify({"success": True})
+
+@app.route("/freelancer/update-availability", methods=["POST"])
+def update_freelancer_availability():
+    """Update freelancer availability status"""
+    d = get_json()
+    missing = require_fields(d, ["freelancer_id", "availability_status"])
+    if missing:
+        return jsonify({"success": False, "msg": "Missing fields"}), 400
+    
+    # Validate availability status
+    allowed_statuses = ["AVAILABLE", "BUSY", "ON_LEAVE"]
+    if d["availability_status"] not in allowed_statuses:
+        return jsonify({"success": False, "msg": "Invalid availability status"}), 400
+    
+    freelancer_id = int(d["freelancer_id"])
+    availability_status = d["availability_status"]
+    
+    conn = sqlite3.connect("freelancer.db")
+    cur = conn.cursor()
+    try:
+        cur.execute("""
+            UPDATE freelancer_profile 
+            SET availability_status = ?
+            WHERE freelancer_id = ?
+        """, (availability_status, freelancer_id))
+        conn.commit()
+        
+        if cur.rowcount == 0:
+            return jsonify({"success": False, "msg": "Freelancer profile not found"}), 404
+            
+        return jsonify({"success": True})
+    except Exception as e:
+        return jsonify({"success": False, "msg": "Database error"}), 500
+    finally:
+        conn.close()
 
 # ============================================================
 # SEARCH (Category + Budget) + includes freelancer NAME
@@ -1080,44 +1193,35 @@ def freelancers_all():
 
 @app.route("/freelancers/<int:freelancer_id>", methods=["GET"])
 def freelancer_details(freelancer_id: int):
-    conn = sqlite3.connect("freelancer.db")
-    cur = conn.cursor()
-    cur.execute("""
-        SELECT
-            f.id,
-            f.name,
-            f.email,
-            COALESCE(fp.title, ''),
-            COALESCE(fp.skills, ''),
-            COALESCE(fp.experience, 0),
-            COALESCE(fp.min_budget, 0),
-            COALESCE(fp.max_budget, 0),
-            COALESCE(fp.rating, 0),
-            COALESCE(fp.category, ''),
-            COALESCE(fp.bio, '')
-        FROM freelancer f
-        LEFT JOIN freelancer_profile fp ON fp.freelancer_id = f.id
-        WHERE f.id = ?
-    """, (freelancer_id,))
-    r = cur.fetchone()
-    conn.close()
-
-    if not r:
+    # Use the enhanced get_freelancer_profile function that includes all new fields
+    from database import get_freelancer_profile
+    
+    profile_data = get_freelancer_profile(freelancer_id)
+    if not profile_data:
         return jsonify({"success": False, "msg": "Freelancer not found"}), 404
 
     return jsonify({
         "success": True,
-        "freelancer_id": r[0],
-        "name": r[1],
-        "email": r[2],
-        "title": r[3],
-        "skills": r[4],
-        "experience": r[5],
-        "min_budget": r[6],
-        "max_budget": r[7],
-        "rating": r[8],
-        "category": r[9],
-        "bio": r[10],
+        "freelancer_id": profile_data["id"],
+        "name": profile_data["name"],
+        "email": profile_data["email"],
+        "title": profile_data["title"],
+        "skills": profile_data["skills"],
+        "experience": profile_data["experience"],
+        "experience_formatted": profile_data.get("experience_formatted"),
+        "min_budget": profile_data["min_budget"],
+        "max_budget": profile_data["max_budget"],
+        "rating": profile_data["rating"],
+        "category": profile_data["category"],
+        "bio": profile_data["bio"],
+        "projects_completed": profile_data.get("projects_completed"),
+        "availability_status": profile_data.get("availability_status"),
+        "profile_image": profile_data.get("profile_image"),
+        "location": profile_data.get("location"),
+        "pincode": profile_data.get("pincode"),
+        "latitude": profile_data.get("latitude"),
+        "longitude": profile_data.get("longitude"),
+        "tags": profile_data.get("tags"),
     })
 
 # ============================================================
@@ -1214,14 +1318,19 @@ def message_history():
 @app.route("/client/hire", methods=["POST"])
 def client_hire():
     d = get_json()
-    missing = require_fields(d, ["client_id", "freelancer_id", "proposed_budget"])
+    missing = require_fields(d, ["client_id", "freelancer_id", "proposed_budget", "contract_type"])
     if missing:
         return jsonify({"success": False, "msg": "Missing fields"}), 400
 
     client_id = int(d["client_id"])
     freelancer_id = int(d["freelancer_id"])
     proposed_budget = float(d["proposed_budget"])
+    contract_type = str(d["contract_type"]).upper()
     note = str(d.get("note", "")).strip()
+    
+    # Validate contract type
+    if contract_type not in ["FIXED", "HOURLY", "EVENT"]:
+        return jsonify({"success": False, "msg": "Invalid contract type. Use FIXED, HOURLY, or EVENT"}), 400
 
     # simple existence check
     conn = sqlite3.connect("freelancer.db")
@@ -1230,6 +1339,13 @@ def client_hire():
     if not cur.fetchone():
         conn.close()
         return jsonify({"success": False, "msg": "Freelancer not found"}), 404
+    
+    # Check freelancer availability status
+    cur.execute("SELECT availability_status FROM freelancer_profile WHERE freelancer_id=?", (freelancer_id,))
+    availability_result = cur.fetchone()
+    if availability_result and availability_result[0] == "ON_LEAVE":
+        conn.close()
+        return jsonify({"success": False, "msg": "Freelancer is currently not accepting new projects"}), 403
     if FEATURE_ENFORCE_VERIFIED_FOR_HIRE_MESSAGE:
         try:
             cur.execute("SELECT COALESCE(is_verified,0) FROM freelancer_profile WHERE freelancer_id=?", (freelancer_id,))
@@ -1241,10 +1357,51 @@ def client_hire():
             pass
 
     job_title = str(d.get("job_title", "")).strip()
-    cur.execute("""
-        INSERT INTO hire_request (client_id, freelancer_id, job_title, proposed_budget, note, status, created_at)
-        VALUES (?, ?, ?, ?, ?, 'PENDING', ?)
-    """, (client_id, freelancer_id, job_title, proposed_budget, note, now_ts()))
+    
+    # Handle different contract types
+    if contract_type == "FIXED":
+        # Keep existing budget logic unchanged
+        cur.execute("""
+            INSERT INTO hire_request (client_id, freelancer_id, job_title, proposed_budget, note, status, contract_type, created_at)
+            VALUES (?, ?, ?, ?, ?, 'PENDING', ?, ?)
+        """, (client_id, freelancer_id, job_title, proposed_budget, note, contract_type, now_ts()))
+    elif contract_type == "HOURLY":
+        # Require hourly rate fields
+        if "contract_hourly_rate" not in d or "weekly_limit" not in d:
+            return jsonify({"success": False, "msg": "HOURLY contracts require contract_hourly_rate and weekly_limit"}), 400
+        
+        hourly_rate = float(d.get("contract_hourly_rate", 0))
+        weekly_limit = float(d.get("weekly_limit", 0))
+        max_daily_hours = float(d.get("max_daily_hours", 8))
+        
+        if hourly_rate <= 0 or weekly_limit <= 0:
+            return jsonify({"success": False, "msg": "HOURLY contracts require positive rates and limits"}), 400
+        
+        cur.execute("""
+            INSERT INTO hire_request (client_id, freelancer_id, job_title, proposed_budget, note, status, contract_type, contract_hourly_rate, contract_overtime_rate, weekly_limit, max_daily_hours, created_at)
+            VALUES (?, ?, ?, ?, ?, 'PENDING', ?, ?, ?, ?, ?, ?)
+        """, (client_id, freelancer_id, job_title, proposed_budget, note, contract_type, hourly_rate, hourly_rate * 1.5, weekly_limit, max_daily_hours, now_ts()))
+    elif contract_type == "EVENT":
+        # Require event fields
+        required_event_fields = ["event_base_fee", "event_included_hours", "event_overtime_rate"]
+        missing_event = [f for f in required_event_fields if f not in d]
+        if missing_event:
+            return jsonify({"success": False, "msg": f"EVENT contracts require: {', '.join(missing_event)}"}), 400
+        
+        event_base_fee = float(d.get("event_base_fee", 0))
+        event_included_hours = float(d.get("event_included_hours", 0))
+        event_overtime_rate = float(d.get("event_overtime_rate", 0))
+        advance_paid = float(d.get("advance_paid", 0))
+        
+        if event_base_fee < 0 or event_included_hours < 0 or event_overtime_rate < 0 or advance_paid < 0:
+            return jsonify({"success": False, "msg": "EVENT contracts require non-negative values"}), 400
+        
+        cur.execute("""
+            INSERT INTO hire_request (client_id, freelancer_id, job_title, proposed_budget, note, status, contract_type, event_base_fee, event_included_hours, event_overtime_rate, advance_paid, created_at)
+            VALUES (?, ?, ?, ?, ?, 'PENDING', ?, ?, ?, ?, ?, ?)
+        """, (client_id, freelancer_id, job_title, proposed_budget, note, contract_type, event_base_fee, event_included_hours, event_overtime_rate, advance_paid, now_ts()))
+    else:
+        return jsonify({"success": False, "msg": "Invalid contract type"}), 400
     req_id = cur.lastrowid
 
     # Add notification for client in client.db
@@ -1273,7 +1430,10 @@ def freelancer_hire_inbox():
     conn = sqlite3.connect("freelancer.db")
     cur = conn.cursor()
     cur.execute("""
-        SELECT id, client_id, proposed_budget, note, status, created_at
+        SELECT id, client_id, proposed_budget, note, status, created_at, 
+               contract_type, contract_hourly_rate, contract_overtime_rate, 
+               weekly_limit, max_daily_hours, event_base_fee, event_included_hours, 
+               event_overtime_rate, advance_paid
         FROM hire_request
         WHERE freelancer_id=?
         ORDER BY created_at DESC
@@ -1298,6 +1458,15 @@ def freelancer_hire_inbox():
             "note": r[3],
             "status": r[4],
             "created_at": r[5],
+            "contract_type": r[6],
+            "contract_hourly_rate": r[7],
+            "contract_overtime_rate": r[8],
+            "weekly_limit": r[9],
+            "max_daily_hours": r[10],
+            "event_base_fee": r[11],
+            "event_included_hours": r[12],
+            "event_overtime_rate": r[13],
+            "advance_paid": r[14],
         })
 
     client_conn.close()
@@ -2892,6 +3061,320 @@ def freelancer_subscription_upgrade():
             "success": False,
             "msg": "Failed to upgrade subscription"
         }), 500
+
+
+@app.route("/freelancer/subscription/status", methods=["GET"])
+def freelancer_subscription_status():
+    """Get freelancer subscription status"""
+    freelancer_id = request.args.get("freelancer_id")
+    if not freelancer_id:
+        return jsonify({"success": False, "msg": "Missing freelancer_id"}), 400
+    
+    try:
+        freelancer_id = int(freelancer_id)
+    except ValueError:
+        return jsonify({"success": False, "msg": "Invalid freelancer_id"}), 400
+    
+    # Get subscription info
+    from database import get_freelancer_subscription, get_freelancer_job_applies, get_freelancer_plan
+    
+    subscription = get_freelancer_subscription(freelancer_id)
+    job_applies = get_freelancer_job_applies(freelancer_id)
+    
+    # Get current plan (fallback to profile if subscription table is empty)
+    current_plan = "BASIC"
+    if subscription:
+        current_plan = subscription.get("plan_name", "BASIC")
+    else:
+        # Fallback to profile table
+        profile_plan = get_freelancer_plan(freelancer_id)
+        if profile_plan:
+            current_plan = profile_plan
+    
+    return jsonify({
+        "success": True,
+        "subscription": subscription or {"plan_name": "BASIC"},
+        "job_applies": job_applies or {"applies_used": 0, "limit": 10, "current_plan": current_plan}
+    })
+
+
+@app.route("/client/rate", methods=["POST"])
+def client_rate():
+    d = get_json()
+    missing = require_fields(d, ["client_id", "hire_request_id", "rating", "review"])
+    if missing:
+        return jsonify({"success": False, "msg": "Missing fields"}), 400
+    
+    # Validate rating range
+    rating = float(d["rating"])
+    if rating < 1 or rating > 5:
+        return jsonify({"success": False, "msg": "Rating must be between 1 and 5"}), 400
+    
+    client_id = int(d["client_id"])
+    hire_request_id = int(d["hire_request_id"])
+    review_text = d["review"]
+    
+    conn = sqlite3.connect("freelancer.db")
+    cur = conn.cursor()
+    
+    # Check if hire request belongs to client and status is PAID
+    cur.execute("""
+        SELECT freelancer_id, status 
+        FROM hire_request 
+        WHERE id = ? AND client_id = ?
+    """, (hire_request_id, client_id))
+    
+    request = cur.fetchone()
+    if not request:
+        conn.close()
+        return jsonify({"success": False, "msg": "Hire request not found"}), 404
+    
+    freelancer_id, status = request
+    if status != "PAID":
+        conn.close()
+        return jsonify({"success": False, "msg": "Rating only allowed for paid jobs"}), 400
+    
+    # Check if already rated
+    cur.execute("SELECT id FROM review WHERE hire_request_id = ?", (hire_request_id,))
+    if cur.fetchone():
+        conn.close()
+        return jsonify({"success": False, "msg": "Already rated"}), 400
+    
+    # Get current freelancer stats
+    cur.execute("""
+        SELECT rating, total_projects, total_rating_sum 
+        FROM freelancer_profile 
+        WHERE freelancer_id = ?
+    """, (freelancer_id,))
+    
+    stats = cur.fetchone()
+    if not stats:
+        conn.close()
+        return jsonify({"success": False, "msg": "Freelancer not found"}), 404
+    
+    current_rating, total_projects, total_rating_sum = stats
+    total_projects = total_projects or 0
+    total_rating_sum = total_rating_sum or 0
+    
+    # Calculate new rating
+    new_total_projects = total_projects + 1
+    new_total_rating_sum = total_rating_sum + rating
+    new_average = new_total_rating_sum / new_total_projects
+    
+    # Update freelancer profile
+    cur.execute("""
+        UPDATE freelancer_profile 
+        SET rating = ?, total_projects = ?, total_rating_sum = ?
+        WHERE freelancer_id = ?
+    """, (new_average, new_total_projects, new_total_rating_sum, freelancer_id))
+    
+    # Insert review
+    cur.execute("""
+        INSERT INTO review (hire_request_id, client_id, freelancer_id, rating, review_text, created_at)
+        VALUES (?, ?, ?, ?, ?, ?)
+    """, (hire_request_id, client_id, freelancer_id, rating, review_text, now_ts()))
+    
+    # Update hire request status
+    cur.execute("""
+        UPDATE hire_request 
+        SET status = 'RATED' 
+        WHERE id = ?
+    """, (hire_request_id,))
+    
+    conn.commit()
+    conn.close()
+    
+    return jsonify({
+        "success": True,
+        "new_rating": new_average,
+        "total_reviews": new_total_projects
+    }), 500
+
+
+@app.route("/hourly/log", methods=["POST"])
+def hourly_log():
+    d = get_json()
+    missing = require_fields(d, ["hire_request_id", "freelancer_id", "hours"])
+    if missing:
+        return jsonify({"success": False, "msg": "Missing fields"}), 400
+    
+    hire_request_id = int(d["hire_request_id"])
+    freelancer_id = int(d["freelancer_id"])
+    hours = float(d["hours"])
+    
+    conn = sqlite3.connect("freelancer.db")
+    cur = conn.cursor()
+    
+    # Fetch contract snapshot
+    cur.execute("""
+        SELECT contract_type, contract_hourly_rate, contract_overtime_rate, max_daily_hours
+        FROM hire_request 
+        WHERE id = ? AND freelancer_id = ?
+    """, (hire_request_id, freelancer_id))
+    
+    contract = cur.fetchone()
+    if not contract:
+        conn.close()
+        return jsonify({"success": False, "msg": "Hire request not found"}), 404
+    
+    contract_type, hourly_rate, overtime_rate, max_daily_hours = contract
+    
+    # Ensure contract type is HOURLY
+    if contract_type != "HOURLY":
+        conn.close()
+        return jsonify({"success": False, "msg": "Work logging only available for HOURLY contracts"}), 400
+    
+    hourly_rate = hourly_rate or 0
+    overtime_rate = overtime_rate or 0
+    max_daily_hours = max_daily_hours or 8
+    
+    # Calculate regular and overtime
+    if hours > max_daily_hours:
+        overtime = hours - max_daily_hours
+        regular = max_daily_hours
+    else:
+        overtime = 0
+        regular = hours
+    
+    # Calculate amount
+    amount = (regular * hourly_rate) + (overtime * overtime_rate)
+    
+    # Insert work log
+    cur.execute("""
+        INSERT INTO work_log (hire_request_id, freelancer_id, work_date, hours, calculated_regular, calculated_overtime, calculated_amount, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    """, (hire_request_id, freelancer_id, now_ts().split()[0], hours, regular, overtime, amount, now_ts()))
+    
+    conn.commit()
+    conn.close()
+    
+    return jsonify({
+        "success": True,
+        "regular_hours": regular,
+        "overtime_hours": overtime,
+        "calculated_amount": amount
+    })
+
+
+@app.route("/hourly/generate_invoice", methods=["POST"])
+def hourly_generate_invoice():
+    d = get_json()
+    missing = require_fields(d, ["hire_request_id"])
+    if missing:
+        return jsonify({"success": False, "msg": "Missing hire_request_id"}), 400
+    
+    hire_request_id = int(d["hire_request_id"])
+    
+    conn = sqlite3.connect("freelancer.db")
+    cur = conn.cursor()
+    
+    # Verify contract is HOURLY
+    cur.execute("""
+        SELECT contract_type
+        FROM hire_request 
+        WHERE id = ?
+    """, (hire_request_id,))
+    
+    contract = cur.fetchone()
+    if not contract:
+        conn.close()
+        return jsonify({"success": False, "msg": "Hire request not found"}), 404
+    
+    contract_type = contract[0]
+    if contract_type != "HOURLY":
+        conn.close()
+        return jsonify({"success": False, "msg": "Invoice generation only available for HOURLY contracts"}), 400
+    
+    # Sum approved logs
+    cur.execute("""
+        SELECT SUM(calculated_amount)
+        FROM work_log 
+        WHERE hire_request_id = ? AND approved = 1
+    """, (hire_request_id,))
+    
+    result = cur.fetchone()
+    total_amount = result[0] if result and result[0] else 0
+    
+    # Create invoice entry
+    from datetime import datetime, timedelta
+    week_start = (datetime.now() - timedelta(days=7)).strftime("%Y-%m-%d")
+    week_end = datetime.now().strftime("%Y-%m-%d")
+    
+    cur.execute("""
+        INSERT INTO invoice (hire_request_id, total_amount, week_start, week_end, created_at)
+        VALUES (?, ?, ?, ?, ?)
+    """, (hire_request_id, total_amount, week_start, week_end, now_ts()))
+    
+    conn.commit()
+    conn.close()
+    
+    return jsonify({
+        "success": True,
+        "total_amount": total_amount,
+        "week_start": week_start,
+        "week_end": week_end
+    })
+
+
+@app.route("/event/complete", methods=["POST"])
+def event_complete():
+    d = get_json()
+    missing = require_fields(d, ["hire_request_id", "actual_hours"])
+    if missing:
+        return jsonify({"success": False, "msg": "Missing fields"}), 400
+    
+    hire_request_id = int(d["hire_request_id"])
+    actual_hours = float(d["actual_hours"])
+    
+    conn = sqlite3.connect("freelancer.db")
+    cur = conn.cursor()
+    
+    # Verify contract is EVENT
+    cur.execute("""
+        SELECT contract_type, event_base_fee, event_included_hours, event_overtime_rate, advance_paid
+        FROM hire_request 
+        WHERE id = ?
+    """, (hire_request_id,))
+    
+    contract = cur.fetchone()
+    if not contract:
+        conn.close()
+        return jsonify({"success": False, "msg": "Hire request not found"}), 404
+    
+    contract_type, event_base_fee, event_included_hours, event_overtime_rate, advance_paid = contract
+    
+    # Ensure contract type is EVENT
+    if contract_type != "EVENT":
+        conn.close()
+        return jsonify({"success": False, "msg": "Event completion only available for EVENT contracts"}), 400
+    
+    event_base_fee = event_base_fee or 0
+    event_included_hours = event_included_hours or 0
+    event_overtime_rate = event_overtime_rate or 0
+    advance_paid = advance_paid or 0
+    
+    # Calculate overtime and amounts
+    if actual_hours > event_included_hours:
+        overtime_hours = actual_hours - event_included_hours
+        extra = overtime_hours * event_overtime_rate
+    else:
+        overtime_hours = 0
+        extra = 0
+    
+    total_due = event_base_fee + extra
+    remaining_due = total_due - advance_paid
+    
+    conn.commit()
+    conn.close()
+    
+    return jsonify({
+        "success": True,
+        "actual_hours": actual_hours,
+        "overtime_hours": overtime_hours,
+        "extra_amount": extra,
+        "total_due": total_due,
+        "remaining_due": remaining_due
+    })
 
 
 if __name__ == "__main__":

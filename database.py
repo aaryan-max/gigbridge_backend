@@ -51,6 +51,7 @@ def create_tables():
     _try_add_column(cur, "client_profile", "pincode TEXT")
     _try_add_column(cur, "client_profile", "latitude REAL")
     _try_add_column(cur, "client_profile", "longitude REAL")
+    _try_add_column(cur, "client_profile", "dob TEXT")
 
     cur.execute("""
     CREATE TABLE IF NOT EXISTS client_otp (
@@ -85,6 +86,56 @@ def create_tables():
     )
     """)
 
+    # ==========================
+    # MILESTONE TABLE
+    # ==========================
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS milestone (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        hire_request_id INTEGER,
+        name TEXT,
+        amount REAL,
+        status TEXT DEFAULT 'CREATED',
+        funded INTEGER DEFAULT 0,
+        submitted INTEGER DEFAULT 0,
+        approved INTEGER DEFAULT 0,
+        created_at INTEGER
+    )
+    """)
+
+    # ==========================
+    # WORK LOG TABLE
+    # ==========================
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS work_log (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        hire_request_id INTEGER,
+        freelancer_id INTEGER,
+        work_date TEXT,
+        hours REAL,
+        calculated_regular REAL,
+        calculated_overtime REAL,
+        calculated_amount REAL,
+        approved INTEGER DEFAULT 0,
+        created_at INTEGER
+    )
+    """)
+
+    # ==========================
+    # INVOICE TABLE
+    # ==========================
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS invoice (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        hire_request_id INTEGER,
+        total_amount REAL,
+        week_start TEXT,
+        week_end TEXT,
+        status TEXT DEFAULT 'PENDING',
+        created_at INTEGER
+    )
+    """)
+
     db.commit()
     db.close()
 
@@ -115,7 +166,7 @@ def create_tables():
         freelancer_id INTEGER PRIMARY KEY,
         title TEXT,
         skills TEXT,
-        experience INTEGER,
+        experience REAL,
         min_budget REAL,
         max_budget REAL,
         rating REAL DEFAULT 0,
@@ -132,6 +183,20 @@ def create_tables():
     _try_add_column(cur, "freelancer_profile", "current_plan TEXT DEFAULT 'FREE'")
     _try_add_column(cur, "freelancer_profile", "job_applies_used INTEGER DEFAULT 0")
     _try_add_column(cur, "freelancer_profile", "job_applies_reset_date INTEGER")
+    _try_add_column(cur, "freelancer_profile", "dob TEXT")
+    _try_add_column(cur, "freelancer_profile", "total_rating_sum REAL DEFAULT 0")
+    _try_add_column(cur, "freelancer_profile", "availability_status TEXT DEFAULT 'AVAILABLE'")
+
+    # Migrate experience from INTEGER to REAL for existing records
+    try:
+        cur.execute("ALTER TABLE freelancer_profile ADD COLUMN experience_new REAL")
+        cur.execute("UPDATE freelancer_profile SET experience_new = CAST(experience AS REAL) WHERE experience IS NOT NULL")
+        cur.execute("ALTER TABLE freelancer_profile RENAME COLUMN experience TO experience_old")
+        cur.execute("ALTER TABLE freelancer_profile RENAME COLUMN experience_new TO experience")
+        cur.execute("ALTER TABLE freelancer_profile DROP COLUMN experience_old")
+    except sqlite3.OperationalError:
+        # Column might already be REAL or migration already done
+        pass
 
     cur.execute("""
     CREATE TABLE IF NOT EXISTS freelancer_otp (
@@ -268,6 +333,32 @@ def create_tables():
         status TEXT DEFAULT 'ACTIVE'
     )
     """)
+
+    # ==========================
+    # REVIEW TABLE
+    # ==========================
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS review (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        hire_request_id INTEGER UNIQUE,
+        client_id INTEGER,
+        freelancer_id INTEGER,
+        rating REAL,
+        review_text TEXT,
+        created_at INTEGER
+    )
+    """)
+
+    # Add contract type columns to hire_request
+    _try_add_column(cur, "hire_request", "contract_type TEXT DEFAULT 'FIXED'")
+    _try_add_column(cur, "hire_request", "contract_hourly_rate REAL")
+    _try_add_column(cur, "hire_request", "contract_overtime_rate REAL")
+    _try_add_column(cur, "hire_request", "weekly_limit REAL")
+    _try_add_column(cur, "hire_request", "max_daily_hours REAL DEFAULT 8")
+    _try_add_column(cur, "hire_request", "event_base_fee REAL")
+    _try_add_column(cur, "hire_request", "event_included_hours REAL")
+    _try_add_column(cur, "hire_request", "event_overtime_rate REAL")
+    _try_add_column(cur, "hire_request", "advance_paid REAL DEFAULT 0")
 
     db.commit()
 
@@ -571,6 +662,30 @@ def get_client_profile(client_id: int):
         conn.close()
 
 
+def get_completed_project_count(freelancer_id: int):
+    """Get the count of completed projects for a freelancer"""
+    try:
+        fid = int(freelancer_id)
+    except Exception:
+        return 0
+    
+    conn = freelancer_db()
+    try:
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT COUNT(*)
+            FROM hire_request
+            WHERE freelancer_id = ?
+            AND status = 'COMPLETED'
+        """, (fid,))
+        result = cur.fetchone()
+        return result[0] if result and result[0] is not None else 0
+    except Exception:
+        return 0
+    finally:
+        conn.close()
+
+
 def get_freelancer_profile(freelancer_id: int):
     try:
         fid = int(freelancer_id)
@@ -582,7 +697,7 @@ def get_freelancer_profile(freelancer_id: int):
         cur.execute("""
             SELECT f.id, f.name, f.email, f.profile_image,
                    p.title, p.skills, p.experience, p.min_budget, p.max_budget,
-                   p.rating, p.total_projects, p.bio, p.category, p.location, p.pincode, p.latitude, p.longitude, COALESCE(p.tags,'')
+                   p.rating, p.total_projects, p.bio, p.category, p.location, p.pincode, p.latitude, p.longitude, COALESCE(p.tags,''), COALESCE(p.availability_status,'AVAILABLE')
             FROM freelancer f
             LEFT JOIN freelancer_profile p ON p.freelancer_id = f.id
             WHERE f.id=?
@@ -590,6 +705,30 @@ def get_freelancer_profile(freelancer_id: int):
         r = cur.fetchone()
         if not r:
             return None
+        
+        # Get completed projects count
+        completed_projects = get_completed_project_count(fid)
+        
+        # Format experience from decimal to years and months
+        experience_decimal = r[6] or 0
+        years = int(experience_decimal)
+        months = round((experience_decimal - years) * 12)
+        
+        # Handle rounding edge cases
+        if months == 12:
+            years += 1
+            months = 0
+        elif months < 0:
+            months = 0
+        
+        # Format experience string
+        if years == 0:
+            experience_str = f"{months} months"
+        elif months == 0:
+            experience_str = f"{years} years"
+        else:
+            experience_str = f"{years} years {months} months"
+        
         return {
             "id": r[0],
             "name": r[1],
@@ -597,11 +736,13 @@ def get_freelancer_profile(freelancer_id: int):
             "profile_image": r[3],
             "title": r[4],
             "skills": r[5],
-            "experience": r[6],
+            "experience": experience_decimal,  # Keep decimal for backward compatibility
+            "experience_formatted": experience_str,  # New formatted string
             "min_budget": r[7],
             "max_budget": r[8],
             "rating": r[9],
             "total_projects": r[10],
+            "projects_completed": completed_projects,  # New dynamic count
             "bio": r[11],
             "category": r[12],
             "location": r[13],
@@ -609,6 +750,7 @@ def get_freelancer_profile(freelancer_id: int):
             "latitude": r[15],
             "longitude": r[16],
             "tags": r[17],
+            "availability_status": r[18],  # New availability status field
         }
     except Exception:
         return None

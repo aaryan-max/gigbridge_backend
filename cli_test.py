@@ -3,12 +3,40 @@ import time
 import sqlite3
 from datetime import datetime
 import webbrowser
-
+import uuid
 
 BASE_URL = "http://127.0.0.1:5000"
 
 current_client_id = None
 current_freelancer_id = None
+
+def check_server_connection():
+    """Check if Flask server is running"""
+    try:
+        response = requests.get(f"{BASE_URL}/freelancers/1", timeout=3)
+        return True
+    except requests.exceptions.ConnectionError:
+        return False
+    except:
+        return False
+
+def show_server_error():
+    """Show helpful error message when server is not running"""
+    print("\n" + "="*60)
+    print("❌ SERVER CONNECTION ERROR")
+    print("="*60)
+    print("🔧 The Flask server is not running!")
+    print()
+    print("💡 TO FIX THIS:")
+    print("1. Open a NEW terminal window")
+    print("2. Navigate to: cd gigbridge_backend")
+    print("3. Run: python start_server.py")
+    print("   OR run: python app.py")
+    print()
+    print("⏳ Wait for server to start, then try again")
+    print("🌐 Server should run at: http://127.0.0.1:5000")
+    print("="*60)
+    print()
 
 # ============================================================
 # ===== NEW: CALL FEATURE =====
@@ -120,9 +148,87 @@ def valid_email(email):
 def valid_phone(phone):
     return phone.isdigit() and len(phone) == 10
 
+def get_valid_dob():
+    """Get valid Date of Birth with age validation (18-60 years)"""
+    from datetime import datetime
+    
+    while True:
+        dob = input("Date of Birth (YYYY-MM-DD): ").strip()
+        
+        # Validate format
+        try:
+            dob_date = datetime.strptime(dob, "%Y-%m-%d").date()
+        except ValueError:
+            print("❌ Invalid date format. Please use YYYY-MM-DD format.")
+            continue
+        
+        # Calculate age
+        today = datetime.now().date()
+        age = today.year - dob_date.year - ((today.month, today.day) < (dob_date.month, dob_date.day))
+        
+        # Validate age range
+        if age < 18:
+            print("❌ User must be at least 18 years old.")
+            print("   Please enter valid DOB (18+ required).")
+            continue
+        elif age > 60:
+            print("❌ Maximum allowed age is 60 years.")
+            print("   Please enter valid DOB.")
+            continue
+        
+        # Valid DOB entered
+        return dob
+
+# ---------- RATING FUNCTION ----------
+def rate_freelancer_for_job(job):
+    """Rate freelancer for a completed job"""
+    try:
+        print(f"\n--- Rate Freelancer for: {job['title']} ---")
+        print(f"Freelancer ID: {job.get('freelancer_id')}")
+        print(f"Job Budget: ₹{job.get('budget')}")
+        
+        # Get rating
+        while True:
+            rating_input = input("Rating (1-5): ")
+            try:
+                rating = float(rating_input)
+                if 1 <= rating <= 5:
+                    break
+                else:
+                    print("❌ Rating must be between 1 and 5")
+            except ValueError:
+                print("❌ Please enter a valid number")
+        
+        # Get review
+        review = input("Review (optional): ").strip()
+        
+        # Submit rating
+        res = requests.post(f"{BASE_URL}/client/rate", json={
+            "client_id": current_client_id,
+            "hire_request_id": job['id'],
+            "rating": rating,
+            "review": review
+        })
+        
+        result = res.json()
+        if result.get("success"):
+            print(f"✅ Rating submitted successfully!")
+            print(f"New average rating: {result.get('new_rating', 'N/A'):.2f}")
+            print(f"Total reviews: {result.get('total_reviews', 'N/A')}")
+        else:
+            print(f"❌ Failed to submit rating: {result.get('msg', 'Unknown error')}")
+            
+    except Exception as e:
+        print(f"❌ Error submitting rating: {str(e)}")
+
 # ---------- SIGNUP WITH OTP (AUTO-LOGIN AFTER SIGNUP) ----------
 def signup_with_role(role):
     global current_client_id, current_freelancer_id
+
+    # Check if server is running before proceeding
+    if not check_server_connection():
+        show_server_error()
+        return
 
     name = input("Name: ")
 
@@ -244,6 +350,11 @@ def forgot_password(role):
 # ---------- LOGIN ----------
 def login(role=None):
     global current_client_id, current_freelancer_id
+
+    # Check if server is running before proceeding
+    if not check_server_connection():
+        show_server_error()
+        return
 
     while True:
         print("\nLogin method:")
@@ -681,11 +792,33 @@ def view_freelancer_details(fid):
     print("Category:", data["category"])
     print("Title:", data["title"])
     print("Skills:", data["skills"])
-    print("Experience:", data["experience"])
+    
+    # Display formatted experience if available, otherwise show decimal
+    if data.get("experience_formatted"):
+        print("Experience:", data["experience_formatted"])
+    else:
+        print("Experience:", data["experience"])
+    
     print("Min Budget:", data["min_budget"])
     print("Max Budget:", data["max_budget"])
     print("Rating:", data["rating"])
     print("Bio:", data["bio"])
+    
+    # Display completed projects count if available
+    if data.get("projects_completed") is not None:
+        print("Projects Completed:", data["projects_completed"])
+    
+    # Display availability status with emoji formatting
+    if data.get("availability_status"):
+        status = data["availability_status"]
+        if status == "AVAILABLE":
+            print("Availability: 🟢 Available")
+        elif status == "BUSY":
+            print("Availability: 🟡 Busy")
+        elif status == "ON_LEAVE":
+            print("Availability: 🔴 On Leave")
+        else:
+            print("Availability:", status)
     
     # Display profile image if available
     if data.get("profile_image"):
@@ -694,33 +827,90 @@ def view_freelancer_details(fid):
     # Display portfolio items
     try:
         portfolio_res = requests.get(f"{BASE_URL}/freelancer/portfolio/{fid}")
-        portfolio_data = portfolio_res.json()
-        if portfolio_data.get("success") and portfolio_data.get("portfolio_items"):
-            print("\n--- PORTFOLIO ---")
-            for item in portfolio_data["portfolio_items"]:
-                print(f"\n📁 {item['title']}")
-                print(f"   Description: {item['description']}")
-                print(f"   Image: {item['image_path']}")
+        if portfolio_res.status_code == 200:
+            portfolio_data = portfolio_res.json()
+            if portfolio_data.get("success") and portfolio_data.get("portfolio_items"):
+                print("\n--- PORTFOLIO ---")
+                for item in portfolio_data["portfolio_items"]:
+                    print(f"\n📁 {item['title']}")
+                    print(f"   Description: {item['description']}")
+                    if item.get('image_path'):
+                        print(f"   Image: {item['image_path']}")
+                    elif item.get('image_base64'):
+                        print(f"   Image: [Base64 encoded image]")
+                    print(f"   Added: {item.get('created_at', 'Unknown')}")
+            else:
+                print("\n--- PORTFOLIO ---")
+                print("📭 No portfolio items")
         else:
             print("\n--- PORTFOLIO ---")
-            print("📭 No portfolio items")
+            print(f"❌ Error loading portfolio: HTTP {portfolio_res.status_code}")
+            try:
+                error_data = portfolio_res.json()
+                print(f"   Details: {error_data.get('msg', 'Unknown error')}")
+            except:
+                pass
     except Exception as e:
         print("\n--- PORTFOLIO ---")
-        print("❌ Error loading portfolio")
+        print(f"❌ Error loading portfolio: {str(e)}")
 
 # ---------- CLIENT: HIRE ----------
 def hire_freelancer(fid):
     job_title = input("Job Title: ")
     budget = input("Proposed Budget: ")
     note = input("Note (optional): ")
-
-    res = requests.post(f"{BASE_URL}/client/hire", json={
+    
+    # Contract type selection
+    print("\n--- Contract Type ---")
+    print("1. FIXED (Milestone Based)")
+    print("2. HOURLY (Weekly Billing with Overtime)")
+    print("3. EVENT (Performance-Based with Overtime Clause)")
+    
+    while True:
+        contract_choice = input("Choose contract type (1-3): ")
+        if contract_choice in ["1", "2", "3"]:
+            break
+        print("❌ Invalid choice. Please enter 1, 2, or 3")
+    
+    contract_types = {"1": "FIXED", "2": "HOURLY", "3": "EVENT"}
+    contract_type = contract_types[contract_choice]
+    
+    # Prepare hire request data
+    hire_data = {
         "client_id": current_client_id,
         "freelancer_id": fid,
         "job_title": job_title,
         "proposed_budget": budget,
-        "note": note
-    })
+        "note": note,
+        "contract_type": contract_type
+    }
+    
+    # Add contract-specific fields
+    if contract_type == "HOURLY":
+        hourly_rate = input("Hourly Rate: ")
+        weekly_limit = input("Weekly Hours Limit: ")
+        max_daily_hours = input("Max Daily Hours (default 8): ") or "8"
+        
+        hire_data.update({
+            "contract_hourly_rate": float(hourly_rate),
+            "weekly_limit": float(weekly_limit),
+            "max_daily_hours": float(max_daily_hours)
+        })
+        
+    elif contract_type == "EVENT":
+        event_base_fee = input("Event Base Fee: ")
+        event_included_hours = input("Included Hours: ")
+        event_overtime_rate = input("Overtime Rate per Hour: ")
+        advance_paid = input("Advance Paid (0 if none): ") or "0"
+        
+        hire_data.update({
+            "event_base_fee": float(event_base_fee),
+            "event_included_hours": float(event_included_hours),
+            "event_overtime_rate": float(event_overtime_rate),
+            "advance_paid": float(advance_paid)
+        })
+
+    res = requests.post(f"{BASE_URL}/client/hire", json=hire_data)
     print(res.json())
 
 # ---------- CLIENT: MESSAGES (THREADS) ----------
@@ -871,17 +1061,23 @@ def client_flow():
         print("2. View All");
         print("3. Search")
         print("4. View My Jobs")
-        print("5. Saved Freelancers")
-        print("6. Notifications")
-        print("7. Messages")
-        print("8. Job Request Status")
-        print("9. Recommended Freelancers (AI)")
-        print("10. Check Incoming Calls ")
-        print("11. Logout")
+        print("5. Rate Freelancers")
+        print("6. Saved Freelancers")
+        print("7. Notifications")
+        print("8. Messages")
+        print("9. Job Request Status")
+        print("10. Recommended Freelancers (AI)")
+        print("11. Check Incoming Calls ")
+        print("0. Exit")
+        print("12. Logout")
 
         choice = input("Choose: ")
         
-        if choice == "11":
+        if choice == "0":
+            print("👋 Exiting GigBridge CLI")
+            return
+        
+        if choice == "12":
             current_client_id = None
             print("✅ Logged out successfully")
             return
@@ -895,13 +1091,15 @@ def client_flow():
                 print("❌ Phone must be 10 digits")
 
             pincode = input("PIN Code (6 digits): ")
+            dob = get_valid_dob()
 
             res = requests.post(f"{BASE_URL}/client/profile", json={
                 "client_id": current_client_id,
                 "phone": phone,
                 "location": input("Location: "),
                 "bio": input("Bio: "),
-                "pincode": pincode
+                "pincode": pincode,
+                "dob": dob
             })
             print(res.json())
 
@@ -1018,10 +1216,57 @@ def client_flow():
                 else:
                     for i, j in enumerate(jobs, 1):
                         print(f"{i}. {j['title']} | ₹{j['budget']} | {j['status']}")
-            except:
-                print("❌ Error fetching jobs")
+                        
+                        # Show rating option for PAID jobs
+                        if j.get('status') == 'PAID':
+                            print("   [R] Rate this freelancer")
+                    
+                    # Allow user to select a job for rating
+                    action = input("\nEnter job number to rate, or 0 to go back: ")
+                    if action.lower() == 'r' or (action.isdigit() and int(action) > 0):
+                        try:
+                            job_idx = int(action) - 1 if action.isdigit() else None
+                            if job_idx is not None and 0 <= job_idx < len(jobs):
+                                selected_job = jobs[job_idx]
+                                if selected_job.get('status') == 'PAID':
+                                    rate_freelancer_for_job(selected_job)
+                                else:
+                                    print("❌ Can only rate PAID jobs")
+                            else:
+                                print("❌ Invalid job selection")
+                        except Exception as e:
+                            print("❌ Error:", str(e))
+            except Exception as e:
+                print("❌ Error fetching jobs:", str(e))
 
         elif choice == "5":
+            # Dedicated rating option - show only PAID jobs
+            res = requests.get(f"{BASE_URL}/client/jobs", params={
+                "client_id": current_client_id
+            })
+            print("\n--- RATE FREELANCERS ---")
+            try:
+                jobs = res.json()
+                paid_jobs = [job for job in jobs if job.get('status') == 'PAID']
+                
+                if not paid_jobs:
+                    print("❌ No paid jobs available for rating")
+                else:
+                    print("Jobs available for rating:")
+                    for i, job in enumerate(paid_jobs, 1):
+                        print(f"{i}. {job['title']} | ₹{job['budget']} | {job['status']}")
+                    
+                    action = input("\nEnter job number to rate, or 0 to go back: ")
+                    if action.isdigit() and int(action) > 0:
+                        job_idx = int(action) - 1
+                        if 0 <= job_idx < len(paid_jobs):
+                            rate_freelancer_for_job(paid_jobs[job_idx])
+                        else:
+                            print("❌ Invalid job selection")
+            except Exception as e:
+                print("❌ Error fetching jobs:", str(e))
+
+        elif choice == "6":
             res = requests.get(f"{BASE_URL}/client/saved-freelancers", params={
                 "client_id": current_client_id
             })
@@ -1418,6 +1663,13 @@ def show_freelancer_dashboard_header():
         res = requests.get(f"{BASE_URL}/freelancer/subscription/status", params={
             "freelancer_id": current_freelancer_id
         })
+        
+        # Check if response is valid
+        if res.status_code != 200:
+            print("\nPlan: BASIC")
+            print("Job Applies Used: 0 / 10")
+            return
+            
         data = res.json()
         
         if data.get("success"):
@@ -1439,8 +1691,10 @@ def show_freelancer_dashboard_header():
                 print(f"Job Applies Used: {applies_used} / {limit}")
             else:
                 print("Job Applies Used: Unlimited")
+        else:
+            print("\nPlan: BASIC")
+            print("Job Applies Used: 0 / 10")
     except Exception as e:
-        print(f"Error loading subscription: {str(e)}")
         print("\nPlan: BASIC")
         print("Job Applies Used: 0 / 10")
 
@@ -1460,25 +1714,32 @@ def freelancer_flow():
         
         print("\n--- FREELANCER DASHBOARD ---")
         print("1. Create/Update Profile")
-        print("2. View Hire Requests")
-        print("3. Manage Active Jobs")
-        print("4. Messages")
-        print("5. Earnings")
-        print("6. Saved Clients")
-        print("7. Account Settings")
-        print("8. Notifications")
-        print("9. Manage Portfolio")
-        print("10. Upload Profile Photo")
-        print("11. Check Incoming Calls 📞")
-        print("12. Verification Status 🏅")
-        print("13. Upload Verification Documents")
-        print("14. Subscription Plans 💎")
-        print("15. My Subscription")
-        print("16. Logout")
+        print("2. View My Profile")
+        print("3. View Hire Requests")
+        print("4. Manage Active Jobs")
+        print("5. Messages")
+        print("6. Earnings")
+        print("7. Saved Clients")
+        print("8. Account Settings")
+        print("9. Notifications")
+        print("10. Manage Portfolio")
+        print("11. Upload Profile Photo")
+        print("12. Check Incoming Calls 📞")
+        print("13. Verification Status 🏅")
+        print("14. Upload Verification Documents")
+        print("15. Subscription Plans 💎")
+        print("16. My Subscription")
+        print("17. Update Availability Status")
+        print("18. Exit")
+        print("19. Logout")
 
         choice = input("Choose: ")
 
-        if choice == "16":
+        if choice == "18":
+            print("👋 Exiting GigBridge CLI")
+            return
+        
+        if choice == "19":
             current_freelancer_id = None
             print("✅ Logged out successfully")
             return
@@ -1497,31 +1758,43 @@ def freelancer_flow():
             try:
                 title = input("Title: ")
                 skills = input("Skills: ")
-                experience = int(input("Experience (years): "))
+                
+                # Get experience in years and months
+                print("\nExperience Details:")
+                years = int(input("Years (0-40): "))
+                months = int(input("Months (0-11): "))
+                
                 min_budget = float(input("Min Budget: "))
                 max_budget = float(input("Max Budget: "))
                 bio = input("Bio: ")
                 pincode = input("PIN Code (6 digits): ")
                 location = input("Location: ")
                 category = input("Category (choose from above): ")
+                dob = get_valid_dob()
                 res = requests.post(f"{BASE_URL}/freelancer/profile", json={
                     "freelancer_id": current_freelancer_id,
                     "title": title,
                     "skills": skills,
-                    "experience": experience,
+                    "years": years,
+                    "months": months,
                     "min_budget": min_budget,
                     "max_budget": max_budget,
                     "bio": bio,
                     "pincode": pincode,
                     "location": location,
-                    "category": category
+                    "category": category,
+                    "dob": dob
                 })
                 print(res.json())
             except Exception:
                 print("❌ Server error while updating profile")
 
-        # 2️⃣ View Hire Requests (Inbox)
+        # 2️⃣ View My Profile
         elif choice == "2":
+            view_freelancer_details(current_freelancer_id)
+
+        # 3️⃣ View Hire Requests (Inbox)
+        elif choice == "3":
             try:
                 res = requests.get(f"{BASE_URL}/freelancer/hire/inbox", params={
                     "freelancer_id": current_freelancer_id
@@ -1538,7 +1811,24 @@ def freelancer_flow():
                 print("\n--- HIRE REQUEST ---")
                 print("Request ID:", r["request_id"])
                 print("Client:", r["client_name"], "|", r["client_email"])
-                print("Budget:", r["proposed_budget"])
+                
+                # Display based on contract type
+                contract_type = r.get("contract_type", "FIXED")
+                print("Contract Type:", contract_type)
+                
+                if contract_type == "FIXED":
+                    print("Proposed Budget: ₹", r["proposed_budget"])
+                elif contract_type == "HOURLY":
+                    print("Hourly Rate: ₹", r.get("contract_hourly_rate", 0))
+                    print("Overtime Rate: ₹", r.get("contract_overtime_rate", 0))
+                    print("Weekly Limit:", r.get("weekly_limit", 0))
+                    print("Max Daily Hours:", r.get("max_daily_hours", 8))
+                elif contract_type == "EVENT":
+                    print("Base Fee: ₹", r.get("event_base_fee", 0))
+                    print("Included Hours:", r.get("event_included_hours", 0))
+                    print("Overtime Rate: ₹", r.get("event_overtime_rate", 0))
+                    print("Advance Paid: ₹", r.get("advance_paid", 0))
+                
                 print("Note:", r["note"])
                 print("Status:", r["status"])
 
@@ -1548,6 +1838,7 @@ def freelancer_flow():
                     print("3. Message Client")
                     print("4. Save Client")
                     print("5. Next")
+                    print("0. Back")
                     a = input("Choose: ")
 
                     if a == "1":
@@ -1575,9 +1866,11 @@ def freelancer_flow():
                             print(rr.json())
                         except Exception:
                             print("❌ Failed to save client")
+                    elif a == "0":
+                        break  # Back to dashboard
 
-        # 3️⃣ Manage Active Jobs
-        elif choice == "3":
+        # 4️⃣ Manage Active Jobs
+        elif choice == "4":
             try:
                 res = requests.get(f"{BASE_URL}/freelancer/hire/inbox", params={
                     "freelancer_id": current_freelancer_id
@@ -1593,10 +1886,21 @@ def freelancer_flow():
             else:
                 for i, j in enumerate(active, 1):
                     title = j.get("note") or j.get("request_id")
-                    print(f"{i}. Client: {j['client_name']} | Budget: ₹{j['proposed_budget']} | Status: {j['status']}")
+                    contract_type = j.get("contract_type", "FIXED")
+                    
+                    if contract_type == "FIXED":
+                        budget_info = f"Budget: ₹{j['proposed_budget']}"
+                    elif contract_type == "HOURLY":
+                        budget_info = f"Rate: ₹{j.get('contract_hourly_rate', 0)}/hr"
+                    elif contract_type == "EVENT":
+                        budget_info = f"Base: ₹{j.get('event_base_fee', 0)}"
+                    else:
+                        budget_info = f"Budget: ₹{j['proposed_budget']}"
+                    
+                    print(f"{i}. Client: {j['client_name']} | {budget_info} | {contract_type} | {j['status']}")
 
-        # 4️⃣ Messages
-        elif choice == "4":
+        # 5️⃣ Messages
+        elif choice == "5":
             # List clients you have hire-request history with - Enhanced with call options
             try:
                 res = requests.get(f"{BASE_URL}/freelancer/hire/inbox", params={
@@ -1648,8 +1952,8 @@ def freelancer_flow():
                     elif msg_choice == "4":
                         start_call("freelancer", cid, "video")
 
-        # 5️⃣ Earnings & Performance
-        elif choice == "5":
+        # 6️⃣ Earnings & Performance
+        elif choice == "6":
             try:
                 res = requests.get(f"{BASE_URL}/freelancer/stats", params={
                     "freelancer_id": current_freelancer_id
@@ -1666,8 +1970,8 @@ def freelancer_flow():
             except Exception:
                 print("❌ Error fetching stats")
 
-        # 6️⃣ Saved Clients
-        elif choice == "6":
+        # 7️⃣ Saved Clients
+        elif choice == "7":
             try:
                 res = requests.get(f"{BASE_URL}/freelancer/saved-clients", params={
                     "freelancer_id": current_freelancer_id
@@ -1694,8 +1998,8 @@ def freelancer_flow():
                     elif a == "3":
                         start_call("freelancer", c["client_id"], "video")
 
-        # 7️⃣ Account Settings
-        elif choice == "7":
+        # 8️⃣ Account Settings
+        elif choice == "8":
             while True:
                 print("\n--- ACCOUNT SETTINGS ---")
                 print("1. Change Password")
@@ -1736,8 +2040,8 @@ def freelancer_flow():
                 elif a == "5":
                     break
 
-        # 8️⃣ Notifications / Activity
-        elif choice == "8":
+        # 9️⃣ Notifications / Activity
+        elif choice == "9":
             try:
                 res = requests.get(f"{BASE_URL}/freelancer/notifications", params={
                     "freelancer_id": current_freelancer_id
@@ -1753,8 +2057,8 @@ def freelancer_flow():
                 for n in notes:
                     print("✔", n)
 
-        # 9️⃣ Manage Portfolio
-        elif choice == "9":
+        # 10️⃣ Manage Portfolio
+        elif choice == "10":
             while True:
                 print("\n--- MANAGE PORTFOLIO ---")
                 print("1. Add Portfolio Item")
@@ -1812,8 +2116,8 @@ def freelancer_flow():
                 elif portfolio_choice == "3":
                     break
 
-        # 10️⃣ Upload Profile Photo
-        elif choice == "10":
+        # 11️⃣ Upload Profile Photo
+        elif choice == "11":
             image_path = input("Profile Photo Path (local file): ")
             try:
                 res = requests.post(f"{BASE_URL}/freelancer/upload-photo", json={
@@ -1829,31 +2133,66 @@ def freelancer_flow():
             except Exception as e:
                 print("❌ Error uploading photo:", str(e))
 
-        # 11️⃣ Check Incoming Calls
-        elif choice == "11":
+        # 12️⃣ Check Incoming Calls
+        elif choice == "12":
             check_incoming_calls()
 
-        # 12️⃣ Verification Status
-        elif choice == "12":
+        # 13️⃣ Verification Status
+        elif choice == "13":
             freelancer_verification_status()
 
-        # 13️⃣ Upload Verification Documents
-        elif choice == "13":
+        # 14️⃣ Upload Verification Documents
+        elif choice == "14":
             freelancer_upload_verification()
 
-        # 14️⃣ Subscription Plans
-        elif choice == "14":
+        # 15️⃣ Subscription Plans
+        elif choice == "15":
             freelancer_subscription_plans()
 
-        # 15️⃣ My Subscription
-        elif choice == "15":
+        # 16️⃣ My Subscription
+        elif choice == "16":
             freelancer_my_subscription()
 
-        # 16️⃣ Exit
-        elif choice == "16":
-            break
+        # 17️⃣ Update Availability Status
+        elif choice == "17":
+            print("\n--- UPDATE AVAILABILITY STATUS ---")
+            print("1. 🟢 Available")
+            print("2. 🟡 Busy")
+            print("3. 🔴 On Leave")
+            print("0. Back")
+            
+            status_choice = input("Choose: ")
+            if status_choice == "1":
+                new_status = "AVAILABLE"
+            elif status_choice == "2":
+                new_status = "BUSY"
+            elif status_choice == "3":
+                new_status = "ON_LEAVE"
+            elif status_choice == "0":
+                continue
+            else:
+                print("❌ Invalid choice")
+                continue
+            
+            try:
+                res = requests.post(f"{BASE_URL}/freelancer/update-availability", json={
+                    "freelancer_id": current_freelancer_id,
+                    "availability_status": new_status
+                })
+                result = res.json()
+                if result.get("success"):
+                    status_display = {
+                        "AVAILABLE": "🟢 Available",
+                        "BUSY": "🟡 Busy", 
+                        "ON_LEAVE": "🔴 On Leave"
+                    }
+                    print(f"✅ Availability updated to: {status_display[new_status]}")
+                else:
+                    print("❌ Failed to update availability:", result.get("msg"))
+            except Exception as e:
+                print("❌ Error updating availability:", str(e))
 
-# ---------- MAIN MENU ----------
+        # ---------- MAIN MENU ----------
 # ---------- MAIN MENU ----------
 while True:
     print("\n====== GIGBRIDGE ======")

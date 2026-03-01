@@ -471,7 +471,12 @@ def generate_ai_response(user_id: int, role: str, message: str) -> Dict[str, Any
     user_context = {"user_id": user_id, "role": role}
     answer = call_gemini(prompt, user_context)
     if not answer:
-        answer = kb[0]["content"] if kb else "I can help with GigBridge features and your account info."
+        # Only use knowledge base for general platform questions, not database queries
+        message_lower = (message or "").lower()
+        if any(keyword in message_lower for keyword in ["what is gigbridge", "how to", "help", "support"]):
+            answer = kb[0]["content"] if kb else "I can help with GigBridge features and your account info."
+        else:
+            answer = "I'm currently experiencing high demand. Please try again later for database-related queries."
 
     if not db_payload and any(k in (message or "").lower() for k in [
         "my requests", "hire status", "job status", "my messages", "inbox", "my notifications", "my profile"
