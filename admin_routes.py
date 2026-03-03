@@ -5,7 +5,7 @@ import secrets
 import json
 import os
 from werkzeug.security import check_password_hash
-from database import client_db, freelancer_db
+from database import client_db, freelancer_db, get_pending_client_kyc, update_client_kyc_review
 from settings import FEATURE_ADMIN_LOGOUT, FEATURE_KYC_RETENTION_CLEANUP
 
 admin_bp = Blueprint("admin", __name__)
@@ -387,3 +387,31 @@ def admin_kyc_cleanup():
         return jsonify({"success": True, "removed_rows": removed_rows, "removed_files": removed_files})
     finally:
         f.close()
+
+@admin_bp.route("/admin/client-kyc/pending", methods=["GET"])
+@require_admin
+def admin_client_kyc_pending():
+    """Get all pending client KYC submissions"""
+    pending_kyc = get_pending_client_kyc()
+    return jsonify({"success": True, "data": pending_kyc})
+
+@admin_bp.route("/admin/client-kyc/review", methods=["POST"])
+@require_admin
+def admin_client_kyc_review():
+    """Review client KYC submission (approve/reject)"""
+    d = request.get_json(silent=True) or {}
+    client_id = d.get("client_id")
+    status = d.get("status")  # APPROVED or REJECTED
+    
+    if not client_id or status not in ("APPROVED", "REJECTED"):
+        return jsonify({"success": False, "msg": "Invalid request"}), 400
+    
+    admin_id = getattr(request, "admin_id", None)
+    if update_client_kyc_review(client_id, status, admin_id):
+        _audit(admin_id, "client_kyc_review", {
+            "client_id": client_id, 
+            "status": status
+        })
+        return jsonify({"success": True, "msg": f"Client KYC {status.lower()}"})
+    else:
+        return jsonify({"success": False, "msg": "Failed to update status"}), 500

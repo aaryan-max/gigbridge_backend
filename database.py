@@ -136,6 +136,22 @@ def create_tables():
     )
     """)
 
+    # ==========================
+    # CLIENT VERIFICATION
+    # ==========================
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS client_kyc (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        client_id INTEGER NOT NULL,
+        government_id_path TEXT NOT NULL,
+        pan_card_path TEXT NOT NULL,
+        status TEXT DEFAULT 'PENDING',
+        submitted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        reviewed_at TIMESTAMP,
+        reviewed_by INTEGER
+    )
+    """)
+
     db.commit()
     db.close()
 
@@ -987,6 +1003,145 @@ def get_freelancer_subscription(freelancer_id: int):
         }
     except Exception:
         return None
+    finally:
+        conn.close()
+
+
+def update_client_kyc(client_id: int, government_id_path: str, pan_card_path: str):
+    """Update or create KYC record for client"""
+    try:
+        cid = int(client_id)
+    except Exception:
+        return False
+    
+    conn = client_db()
+    try:
+        cur = conn.cursor()
+        import time
+        current_time = int(time.time())
+        
+        # Check if record exists
+        cur.execute("SELECT id FROM client_kyc WHERE client_id=?", (cid,))
+        existing = cur.fetchone()
+        
+        if existing:
+            # Update existing record
+            cur.execute("""
+                UPDATE client_kyc 
+                SET government_id_path=?, pan_card_path=?, status='PENDING', submitted_at=?
+                WHERE client_id=?
+            """, (government_id_path, pan_card_path, current_time, cid))
+        else:
+            # Create new record
+            cur.execute("""
+                INSERT INTO client_kyc 
+                (client_id, government_id_path, pan_card_path, status, submitted_at)
+                VALUES (?, ?, ?, 'PENDING', ?)
+            """, (cid, government_id_path, pan_card_path, current_time))
+        
+        conn.commit()
+        return True
+    except Exception:
+        return False
+    finally:
+        conn.close()
+
+
+def get_client_kyc(client_id: int):
+    """Get KYC status for a client"""
+    try:
+        cid = int(client_id)
+    except Exception:
+        return None
+    
+    conn = client_db()
+    try:
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT id, client_id, government_id_path, pan_card_path,
+                   status, submitted_at, reviewed_at, reviewed_by
+            FROM client_kyc
+            WHERE client_id=?
+        """, (cid,))
+        r = cur.fetchone()
+        if not r:
+            return None
+        return {
+            "id": r[0],
+            "client_id": r[1],
+            "government_id_path": r[2],
+            "pan_card_path": r[3],
+            "status": r[4],
+            "submitted_at": r[5],
+            "reviewed_at": r[6],
+            "reviewed_by": r[7],
+        }
+    except Exception:
+        return None
+    finally:
+        conn.close()
+
+
+def update_client_kyc_review(client_id: int, status: str, reviewed_by: int):
+    """Update client KYC review status"""
+    try:
+        cid = int(client_id)
+        reviewer_id = int(reviewed_by)
+    except Exception:
+        return False
+    
+    if status not in ('APPROVED', 'REJECTED'):
+        return False
+    
+    conn = client_db()
+    try:
+        cur = conn.cursor()
+        import time
+        current_time = int(time.time())
+        
+        cur.execute("""
+            UPDATE client_kyc 
+            SET status=?, reviewed_at=?, reviewed_by=?
+            WHERE client_id=?
+        """, (status, current_time, reviewer_id, cid))
+        
+        conn.commit()
+        return True
+    except Exception:
+        return False
+    finally:
+        conn.close()
+
+
+def get_pending_client_kyc():
+    """Get all pending client KYC submissions"""
+    conn = client_db()
+    try:
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT ck.id, ck.client_id, ck.government_id_path, ck.pan_card_path,
+                   ck.status, ck.submitted_at, c.name, c.email
+            FROM client_kyc ck
+            JOIN client c ON c.id = ck.client_id
+            WHERE ck.status = 'PENDING'
+            ORDER BY ck.submitted_at DESC
+        """)
+        rows = cur.fetchall()
+        out = []
+        for r in rows:
+            out.append({
+                "id": r[0],
+                "client_id": r[1],
+                "government_id_path": r[2],
+                "pan_card_path": r[3],
+                "status": r[4],
+                "submitted_at": r[5],
+                "client_name": r[6],
+                "client_email": r[7],
+            })
+        return out
+    except Exception:
+        return []
     finally:
         conn.close()
 

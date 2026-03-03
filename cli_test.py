@@ -1074,6 +1074,8 @@ def client_flow():
         print("14. My Projects")
         print("15. View Applicants")
         print("16. Accept Applicant")
+        print("17. Upload Verification Documents")
+        print("18. Check Verification Status")
 
         choice = input("Choose: ")
         
@@ -1430,6 +1432,12 @@ def client_flow():
         elif choice == "11":
             break
 
+        elif choice == "17":
+            client_upload_verification()
+
+        elif choice == "18":
+            client_check_verification_status()
+
 # ---------- FREELANCER VERIFICATION ----------
 def freelancer_verification_status():
     """Show verification status for freelancer"""
@@ -1573,10 +1581,128 @@ def freelancer_upload_verification():
             print("   Your documents are under review.")
             print("   Admin module will process this in future updates.")
         else:
-            print("❌ Upload failed:", result.get("msg", "Unknown error"))
+            print(" Upload failed:", result.get("msg", "Unknown error"))
     
     except Exception as e:
-        print("❌ Error uploading documents:", str(e))
+        print(" Error uploading verification:", str(e))
+
+
+# ---------- CLIENT VERIFICATION ----------
+def client_upload_verification():
+    """Upload verification documents for client"""
+    if not current_client_id:
+        print("❌ Please login as client first")
+        return
+    
+    print("\n--- CLIENT VERIFICATION ---")
+    print("📋 Required Documents:")
+    print("   1. Government ID")
+    print("   2. PAN Card")
+    print("\n📁 Allowed formats: PDF, JPG, PNG")
+    print("📁 Maximum file size: 5MB")
+    
+    # Check if already submitted
+    try:
+        res = requests.get(f"{BASE_URL}/client/kyc/status", params={
+            "client_id": current_client_id
+        })
+        status_data = res.json()
+        
+        if status_data.get("success") and status_data.get("status") == "PENDING":
+            print("\n⚠️  You already have a pending verification request.")
+            print("1. Re-upload documents")
+            print("2. Cancel")
+            choice = input("Choose: ").strip()
+            
+            if choice != "1":
+                print("❌ Upload cancelled")
+                return
+    except:
+        pass
+    
+    # Get file paths
+    print("\n📂 Enter file paths (local file paths):")
+    
+    government_id = input("Government ID file path: ").strip()
+    if not government_id:
+        print("❌ Government ID file path required")
+        return
+    
+    pan_card = input("PAN card file path: ").strip()
+    if not pan_card:
+        print("❌ PAN card file path required")
+        return
+    
+    # Validate files exist
+    import os
+    if not os.path.exists(government_id):
+        print(f"❌ Government ID file not found: {government_id}")
+        return
+    
+    if not os.path.exists(pan_card):
+        print(f"❌ PAN card file not found: {pan_card}")
+        return
+    
+    # Upload files
+    try:
+        with open(government_id, 'rb') as gov_file, open(pan_card, 'rb') as pan_file:
+            files = {
+                'government_id': gov_file,
+                'pan_card': pan_file
+            }
+            data = {
+                'client_id': current_client_id
+            }
+            
+            res = requests.post(f"{BASE_URL}/client/kyc/upload", files=files, data=data)
+            result = res.json()
+            
+            if result.get("success"):
+                print("✅ Verification documents submitted successfully!")
+                print("📋 Awaiting admin approval.")
+            else:
+                print("❌ Upload failed:", result.get("msg", "Unknown error"))
+                
+    except Exception as e:
+        print("❌ Error uploading verification:", str(e))
+
+
+def client_check_verification_status():
+    """Check verification status for client"""
+    if not current_client_id:
+        print("❌ Please login as client first")
+        return
+    
+    try:
+        res = requests.get(f"{BASE_URL}/client/kyc/status", params={
+            "client_id": current_client_id
+        })
+        data = res.json()
+        
+        if not data.get("success"):
+            print("❌ Error:", data.get("msg", "Unknown error"))
+            return
+        
+        print("\n--- VERIFICATION STATUS ---")
+        status = data.get("status")
+        
+        if status is None:
+            print("Status: Not submitted yet")
+            print("\n📋 Submit your verification documents to get verified.")
+        else:
+            print(f"Status: {status}")
+            
+            if status == "PENDING":
+                print("\n📋 Your documents are under review.")
+                print("   Admin will review your submission soon.")
+            elif status == "REJECTED":
+                print("\n❌ Your verification was rejected.")
+                print("   Please contact support or re-submit with correct documents.")
+            elif status == "APPROVED":
+                print("\n✅ Congratulations! Your verification is approved.")
+        
+    except Exception as e:
+        print("❌ Error checking verification status:", str(e))
 
 
 # ---------- FREELANCER SUBSCRIPTION ----------

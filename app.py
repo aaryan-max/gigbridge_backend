@@ -15,6 +15,7 @@ from llm_chatbot import generate_ai_response, PENDING_ACTIONS, execute_agent_act
 from admin_db import ensure_admin_tables
 from admin_routes import admin_bp
 from kyc_routes import kyc_bp
+from client_kyc_routes import client_kyc_bp
 
 from database import create_tables, rebuild_freelancer_search_index
 from settings import (
@@ -66,6 +67,7 @@ create_tables()
 ensure_admin_tables()
 app.register_blueprint(admin_bp)
 app.register_blueprint(kyc_bp)
+app.register_blueprint(client_kyc_bp)
 
 # Try to load semantic index (optional; app still works without it)
 try:
