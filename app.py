@@ -461,6 +461,140 @@ def freelancer_verify_otp():
         conn.close()
         return jsonify({"success": False, "msg": "Freelancer already exists"}), 409
 
+# ============================================================
+# PASSWORD RESET – CLIENT
+# ============================================================
+
+@app.route("/client/verify-otp-for-reset", methods=["POST"])
+def client_verify_otp_for_reset():
+    """Verify OTP for password reset"""
+    d = get_json()
+    missing = require_fields(d, ["email", "otp"])
+    if missing:
+        return jsonify({"success": False, "msg": "Missing fields"}), 400
+
+    email = str(d["email"]).strip().lower()
+    otp_in = str(d["otp"]).strip()
+
+    conn = sqlite3.connect("client.db")
+    cur = conn.cursor()
+    cur.execute("SELECT otp, expires_at FROM client_otp WHERE email=?", (email,))
+    row = cur.fetchone()
+    
+    if not row:
+        conn.close()
+        return jsonify({"success": False, "msg": "OTP not found"}), 400
+    
+    stored_otp, expires_at = row
+    if now_ts() > expires_at:
+        conn.close()
+        return jsonify({"success": False, "msg": "OTP expired"}), 400
+    
+    if stored_otp != otp_in:
+        conn.close()
+        return jsonify({"success": False, "msg": "Invalid OTP"}), 400
+    
+    # OTP verified, allow password reset
+    conn.close()
+    return jsonify({"success": True, "msg": "OTP verified"})
+
+@app.route("/client/reset-password", methods=["POST"])
+def client_reset_password():
+    """Reset client password"""
+    d = get_json()
+    missing = require_fields(d, ["email", "new_password"])
+    if missing:
+        return jsonify({"success": False, "msg": "Missing fields"}), 400
+
+    email = str(d["email"]).strip().lower()
+    new_password = str(d["new_password"])
+    
+    if len(new_password) < 6:
+        return jsonify({"success": False, "msg": "Password must be at least 6 characters"}), 400
+
+    conn = sqlite3.connect("client.db")
+    cur = conn.cursor()
+    cur.execute("UPDATE client SET password=? WHERE email=?", 
+               (generate_password_hash(new_password), email))
+    
+    if cur.rowcount == 0:
+        conn.close()
+        return jsonify({"success": False, "msg": "Email not found"}), 404
+    
+    # Clean up OTP
+    cur.execute("DELETE FROM client_otp WHERE email=?", (email,))
+    conn.commit()
+    conn.close()
+    
+    return jsonify({"success": True, "msg": "Password reset successful"})
+
+# ============================================================
+# PASSWORD RESET – FREELANCER
+# ============================================================
+
+@app.route("/freelancer/verify-otp-for-reset", methods=["POST"])
+def freelancer_verify_otp_for_reset():
+    """Verify OTP for password reset"""
+    d = get_json()
+    missing = require_fields(d, ["email", "otp"])
+    if missing:
+        return jsonify({"success": False, "msg": "Missing fields"}), 400
+
+    email = str(d["email"]).strip().lower()
+    otp_in = str(d["otp"]).strip()
+
+    conn = sqlite3.connect("freelancer.db")
+    cur = conn.cursor()
+    cur.execute("SELECT otp, expires_at FROM freelancer_otp WHERE email=?", (email,))
+    row = cur.fetchone()
+    
+    if not row:
+        conn.close()
+        return jsonify({"success": False, "msg": "OTP not found"}), 400
+    
+    stored_otp, expires_at = row
+    if now_ts() > expires_at:
+        conn.close()
+        return jsonify({"success": False, "msg": "OTP expired"}), 400
+    
+    if stored_otp != otp_in:
+        conn.close()
+        return jsonify({"success": False, "msg": "Invalid OTP"}), 400
+    
+    # OTP verified, allow password reset
+    conn.close()
+    return jsonify({"success": True, "msg": "OTP verified"})
+
+@app.route("/freelancer/reset-password", methods=["POST"])
+def freelancer_reset_password():
+    """Reset freelancer password"""
+    d = get_json()
+    missing = require_fields(d, ["email", "new_password"])
+    if missing:
+        return jsonify({"success": False, "msg": "Missing fields"}), 400
+
+    email = str(d["email"]).strip().lower()
+    new_password = str(d["new_password"])
+    
+    if len(new_password) < 6:
+        return jsonify({"success": False, "msg": "Password must be at least 6 characters"}), 400
+
+    conn = sqlite3.connect("freelancer.db")
+    cur = conn.cursor()
+    cur.execute("UPDATE freelancer SET password=? WHERE email=?", 
+               (generate_password_hash(new_password), email))
+    
+    if cur.rowcount == 0:
+        conn.close()
+        return jsonify({"success": False, "msg": "Email not found"}), 404
+    
+    # Clean up OTP
+    cur.execute("DELETE FROM freelancer_otp WHERE email=?", (email,))
+    conn.commit()
+    conn.close()
+    
+    return jsonify({"success": True, "msg": "Password reset successful"})
+
 @app.route("/client/signup", methods=["POST"])
 def client_signup():
     """Direct signup endpoint for clients"""
@@ -1170,7 +1304,8 @@ def freelancers_all():
             COALESCE(fp.max_budget, 0) as max_budget,
             COALESCE(fp.rating, 0) as rating,
             COALESCE(fp.category, '') as category,
-            COALESCE(fp.bio, '') as bio
+            COALESCE(fp.bio, '') as bio,
+            COALESCE(fp.availability_status, 'AVAILABLE') as availability_status
         FROM freelancer f
         LEFT JOIN freelancer_profile fp ON fp.freelancer_id = f.id
         ORDER BY f.id DESC
@@ -1190,6 +1325,7 @@ def freelancers_all():
             "rating": r["rating"],
             "category": r["category"],
             "bio": r["bio"],
+            "availability_status": r["availability_status"],
         })
     return jsonify({"success": True, "results": out})
 
@@ -3649,6 +3785,81 @@ def event_complete():
         "total_due": total_due,
         "remaining_due": remaining_due
     })
+
+
+# ============================================================
+# PLATFORM STATISTICS
+# ============================================================
+
+@app.route("/platform/stats", methods=["GET"])
+def platform_stats():
+    """Get platform-wide statistics"""
+    try:
+        # Get total freelancers
+        conn = sqlite3.connect("freelancer.db")
+        cur = conn.cursor()
+        cur.execute("SELECT COUNT(*) FROM freelancer")
+        total_freelancers = cur.fetchone()[0]
+        conn.close()
+        
+        # Get total clients
+        conn = sqlite3.connect("client.db")
+        cur = conn.cursor()
+        cur.execute("SELECT COUNT(*) FROM client")
+        total_clients = cur.fetchone()[0]
+        conn.close()
+        
+        # Get gigs completed
+        conn = sqlite3.connect("freelancer.db")
+        cur = conn.cursor()
+        cur.execute("SELECT COUNT(*) FROM hire_request WHERE status='ACCEPTED'")
+        gigs_completed = cur.fetchone()[0]
+        conn.close()
+        
+        return jsonify({
+            "success": True,
+            "total_freelancers": total_freelancers,
+            "total_clients": total_clients,
+            "gigs_completed": gigs_completed
+        })
+        
+    except Exception as e:
+        return jsonify({"success": False, "msg": str(e)}), 500
+
+
+@app.route("/freelancer/<int:freelancer_id>/stats", methods=["GET"])
+def freelancer_profile_stats(freelancer_id):
+    """Get freelancer-specific statistics"""
+    try:
+        # Get rating
+        conn = sqlite3.connect("freelancer.db")
+        cur = conn.cursor()
+        cur.execute("SELECT rating FROM freelancer_profile WHERE freelancer_id=?", (freelancer_id,))
+        rating_row = cur.fetchone()
+        rating = rating_row[0] if rating_row else 0.0
+        conn.close()
+        
+        # Get gigs completed
+        conn = sqlite3.connect("client.db")
+        cur = conn.cursor()
+        cur.execute("SELECT COUNT(*) FROM hire_request WHERE freelancer_id=? AND status='ACCEPTED'", (freelancer_id,))
+        gigs_completed = cur.fetchone()[0]
+        
+        # Get earnings
+        cur.execute("SELECT SUM(proposed_budget) FROM hire_request WHERE freelancer_id=? AND status='ACCEPTED'", (freelancer_id,))
+        earnings_row = cur.fetchone()
+        earnings = earnings_row[0] if earnings_row and earnings_row[0] is not None else 0
+        conn.close()
+        
+        return jsonify({
+            "success": True,
+            "rating": float(rating),
+            "gigs_completed": gigs_completed,
+            "earnings": earnings
+        })
+        
+    except Exception as e:
+        return jsonify({"success": False, "msg": str(e)}), 500
 
 
 if __name__ == "__main__":

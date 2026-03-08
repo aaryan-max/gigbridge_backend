@@ -824,6 +824,25 @@ def view_freelancer_details(fid):
     if data.get("profile_image"):
         print("Profile Image:", data["profile_image"])
     
+    # Get freelancer stats - separate section with emojis
+    print("\n--- PERFORMANCE STATS ---")
+    try:
+        stats_res = requests.get(f"{BASE_URL}/freelancer/{fid}/stats")
+        stats_data = stats_res.json()
+        
+        if stats_data.get("success"):
+            print(f"⭐ Rating: {stats_data.get('rating', 0.0)}")
+            print(f"🎯 Gigs Completed: {stats_data.get('gigs_completed', 0)}")
+            print(f"💰 Earned: ₹{stats_data.get('earnings', 0)}")
+        else:
+            print("⭐ Rating: 0.0")
+            print("🎯 Gigs Completed: 0")
+            print("💰 Earned: ₹0")
+    except:
+        print("⭐ Rating: 0.0")
+        print("🎯 Gigs Completed: 0")
+        print("💰 Earned: ₹0")
+    
     # Display portfolio items
     try:
         portfolio_res = requests.get(f"{BASE_URL}/freelancer/portfolio/{fid}")
@@ -1046,6 +1065,29 @@ def client_ai_recommendations():
             })
             print(res.json())
 
+# ---------- PLATFORM STATS ----------
+def show_platform_stats():
+    """Display platform-wide statistics"""
+    try:
+        res = requests.get(f"{BASE_URL}/platform/stats")
+        data = res.json()
+        
+        if not data.get("success"):
+            print("❌ Error:", data.get("msg", "Unknown error"))
+            return
+        
+        print("\n" + "="*50)
+        print("🌟 GIGBRIDGE PLATFORM STATS")
+        print("="*50)
+        print(f"👥 Total Freelancers: {data.get('total_freelancers', 0)}")
+        print(f"🏢 Total Clients: {data.get('total_clients', 0)}")
+        print(f"✅ Gigs Completed: {data.get('gigs_completed', 0)}")
+        print("="*50)
+        
+    except Exception as e:
+        print("❌ Error fetching platform stats:", str(e))
+
+
 # ---------- CLIENT FLOW ----------
 def client_flow():
     global current_client_id
@@ -1129,6 +1171,7 @@ def client_flow():
                 print("Title:", f["title"])
                 print("Budget:", f["budget_range"])
                 print("Rating:", f["rating"])
+                print("Status:", f["availability_status"])
 
                 print("1. View Details")
                 print("2. Message")
@@ -1189,6 +1232,7 @@ def client_flow():
                 print("Title:", f["title"])
                 print("Budget:", f["budget_range"])
                 print("Rating:", f["rating"])
+                print("Status:", f["availability_status"])
 
                 print("1. View Details")
                 print("2. Message")
@@ -2493,7 +2537,8 @@ while True:
     print("2. Sign Up")
     print("3. Continue as Client")
     print("4. Continue as Freelancer")
-    print("5. Exit")
+    print("5. Platform Stats")
+    print("6. Exit")
 
     option = input("Choose option: ")
 
@@ -2570,5 +2615,8 @@ while True:
         freelancer_flow()
 
     elif option == "5":
+        show_platform_stats()
+
+    elif option == "6":
         print("👋 Goodbye")
         break
