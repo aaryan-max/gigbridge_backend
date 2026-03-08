@@ -54,6 +54,7 @@ def validate_age(age):
 # ============================================================
 # Semantic (RAG-style) search helpers
 from semantic_search import load_or_build, semantic_search, upsert_freelancer
+from filters_service import fetch_filtered_freelancers
 from database import create_tables, rebuild_freelancer_search_index, get_freelancer_verification, update_freelancer_verification, get_freelancer_subscription, update_freelancer_subscription, get_freelancer_job_applies, increment_job_applies, check_subscription_expiry, get_freelancer_plan
 from categories import is_valid_category
 
@@ -1362,6 +1363,17 @@ def freelancer_details(freelancer_id: int):
         "tags": profile_data.get("tags"),
     })
 
+@app.route("/freelancers/filter", methods=["GET"])
+def freelancers_filter():
+    try:
+        top_rated = request.args.get("top_rated")
+        category = request.args.get("category")
+        subscribed = request.args.get("subscribed")
+        verified_only = request.args.get("verified_only")
+        results = fetch_filtered_freelancers(top_rated, category, subscribed, verified_only)
+        return jsonify({"success": True, "results": results})
+    except Exception as e:
+        return jsonify({"success": False, "msg": str(e)}), 500
 # ============================================================
 # NEW: CHAT (Client <-> Freelancer)
 # ============================================================
