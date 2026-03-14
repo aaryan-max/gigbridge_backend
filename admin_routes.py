@@ -52,7 +52,7 @@ def admin_login():
     conn = freelancer_db()
     try:
         cur = conn.cursor()
-        cur.execute("SELECT id, password_hash, role, is_enabled FROM admin_user WHERE email=?", (email,))
+        cur.execute("SELECT id, password_hash, role, is_enabled FROM admin_user WHERE email=%s", (email,))
         r = cur.fetchone()
         if not r or int(r[3] or 0) != 1 or not check_password_hash(r[1], password):
             return jsonify({"success": False, "msg": "Unauthorized"}), 401
@@ -60,9 +60,9 @@ def admin_login():
         role = r[2]
         token = secrets.token_urlsafe(32)
         expires = _now() + 86400
-        cur.execute("INSERT INTO admin_session (token, admin_id, expires_at, created_at) VALUES (?,?,?,?)",
+        cur.execute("INSERT INTO admin_session (token, admin_id, expires_at, created_at) VALUES (%s,%s,%s,%s)",
                     (token, admin_id, expires, _now()))
-        cur.execute("INSERT INTO admin_audit_log (admin_id, action, payload_json, created_at) VALUES (?,?,?,?)",
+        cur.execute("INSERT INTO admin_audit_log (admin_id, action, payload_json, created_at) VALUES (%s,%s,%s,%s)",
                     (admin_id, "login", json.dumps({"email": email}), _now()))
         conn.commit()
         return jsonify({"success": True, "token": token, "admin_id": admin_id, "role": role})
@@ -151,7 +151,7 @@ def _audit(admin_id, action, payload):
     f = freelancer_db()
     try:
         cur = f.cursor()
-        cur.execute("INSERT INTO admin_audit_log (admin_id, action, payload_json, created_at) VALUES (?,?,?,?)",
+        cur.execute("INSERT INTO admin_audit_log (admin_id, action, payload_json, created_at) VALUES (%s,%s,%s,%s)",
                     (admin_id, action, json.dumps(payload), _now()))
         f.commit()
     finally:
@@ -169,7 +169,7 @@ def admin_user_disable():
         db = client_db()
         try:
             cur = db.cursor()
-            cur.execute("UPDATE client SET is_enabled=0 WHERE id=?", (uid,))
+            cur.execute("UPDATE client SET is_enabled=0 WHERE id=%s", (uid,))
             db.commit()
         finally:
             db.close()
@@ -177,7 +177,7 @@ def admin_user_disable():
         db = freelancer_db()
         try:
             cur = db.cursor()
-            cur.execute("UPDATE freelancer SET is_enabled=0 WHERE id=?", (uid,))
+            cur.execute("UPDATE freelancer SET is_enabled=0 WHERE id=%s", (uid,))
             db.commit()
         finally:
             db.close()
@@ -196,7 +196,7 @@ def admin_user_enable():
         db = client_db()
         try:
             cur = db.cursor()
-            cur.execute("UPDATE client SET is_enabled=1 WHERE id=?", (uid,))
+            cur.execute("UPDATE client SET is_enabled=1 WHERE id=%s", (uid,))
             db.commit()
         finally:
             db.close()
@@ -204,7 +204,7 @@ def admin_user_enable():
         db = freelancer_db()
         try:
             cur = db.cursor()
-            cur.execute("UPDATE freelancer SET is_enabled=1 WHERE id=?", (uid,))
+            cur.execute("UPDATE freelancer SET is_enabled=1 WHERE id=%s", (uid,))
             db.commit()
         finally:
             db.close()
@@ -246,7 +246,7 @@ def admin_kyc_document(doc_id: int):
     f = freelancer_db()
     try:
         cur = f.cursor()
-        cur.execute("SELECT file_path FROM kyc_document WHERE id=?", (doc_id,))
+        cur.execute("SELECT file_path FROM kyc_document WHERE id=%s", (doc_id,))
         r = cur.fetchone()
         if not r:
             return jsonify({"success": False, "msg": "Not found"}), 404
@@ -270,7 +270,7 @@ def admin_kyc_verify():
     f = freelancer_db()
     try:
         cur = f.cursor()
-        cur.execute("SELECT freelancer_id, doc_type FROM kyc_document WHERE id=?", (doc_id,))
+        cur.execute("SELECT freelancer_id, doc_type FROM kyc_document WHERE id=%s", (doc_id,))
         r = cur.fetchone()
         if not r:
             return jsonify({"success": False, "msg": "Not found"}), 404
@@ -333,7 +333,7 @@ def admin_logout():
     f = freelancer_db()
     try:
         cur = f.cursor()
-        cur.execute("DELETE FROM admin_session WHERE token=?", (token,))
+        cur.execute("DELETE FROM admin_session WHERE token=%s", (token,))
         f.commit()
         _audit(admin_id, "logout", {"token": "self"})
         return jsonify({"success": True})
@@ -349,7 +349,7 @@ def admin_logout_all():
     f = freelancer_db()
     try:
         cur = f.cursor()
-        cur.execute("DELETE FROM admin_session WHERE admin_id=?", (admin_id,))
+        cur.execute("DELETE FROM admin_session WHERE admin_id=%s", (admin_id,))
         f.commit()
         _audit(admin_id, "logout_all", {"admin_id": admin_id})
         return jsonify({"success": True})
@@ -380,7 +380,7 @@ def admin_kyc_cleanup():
                     removed_files += 1
             except Exception:
                 pass
-            cur.execute("DELETE FROM kyc_document WHERE id=?", (r[0],))
+            cur.execute("DELETE FROM kyc_document WHERE id=%s", (r[0],))
             removed_rows += 1
         f.commit()
         _audit(getattr(request, "admin_id", None), "kyc_cleanup", {"removed_rows": removed_rows, "removed_files": removed_files})

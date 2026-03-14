@@ -8,7 +8,7 @@ def ensure_admin_tables():
     cur = conn.cursor()
     cur.execute("""
     CREATE TABLE IF NOT EXISTS admin_user (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        id SERIAL PRIMARY KEY,
         email TEXT UNIQUE NOT NULL,
         password_hash TEXT NOT NULL,
         role TEXT DEFAULT 'admin',
@@ -26,7 +26,7 @@ def ensure_admin_tables():
     """)
     cur.execute("""
     CREATE TABLE IF NOT EXISTS admin_audit_log (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        id SERIAL PRIMARY KEY,
         admin_id INTEGER,
         action TEXT,
         payload_json TEXT,
@@ -35,7 +35,7 @@ def ensure_admin_tables():
     """)
     cur.execute("""
     CREATE TABLE IF NOT EXISTS kyc_document (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        id SERIAL PRIMARY KEY ,
         freelancer_id INTEGER NOT NULL,
         doc_type TEXT NOT NULL,
         file_path TEXT NOT NULL,

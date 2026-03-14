@@ -241,39 +241,76 @@ def signup_with_role(role):
     password = input("Password: ")
 
     # STEP 1: SEND OTP
-    if role == "client":
-        requests.post(f"{BASE_URL}/client/send-otp", json={"email": email})
-    else:
-        requests.post(f"{BASE_URL}/freelancer/send-otp", json={"email": email})
+    try:
+        if role == "client":
+            res = requests.post(f"{BASE_URL}/client/send-otp", json={"email": email})
+        else:
+            res = requests.post(f"{BASE_URL}/freelancer/send-otp", json={"email": email})
+        
+        # Check if response is valid JSON
+        try:
+            result = res.json()
+            if not result.get("success"):
+                print("❌ Failed to send OTP:", result.get("msg", "Unknown error"))
+                return
+        except requests.exceptions.JSONDecodeError:
+            print(f"❌ Server returned non-JSON response (HTTP {res.status_code})")
+            print(f"Response content: {res.text[:200]}...")
+            return
+        except Exception as e:
+            print(f"❌ Error parsing OTP response: {str(e)}")
+            return
+            
+    except requests.exceptions.RequestException as e:
+        print(f"❌ Network error while sending OTP: {str(e)}")
+        return
 
     print("📩 OTP sent to your email")
 
     # STEP 2: VERIFY OTP
     otp = input("Enter OTP: ")
 
-    if role == "client":
-        res = requests.post(f"{BASE_URL}/client/verify-otp", json={
-            "name": name, "email": email, "password": password, "otp": otp
-        })
-    else:
-        res = requests.post(f"{BASE_URL}/freelancer/verify-otp", json={
-            "name": name, "email": email, "password": password, "otp": otp
-        })
-
-    response = res.json()
-    print(response)
-
-    if response.get("success"):
-        if role == "client" and response.get("client_id"):
-            current_client_id = response["client_id"]
-            print("✅ Client signup successful (auto-logged in)")
-        elif role == "freelancer" and response.get("freelancer_id"):
-            current_freelancer_id = response["freelancer_id"]
-            print("✅ Freelancer signup successful (auto-logged in)")
+    try:
+        if role == "client":
+            res = requests.post(f"{BASE_URL}/client/verify-otp", json={
+                "name": name, "email": email, "password": password, "otp": otp
+            })
         else:
-            print("✅ Signup successful. You can now login.")
-    else:
-        print("❌ Signup failed:", response.get("msg"))
+            res = requests.post(f"{BASE_URL}/freelancer/verify-otp", json={
+                "name": name, "email": email, "password": password, "otp": otp
+            })
+
+        # Safe JSON parsing with detailed error handling
+        try:
+            response = res.json()
+            print(f"Server response: {response}")
+        except requests.exceptions.JSONDecodeError as e:
+            print(f"❌ JSONDecodeError: Failed to parse server response")
+            print(f"HTTP Status: {res.status_code}")
+            print(f"Response Content-Type: {res.headers.get('content-type', 'Unknown')}")
+            print(f"Response text: {res.text[:500]}...")
+            print(f"Error details: {str(e)}")
+            return
+        except Exception as e:
+            print(f"❌ Unexpected error parsing response: {str(e)}")
+            return
+
+        if response.get("success"):
+            if role == "client" and response.get("client_id"):
+                current_client_id = response["client_id"]
+                print("✅ Client signup successful (auto-logged in)")
+            elif role == "freelancer" and response.get("freelancer_id"):
+                current_freelancer_id = response["freelancer_id"]
+                print("✅ Freelancer signup successful (auto-logged in)")
+            else:
+                print("✅ Signup successful. You can now login.")
+        else:
+            print("❌ Signup failed:", response.get("msg"))
+
+    except requests.exceptions.RequestException as e:
+        print(f"❌ Network error during OTP verification: {str(e)}")
+    except Exception as e:
+        print(f"❌ Unexpected error during signup: {str(e)}")
 
     return
 
@@ -879,6 +916,30 @@ def hire_freelancer(fid):
     budget = input("Proposed Budget: ")
     note = input("Note (optional): ")
     
+    # Collect date/time slot information
+    print("\n--- Event Date & Time ---")
+    while True:
+        event_date = input("Enter Event Date (YYYY-MM-DD): ").strip()
+        start_time = input("Enter Start Time (HH:MM): ").strip()
+        end_time = input("Enter End Time (HH:MM): ").strip()
+        
+        # Validate using booking service
+        try:
+            from booking_service import validate_hire_request_slot, format_time_slot_display
+            is_valid, error_msg = validate_hire_request_slot(
+                fid, event_date, start_time, end_time
+            )
+            if is_valid:
+                print(f"\nSelected Event Slot:")
+                print(format_time_slot_display(event_date, start_time, end_time))
+                break
+            else:
+                print(f"❌ {error_msg}")
+                print("Please try again.\n")
+        except ImportError:
+            print("⚠️  Booking validation not available, proceeding without validation")
+            break
+    
     # Contract type selection
     print("\n--- Contract Type ---")
     print("1. FIXED (Milestone Based)")
@@ -901,7 +962,10 @@ def hire_freelancer(fid):
         "job_title": job_title,
         "proposed_budget": budget,
         "note": note,
-        "contract_type": contract_type
+        "contract_type": contract_type,
+        "event_date": event_date,
+        "start_time": start_time,
+        "end_time": end_time
     }
     
     # Add contract-specific fields
@@ -929,8 +993,34 @@ def hire_freelancer(fid):
             "advance_paid": float(advance_paid)
         })
 
+    # Confirmation step
+    print(f"\n--- Confirm Hire Request ---")
+    print(f"Freelancer ID: {fid}")
+    print(f"Job Title: {job_title}")
+    print(f"Budget: {budget}")
+    print(f"Event Date: {event_date}")
+    print(f"Time Slot: {start_time} - {end_time}")
+    print(f"Contract Type: {contract_type}")
+    
+    confirm = input("\nConfirm Hire Request? (y/n): ").strip().lower()
+    if confirm != 'y':
+        print("❌ Hire request cancelled")
+        return
+
     res = requests.post(f"{BASE_URL}/client/hire", json=hire_data)
-    print(res.json())
+    result = res.json()
+    
+    if result.get("success"):
+        print("\n✅ Hire request sent successfully!")
+        print(f"Freelancer ID: {fid}")
+        print(f"Job Title: {job_title}")
+        print(f"Budget: {budget}")
+        print(f"Event Date: {event_date}")
+        print(f"Time Slot: {start_time} - {end_time}")
+        print(f"Status: PENDING")
+        print(f"Request ID: {result.get('request_id')}")
+    else:
+        print(f"\n❌ Failed to send hire request: {result.get('msg', 'Unknown error')}")
 
 # ---------- CLIENT: MESSAGES (THREADS) ----------
 def client_messages_menu():

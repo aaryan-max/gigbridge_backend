@@ -1,11 +1,10 @@
 work to be done 
 
 1)payment gateway
-2)upload douments
+
 3)categories accurate
+
 4) ajentic ai 
-7)filters
-8) counting 
 
 10) database 
-11) post a job
+

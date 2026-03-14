@@ -55,7 +55,7 @@ def client_kyc_upload():
     conn = client_db()
     try:
         cur = conn.cursor()
-        cur.execute("SELECT id FROM client WHERE id=?", (client_id_int,))
+        cur.execute("SELECT id FROM client WHERE id=%s", (client_id_int,))
         r = cur.fetchone()
         if not r:
             return jsonify({"success": False, "msg": "Client not found"}), 404

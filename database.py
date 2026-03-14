@@ -1,20 +1,28 @@
-import sqlite3
+import psycopg2
+from psycopg2.extras import RealDictCursor
+import psycopg2.errors
+from postgres_config import get_postgres_connection, is_column_exists_error, is_table_exists_error, is_unique_violation_error
 
 def client_db():
-    return sqlite3.connect("client.db")
+    return get_postgres_connection()
 
 def freelancer_db():
-    return sqlite3.connect("freelancer.db")
+    return get_postgres_connection()
 
 def _try_add_column(cur, table, col_def):
     """
-    SQLite doesn't support: ADD COLUMN IF NOT EXISTS
-    So we try, and ignore if column already exists.
+    PostgreSQL version: Add column if it doesn't exist
     """
     try:
-        cur.execute(f"ALTER TABLE {table} ADD COLUMN {col_def}")
-    except sqlite3.OperationalError:
-        pass
+        cur.execute(f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {col_def}")
+    except psycopg2.errors.Error:
+        # Fallback for older PostgreSQL versions that don't support IF NOT EXISTS
+        try:
+            cur.execute(f"ALTER TABLE {table} ADD COLUMN {col_def}")
+        except is_column_exists_error:
+            pass  # Column already exists, ignore
+        except Exception:
+            pass  # Other errors, ignore
 
 
 def create_tables():
@@ -26,7 +34,7 @@ def create_tables():
 
     cur.execute("""
     CREATE TABLE IF NOT EXISTS client (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        id SERIAL PRIMARY KEY,
         name TEXT,
         email TEXT UNIQUE,
         password TEXT
@@ -64,7 +72,7 @@ def create_tables():
     # Notifications (client side)
     cur.execute("""
     CREATE TABLE IF NOT EXISTS notification (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        id SERIAL PRIMARY KEY ,
         client_id INTEGER,
         message TEXT,
         created_at INTEGER
@@ -74,7 +82,7 @@ def create_tables():
     # Call session (client.db copy)
     cur.execute("""
     CREATE TABLE IF NOT EXISTS call_session (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        id SERIAL PRIMARY KEY ,
         caller_role TEXT,
         caller_id INTEGER,
         receiver_role TEXT,
@@ -91,7 +99,7 @@ def create_tables():
     # ==========================
     cur.execute("""
     CREATE TABLE IF NOT EXISTS milestone (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        id SERIAL PRIMARY KEY,
         hire_request_id INTEGER,
         name TEXT,
         amount REAL,
@@ -108,7 +116,7 @@ def create_tables():
     # ==========================
     cur.execute("""
     CREATE TABLE IF NOT EXISTS work_log (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        id SERIAL PRIMARY KEY,
         hire_request_id INTEGER,
         freelancer_id INTEGER,
         work_date TEXT,
@@ -126,7 +134,7 @@ def create_tables():
     # ==========================
     cur.execute("""
     CREATE TABLE IF NOT EXISTS invoice (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        id SERIAL PRIMARY KEY,
         hire_request_id INTEGER,
         total_amount REAL,
         week_start TEXT,
@@ -141,7 +149,7 @@ def create_tables():
     # ==========================
     cur.execute("""
     CREATE TABLE IF NOT EXISTS client_kyc (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        id SERIAL PRIMARY KEY,
         client_id INTEGER NOT NULL,
         government_id_path TEXT NOT NULL,
         pan_card_path TEXT NOT NULL,
@@ -163,7 +171,7 @@ def create_tables():
 
     cur.execute("""
     CREATE TABLE IF NOT EXISTS freelancer (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        id SERIAL PRIMARY KEY,
         name TEXT,
         email TEXT UNIQUE,
         password TEXT
@@ -205,12 +213,18 @@ def create_tables():
 
     # Migrate experience from INTEGER to REAL for existing records
     try:
-        cur.execute("ALTER TABLE freelancer_profile ADD COLUMN experience_new REAL")
-        cur.execute("UPDATE freelancer_profile SET experience_new = CAST(experience AS REAL) WHERE experience IS NOT NULL")
-        cur.execute("ALTER TABLE freelancer_profile RENAME COLUMN experience TO experience_old")
-        cur.execute("ALTER TABLE freelancer_profile RENAME COLUMN experience_new TO experience")
-        cur.execute("ALTER TABLE freelancer_profile DROP COLUMN experience_old")
-    except sqlite3.OperationalError:
+        # Check if experience column is still INTEGER type
+        cur.execute("""
+            SELECT data_type 
+            FROM information_schema.columns 
+            WHERE table_name = 'freelancer_profile' 
+            AND column_name = 'experience'
+        """)
+        result = cur.fetchone()
+        
+        if result and result[0] == 'integer':
+            cur.execute("ALTER TABLE freelancer_profile ALTER COLUMN experience TYPE REAL")
+    except Exception:
         # Column might already be REAL or migration already done
         pass
 
@@ -225,7 +239,7 @@ def create_tables():
     # Chat
     cur.execute("""
     CREATE TABLE IF NOT EXISTS message (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        id SERIAL PRIMARY KEY,
         sender_role TEXT,
         sender_id INTEGER,
         receiver_id INTEGER,
@@ -237,7 +251,7 @@ def create_tables():
     # Hire / Job
     cur.execute("""
     CREATE TABLE IF NOT EXISTS hire_request (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        id SERIAL PRIMARY KEY,
         client_id INTEGER,
         freelancer_id INTEGER,
         job_title TEXT DEFAULT '',
@@ -269,7 +283,7 @@ def create_tables():
     # Notifications (legacy copy kept in freelancer.db in your project)
     cur.execute("""
     CREATE TABLE IF NOT EXISTS notification (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        id SERIAL PRIMARY KEY ,
         client_id INTEGER,
         message TEXT,
         created_at INTEGER
@@ -279,7 +293,7 @@ def create_tables():
     # Portfolio
     cur.execute("""
     CREATE TABLE IF NOT EXISTS portfolio (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        id SERIAL PRIMARY KEY,
         freelancer_id INTEGER,
         title TEXT,
         description TEXT,
@@ -287,14 +301,14 @@ def create_tables():
         created_at INTEGER
     )
     """)
-    _try_add_column(cur, "portfolio", "image_data BLOB")
+    _try_add_column(cur, "portfolio", "image_data BYTEA")
     _try_add_column(cur, "portfolio", "media_type TEXT DEFAULT 'IMAGE'")
     _try_add_column(cur, "portfolio", "media_url TEXT")
 
     # Call session (freelancer.db copy)
     cur.execute("""
     CREATE TABLE IF NOT EXISTS call_session (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        id SERIAL PRIMARY KEY,
         caller_role TEXT,
         caller_id INTEGER,
         receiver_role TEXT,
@@ -309,7 +323,7 @@ def create_tables():
     # Project posting tables
     cur.execute("""
     CREATE TABLE IF NOT EXISTS project_post (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        id SERIAL PRIMARY KEY,
         client_id INTEGER,
         title TEXT,
         description TEXT,
@@ -324,7 +338,7 @@ def create_tables():
     """)
     cur.execute("""
     CREATE TABLE IF NOT EXISTS project_application (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        id SERIAL PRIMARY KEY,
         project_id INTEGER,
         freelancer_id INTEGER,
         proposal_text TEXT,
@@ -337,26 +351,31 @@ def create_tables():
     """)
 
     # ==========================
-    # FTS5: Search index
+    # FTS5: Search index (PostgreSQL doesn't have FTS5, use full-text search)
     # ==========================
     cur.execute("""
-    CREATE VIRTUAL TABLE IF NOT EXISTS freelancer_search
-    USING fts5(
-        freelancer_id UNINDEXED,
-        title,
-        skills,
-        bio,
-        tags,
-        portfolio_text
+    CREATE TABLE IF NOT EXISTS freelancer_search (
+        freelancer_id INTEGER PRIMARY KEY,
+        title TEXT,
+        skills TEXT,
+        bio TEXT,
+        tags TEXT,
+        portfolio_text TEXT
     )
     """)
+    
+    # Create GIN index for full-text search
+    try:
+        cur.execute("CREATE INDEX IF NOT EXISTS freelancer_search_text_idx ON freelancer_search USING gin(to_tsvector('english', title || ' ' || skills || ' ' || bio || ' ' || tags || ' ' || portfolio_text))")
+    except Exception:
+        pass
 
     # ==========================
     # FREELANCER VERIFICATION
     # ==========================
     cur.execute("""
     CREATE TABLE IF NOT EXISTS freelancer_verification (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        id SERIAL PRIMARY KEY,
         freelancer_id INTEGER UNIQUE,
         government_id_path TEXT,
         pan_card_path TEXT,
@@ -373,7 +392,7 @@ def create_tables():
     # ==========================
     cur.execute("""
     CREATE TABLE IF NOT EXISTS freelancer_subscription (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        id SERIAL PRIMARY KEY,
         freelancer_id INTEGER UNIQUE,
         plan_name TEXT DEFAULT 'FREE',
         start_date INTEGER,
@@ -387,7 +406,7 @@ def create_tables():
     # ==========================
     cur.execute("""
     CREATE TABLE IF NOT EXISTS review (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        id SERIAL PRIMARY KEY,
         hire_request_id INTEGER UNIQUE,
         client_id INTEGER,
         freelancer_id INTEGER,
@@ -407,6 +426,9 @@ def create_tables():
     _try_add_column(cur, "hire_request", "event_included_hours REAL")
     _try_add_column(cur, "hire_request", "event_overtime_rate REAL")
     _try_add_column(cur, "hire_request", "advance_paid REAL DEFAULT 0")
+    _try_add_column(cur, "hire_request", "event_date TEXT")
+    _try_add_column(cur, "hire_request", "start_time TEXT")
+    _try_add_column(cur, "hire_request", "end_time TEXT")
 
     db.commit()
 
@@ -434,8 +456,8 @@ def create_tables():
 
 def rebuild_freelancer_search_index(freelancer_id: int):
     """
-    Rebuild FTS row for one freelancer_id by pulling latest profile + portfolio.
-    Safe to call anytime.
+    Rebuild search row for one freelancer_id by pulling latest profile + portfolio.
+    PostgreSQL version using regular table with GIN index.
     """
     try:
         fid = int(freelancer_id)
@@ -453,14 +475,14 @@ def rebuild_freelancer_search_index(freelancer_id: int):
         """, (fid,))
         row = cur.fetchone()
         if not row:
-            cur.execute("DELETE FROM freelancer_search WHERE freelancer_id=?", (fid,))
+            cur.execute("DELETE FROM freelancer_search WHERE freelancer_id=%s", (fid,))
             conn.commit()
             return
 
         title, skills, bio, tags = row
 
         cur.execute("""
-            SELECT GROUP_CONCAT(COALESCE(title,'') || ' ' || COALESCE(description,''), ' ')
+            SELECT STRING_AGG(COALESCE(title,'') || ' ' || COALESCE(description,''), ' ')
             FROM portfolio
             WHERE freelancer_id=?
         """, (fid,))
@@ -468,10 +490,16 @@ def rebuild_freelancer_search_index(freelancer_id: int):
         portfolio_text = (prow[0] if prow and prow[0] else "")
 
         # Replace row
-        cur.execute("DELETE FROM freelancer_search WHERE freelancer_id=?", (fid,))
+        cur.execute("DELETE FROM freelancer_search WHERE freelancer_id=%s", (fid,))
         cur.execute("""
             INSERT INTO freelancer_search (freelancer_id, title, skills, bio, tags, portfolio_text)
-            VALUES (?, ?, ?, ?, ?, ?)
+            VALUES (%s, %s, %s, %s, %s, %s)
+            ON CONFLICT (freelancer_id) DO UPDATE SET
+                title=EXCLUDED.title,
+                skills=EXCLUDED.skills,
+                bio=EXCLUDED.bio,
+                tags=EXCLUDED.tags,
+                portfolio_text=EXCLUDED.portfolio_text
         """, (fid, title, skills, bio, tags, portfolio_text))
 
         conn.commit()
@@ -550,7 +578,7 @@ def get_latest_hire_requests_for_freelancer(freelancer_id: int, limit: int = 20)
             try:
                 cconn = client_db()
                 ccur = cconn.cursor()
-                ccur.execute("SELECT name, email FROM client WHERE id=?", (r[1],))
+                ccur.execute("SELECT name, email FROM client WHERE id=%s", (r[1],))
                 crow = ccur.fetchone()
                 if crow:
                     client_name, client_email = crow[0], crow[1]
@@ -860,23 +888,23 @@ def update_freelancer_verification(freelancer_id: int, government_id_path: str, 
         current_time = int(time.time())
         
         # Check if record exists
-        cur.execute("SELECT id FROM freelancer_verification WHERE freelancer_id=?", (fid,))
+        cur.execute("SELECT id FROM freelancer_verification WHERE freelancer_id=%s", (fid,))
         existing = cur.fetchone()
         
         if existing:
             # Update existing record
             cur.execute("""
                 UPDATE freelancer_verification 
-                SET government_id_path=?, pan_card_path=?, artist_proof_path=?, 
-                    status='PENDING', submitted_at=?
-                WHERE freelancer_id=?
+                SET government_id_path=%s, pan_card_path=%s, artist_proof_path=%s, 
+                    status='PENDING', submitted_at=%s
+                WHERE freelancer_id=%s
             """, (government_id_path, pan_card_path, artist_proof_path, current_time, fid))
         else:
             # Create new record
             cur.execute("""
                 INSERT INTO freelancer_verification 
                 (freelancer_id, government_id_path, pan_card_path, artist_proof_path, status, submitted_at)
-                VALUES (?, ?, ?, ?, 'PENDING', ?)
+                VALUES (%s, %s, %s, %s, 'PENDING', %s)
             """, (fid, government_id_path, pan_card_path, artist_proof_path, current_time))
         
         conn.commit()
@@ -914,14 +942,14 @@ def get_freelancer_plan(freelancer_id: int):
             cur.execute("""
                 INSERT INTO freelancer_subscription 
                 (freelancer_id, plan_name, status, start_date)
-                VALUES (?, 'BASIC', 'ACTIVE', ?)
+                VALUES (%s, 'BASIC', 'ACTIVE', %s)
             """, (fid, current_time))
             
             # Also update profile
             cur.execute("""
                 UPDATE freelancer_profile 
                 SET current_plan='BASIC'
-                WHERE freelancer_id=?
+                WHERE freelancer_id=%s
             """, (fid,))
             
             conn.commit()
@@ -1021,22 +1049,22 @@ def update_client_kyc(client_id: int, government_id_path: str, pan_card_path: st
         current_time = int(time.time())
         
         # Check if record exists
-        cur.execute("SELECT id FROM client_kyc WHERE client_id=?", (cid,))
+        cur.execute("SELECT id FROM client_kyc WHERE client_id=%s", (cid,))
         existing = cur.fetchone()
         
         if existing:
             # Update existing record
             cur.execute("""
                 UPDATE client_kyc 
-                SET government_id_path=?, pan_card_path=?, status='PENDING', submitted_at=?
-                WHERE client_id=?
+                SET government_id_path=%s, pan_card_path=%s, status='PENDING', submitted_at=%s
+                WHERE client_id=%s
             """, (government_id_path, pan_card_path, current_time, cid))
         else:
             # Create new record
             cur.execute("""
                 INSERT INTO client_kyc 
                 (client_id, government_id_path, pan_card_path, status, submitted_at)
-                VALUES (?, ?, ?, 'PENDING', ?)
+                VALUES (%s, %s, %s, 'PENDING', %s)
             """, (cid, government_id_path, pan_card_path, current_time))
         
         conn.commit()
@@ -1161,29 +1189,29 @@ def update_freelancer_subscription(freelancer_id: int, plan_name: str, days: int
         end_time = current_time + (days * 24 * 60 * 60)
         
         # Check if record exists
-        cur.execute("SELECT id FROM freelancer_subscription WHERE freelancer_id=?", (fid,))
+        cur.execute("SELECT id FROM freelancer_subscription WHERE freelancer_id=%s", (fid,))
         existing = cur.fetchone()
         
         if existing:
             # Update existing record
             cur.execute("""
                 UPDATE freelancer_subscription 
-                SET plan_name=?, start_date=?, end_date=?, status='ACTIVE'
-                WHERE freelancer_id=?
+                SET plan_name=%s, start_date=%s, end_date=%s, status='ACTIVE'
+                WHERE freelancer_id=%s
             """, (plan_name, current_time, end_time, fid))
         else:
             # Create new record
             cur.execute("""
                 INSERT INTO freelancer_subscription 
                 (freelancer_id, plan_name, start_date, end_date, status)
-                VALUES (?, ?, ?, ?, 'ACTIVE')
+                VALUES (%s, %s, %s, %s, 'ACTIVE')
             """, (fid, plan_name, current_time, end_time))
         
         # Update profile
         cur.execute("""
             UPDATE freelancer_profile 
-            SET current_plan=?
-            WHERE freelancer_id=?
+            SET current_plan=%s
+            WHERE freelancer_id=%s
         """, (plan_name, fid))
         
         # Reset job applies for paid plans
@@ -1191,7 +1219,7 @@ def update_freelancer_subscription(freelancer_id: int, plan_name: str, days: int
             cur.execute("""
                 UPDATE freelancer_profile 
                 SET job_applies_used=0
-                WHERE freelancer_id=?
+                WHERE freelancer_id=%s
             """, (fid,))
         
         conn.commit()

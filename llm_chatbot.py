@@ -17,8 +17,8 @@ from database import (
 )
 
 # === AI CHATBOT ADDITION ===
-# Gemini config
-# API key loaded from environment variable GEMINI_API_KEY
+# Moonshot Kimi config
+# Using Kimi API for accurate chat responses
 
 # Lightweight in-memory conversation memory (per user_id)
 CONVERSATION_MEMORY = {}
@@ -424,8 +424,8 @@ def _handle_send_message(user_id: int, role: str, parameters: Dict[str, Any]) ->
 def generate_ai_response(user_id: int, role: str, message: str) -> Dict[str, Any]:
     # health mode (used by /ai/health to avoid imports)
     if role == "__health__":
-        from gemini_agent import gemini_health
-        return {"health": gemini_health()}
+        from kimi_agent import kimi_health
+        return {"health": kimi_health()}
 
     # Greeting handling - detect greetings before calling LLM
     if message.lower() in ["hi", "hello", "hii", "hey"]:
@@ -433,6 +433,16 @@ def generate_ai_response(user_id: int, role: str, message: str) -> Dict[str, Any
             "type": "answer",
             "text": "Hi! How can I assist you today?"
         }
+
+    # NEW: Try natural language command parsing first
+    from agent_actions import parse_natural_language_command, execute_agent_action
+    parsed_command = parse_natural_language_command(message)
+    
+    if parsed_command:
+        # Execute the parsed command directly
+        action_name = parsed_command.get("action")
+        action_params = parsed_command.get("parameters", {})
+        return execute_agent_action(user_id, role, action_name, action_params)
 
     # Handle confirmation responses for pending actions
     message_lower = message.lower()
@@ -466,10 +476,10 @@ def generate_ai_response(user_id: int, role: str, message: str) -> Dict[str, Any
     db_payload, sources = _intent_route_and_fetch(user_id, role, message)
     prompt = _build_llm_prompt(message, kb, db_payload, memory)
 
-    # Call Gemini API
-    from gemini_agent import call_gemini
+    # Call Kimi API
+    from kimi_agent import call_kimi
     user_context = {"user_id": user_id, "role": role}
-    answer = call_gemini(prompt, user_context)
+    answer = call_kimi(prompt, user_context)
     if not answer:
         # Only use knowledge base for general platform questions, not database queries
         message_lower = (message or "").lower()

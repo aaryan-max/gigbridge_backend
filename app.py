@@ -1,5 +1,9 @@
+import psycopg2
+import psycopg2.errors
 from flask import Flask, request, jsonify
-import sqlite3
+from database import client_db, freelancer_db
+from psycopg2.extras import RealDictCursor
+from booking_service import validate_hire_request_slot, format_time_slot_display
 import random
 import time
 import smtplib
@@ -16,6 +20,7 @@ from admin_db import ensure_admin_tables
 from admin_routes import admin_bp
 from kyc_routes import kyc_bp
 from client_kyc_routes import client_kyc_bp
+from ai_chat import register_chat_routes
 
 from database import create_tables, rebuild_freelancer_search_index
 from settings import (
@@ -64,11 +69,98 @@ from categories import is_valid_category
 # ============================================================
 
 app = Flask(__name__)
+
+# ============================================================
+# GLOBAL ERROR HANDLERS - ENSURE JSON RESPONSES
+# ============================================================
+
+@app.errorhandler(400)
+def bad_request(error):
+    return jsonify({"success": False, "msg": "Bad request"}), 400
+
+@app.errorhandler(404)
+def not_found(error):
+    return jsonify({"success": False, "msg": "Endpoint not found"}), 404
+
+@app.errorhandler(405)
+def method_not_allowed(error):
+    return jsonify({"success": False, "msg": "Method not allowed"}), 405
+
+@app.errorhandler(500)
+def internal_error(error):
+    return jsonify({"success": False, "msg": "Internal server error"}), 500
+
+@app.errorhandler(Exception)
+def handle_exception(error):
+    # Log the full error for debugging
+    import traceback
+    print("="*50)
+    print("🚨 UNHANDLED EXCEPTION CAUGHT:")
+    print(f"Error Type: {type(error).__name__}")
+    print(f"Error Message: {str(error)}")
+    print("Full Traceback:")
+    traceback.print_exc()
+    print("="*50)
+    
+    # Return user-friendly error but include actual error message in dev mode
+    error_msg = str(error) if app.debug else "Server error occurred"
+    return jsonify({"success": False, "msg": error_msg}), 500
+
 create_tables()
 ensure_admin_tables()
+
+# ============================================================
+# STARTUP VALIDATION
+# ============================================================
+
+def validate_startup():
+    """Validate database connectivity and required tables"""
+    try:
+        print("🔍 Validating database connectivity...")
+        
+        # Test client database
+        client_conn = client_db()
+        client_cur = client_conn.cursor()
+        client_cur.execute("SELECT 1")
+        client_conn.close()
+        print("✅ Client database connection: OK")
+        
+        # Test freelancer database
+        freelancer_conn = freelancer_db()
+        freelancer_cur = freelancer_conn.cursor()
+        freelancer_cur.execute("SELECT 1")
+        freelancer_conn.close()
+        print("✅ Freelancer database connection: OK")
+        
+        # Check required tables exist
+        conn = client_db()
+        cur = conn.cursor()
+        
+        tables_to_check = ['client', 'client_otp', 'freelancer', 'freelancer_otp']
+        for table in tables_to_check:
+            try:
+                cur.execute(f"SELECT 1 FROM {table} LIMIT 1")
+                print(f"✅ Table '{table}': OK")
+            except Exception as e:
+                print(f"❌ Table '{table}': ERROR - {str(e)}")
+        
+        conn.close()
+        print("🎉 Startup validation completed successfully!")
+        
+    except Exception as e:
+        print(f"❌ Startup validation failed: {str(e)}")
+        import traceback
+        traceback.print_exc()
+
+# Run startup validation
+validate_startup()
+
 app.register_blueprint(admin_bp)
 app.register_blueprint(kyc_bp)
 app.register_blueprint(client_kyc_bp)
+
+# Register database chat routes
+register_chat_routes(app)
 
 # Try to load semantic index (optional; app still works without it)
 try:
@@ -260,7 +352,7 @@ Your OTP for GigBridge signup is:
 # ============================================================
 
 def create_otp_tables():
-    conn = sqlite3.connect("client.db")
+    conn = client_db()
     cur = conn.cursor()
     cur.execute("""
         CREATE TABLE IF NOT EXISTS client_otp (
@@ -272,7 +364,7 @@ def create_otp_tables():
     conn.commit()
     conn.close()
 
-    conn = sqlite3.connect("freelancer.db")
+    conn = freelancer_db()
     cur = conn.cursor()
     cur.execute("""
         CREATE TABLE IF NOT EXISTS freelancer_otp (
@@ -304,10 +396,10 @@ def client_send_otp():
     otp = str(random.randint(100000, 999999))
     expires_at = now_ts() + OTP_TTL_SECONDS
 
-    conn = sqlite3.connect("client.db")
+    conn = client_db()
     cur = conn.cursor()
     cur.execute(
-        "INSERT OR REPLACE INTO client_otp (email, otp, expires_at) VALUES (?, ?, ?)",
+        "INSERT INTO client_otp (email, otp, expires_at) VALUES (%s, %s, %s) ON CONFLICT (email) DO UPDATE SET otp=EXCLUDED.otp, expires_at=EXCLUDED.expires_at",
         (email, otp, expires_at)
     )
     conn.commit()
@@ -322,57 +414,86 @@ def client_send_otp():
 
 @app.route("/client/verify-otp", methods=["POST"])
 def client_verify_otp():
+    print("=== CLIENT VERIFY OTP DEBUG ===")
+    
     d = get_json()
+    print(f"Received data: {d}")
+    
     missing = require_fields(d, ["name", "email", "password", "otp"])
     if missing:
+        print("Missing fields error")
         return jsonify({"success": False, "msg": "Missing fields"}), 400
 
     name = str(d["name"]).strip()
     email = str(d["email"]).strip().lower()
     password = str(d["password"])
     otp_in = str(d["otp"]).strip()
+    
+    print(f"Processed: name={name}, email={email}, otp={otp_in}")
 
-    conn = sqlite3.connect("client.db")
-    cur = conn.cursor()
-    cur.execute("SELECT otp, expires_at FROM client_otp WHERE email=?", (email,))
-    row = cur.fetchone()
-
-    if not row:
-        conn.close()
-        return jsonify({"success": False, "msg": "OTP not found"}), 400
-
-    db_otp, expires_at = row
-    if now_ts() > int(expires_at):
-        cur.execute("DELETE FROM client_otp WHERE email=?", (email,))
-        conn.commit()
-        conn.close()
-        return jsonify({"success": False, "msg": "OTP expired"}), 400
-
-    if str(db_otp) != otp_in:
-        conn.close()
-        return jsonify({"success": False, "msg": "Invalid OTP"}), 400
-
+    conn = None
     try:
+        conn = client_db()
+        cur = conn.cursor()
+        print("Database connection established")
+        
+        # Verify OTP
+        cur.execute("SELECT otp, expires_at FROM client_otp WHERE email=%s", (email,))    
+        row = cur.fetchone()
+        print(f"OTP query result: {row}")
+
+        if not row:
+            print("OTP not found")
+            return jsonify({"success": False, "msg": "OTP not found"}), 400
+
+        db_otp, expires_at = row
+        if now_ts() > int(expires_at):
+            print("OTP expired")
+            cur.execute("DELETE FROM client_otp WHERE email=%s", (email,))
+            conn.commit()
+            return jsonify({"success": False, "msg": "OTP expired"}), 400
+
+        if str(db_otp) != otp_in:
+            print("Invalid OTP")
+            return jsonify({"success": False, "msg": "Invalid OTP"}), 400
+
+        print("OTP verified, inserting client")
+        # Insert client with RETURNING id
         cur.execute(
-            "INSERT INTO client (name,email,password) VALUES (?,?,?)",
+            "INSERT INTO client (name, email, password) VALUES (%s, %s, %s) RETURNING id",
             (name, email, generate_password_hash(password))
         )
-        client_id = cur.lastrowid  # ✅ auto-login return
+        client_id = cur.fetchone()[0]
+        print(f"Client inserted with ID: {client_id}")
 
-        cur.execute("DELETE FROM client_otp WHERE email=?", (email,))
+        # Clean up OTP
+        cur.execute("DELETE FROM client_otp WHERE email=%s", (email,))
         conn.commit()
-        conn.close()
+        print("Transaction committed")
 
         try:
             send_login_email(email, name, "Client", "signup")
-        except:
-            pass
+        except Exception as e:
+            print(f"Email sending failed: {e}")
 
+        print("Returning success response")
         return jsonify({"success": True, "client_id": client_id})
 
-    except sqlite3.IntegrityError:
-        conn.close()
+    except psycopg2.IntegrityError as e:
+        print(f"IntegrityError (duplicate email): {e}")
+        if conn:
+            conn.rollback()
         return jsonify({"success": False, "msg": "Client already exists"}), 409
+    except Exception as e:
+        print(f"Unexpected error: {type(e).__name__}: {str(e)}")
+        if conn:
+            conn.rollback()
+        return jsonify({"success": False, "msg": "Server error"}), 500
+    finally:
+        if conn:
+            conn.close()
+            print("Database connection closed")
+        print("=== END CLIENT VERIFY OTP DEBUG ===")
 
 # ============================================================
 # OTP – FREELANCER
@@ -380,87 +501,172 @@ def client_verify_otp():
 
 @app.route("/freelancer/send-otp", methods=["POST"])
 def freelancer_send_otp():
+    print("=== FREELANCER SEND OTP DEBUG ===")
+    
     d = get_json()
+    print(f"Received data: {d}")
+    
     missing = require_fields(d, ["email"])
     if missing:
+        print("Missing email field")
         return jsonify({"success": False, "msg": "Email required"}), 400
 
     email = str(d["email"]).strip().lower()
     if not valid_email(email):
+        print("Invalid email format")
         return jsonify({"success": False, "msg": "Invalid email"}), 400
 
     otp = str(random.randint(100000, 999999))
     expires_at = now_ts() + OTP_TTL_SECONDS
+    
+    print(f"Generated OTP for {email}: {otp}")
 
-    conn = sqlite3.connect("freelancer.db")
-    cur = conn.cursor()
-    cur.execute(
-        "INSERT OR REPLACE INTO freelancer_otp (email, otp, expires_at) VALUES (?, ?, ?)",
-        (email, otp, expires_at)
-    )
-    conn.commit()
-    conn.close()
+    conn = None
+    try:
+        conn = freelancer_db()
+        cur = conn.cursor()
+        print("Database connection established")
+        
+        # PostgreSQL UPSERT syntax
+        cur.execute(
+            "INSERT INTO freelancer_otp (email, otp, expires_at) VALUES (%s, %s, %s) "
+            "ON CONFLICT (email) DO UPDATE SET otp = EXCLUDED.otp, expires_at = EXCLUDED.expires_at",
+            (email, otp, expires_at)
+        )
+        conn.commit()
+        print("OTP saved to database")
+
+    except psycopg2.errors.UniqueViolation as e:
+        print(f"UniqueViolation error: {str(e)}")
+        if conn:
+            conn.rollback()
+        return jsonify({"success": False, "msg": "Email already has OTP pending"}), 409
+    except psycopg2.IntegrityError as e:
+        print(f"IntegrityError: {str(e)}")
+        if conn:
+            conn.rollback()
+        return jsonify({"success": False, "msg": "Database integrity error"}), 409
+    except psycopg2.Error as e:
+        print(f"PostgreSQL error: {type(e).__name__}: {str(e)}")
+        if conn:
+            conn.rollback()
+        return jsonify({"success": False, "msg": f"Database error: {str(e)}"}), 500
+    except Exception as e:
+        print(f"Unexpected error: {type(e).__name__}: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        if conn:
+            conn.rollback()
+        return jsonify({"success": False, "msg": f"Server error: {str(e)}"}), 500
+    finally:
+        if conn:
+            conn.close()
+            print("Database connection closed")
 
     try:
         send_otp_email(email, otp)
-    except:
-        pass
+        print("OTP email sent successfully")
+    except Exception as e:
+        print(f"Email sending failed: {str(e)}")
+        # Continue even if email fails
 
+    print("=== END FREELANCER SEND OTP DEBUG ===")
     return jsonify({"success": True, "msg": "OTP sent"})
 
 @app.route("/freelancer/verify-otp", methods=["POST"])
 def freelancer_verify_otp():
+    print("=== FREELANCER VERIFY OTP DEBUG ===")
+    
     d = get_json()
+    print(f"Received data: {d}")
+    
     missing = require_fields(d, ["name", "email", "password", "otp"])
     if missing:
+        print("Missing fields error")
         return jsonify({"success": False, "msg": "Missing fields"}), 400
 
     name = str(d["name"]).strip()
     email = str(d["email"]).strip().lower()
     password = str(d["password"])
     otp_in = str(d["otp"]).strip()
+    
+    print(f"Processed: name={name}, email={email}, otp={otp_in}")
 
-    conn = sqlite3.connect("freelancer.db")
-    cur = conn.cursor()
-    cur.execute("SELECT otp, expires_at FROM freelancer_otp WHERE email=?", (email,))
-    row = cur.fetchone()
-
-    if not row:
-        conn.close()
-        return jsonify({"success": False, "msg": "OTP not found"}), 400
-
-    db_otp, expires_at = row
-    if now_ts() > int(expires_at):
-        cur.execute("DELETE FROM freelancer_otp WHERE email=?", (email,))
-        conn.commit()
-        conn.close()
-        return jsonify({"success": False, "msg": "OTP expired"}), 400
-
-    if str(db_otp) != otp_in:
-        conn.close()
-        return jsonify({"success": False, "msg": "Invalid OTP"}), 400
-
+    conn = None
     try:
+        conn = freelancer_db()
+        cur = conn.cursor()
+        print("Database connection established")
+        
+        # Verify OTP
+        cur.execute("SELECT otp, expires_at FROM freelancer_otp WHERE email=%s", (email,))    
+        row = cur.fetchone()
+        print(f"OTP query result: {row}")
+
+        if not row:
+            print("OTP not found")
+            return jsonify({"success": False, "msg": "OTP not found"}), 400
+
+        db_otp, expires_at = row
+        if now_ts() > int(expires_at):
+            print("OTP expired")
+            cur.execute("DELETE FROM freelancer_otp WHERE email=%s", (email,))
+            conn.commit()
+            return jsonify({"success": False, "msg": "OTP expired"}), 400
+
+        if str(db_otp) != otp_in:
+            print("Invalid OTP")
+            return jsonify({"success": False, "msg": "Invalid OTP"}), 400
+
+        print("OTP verified, inserting freelancer")
+        # Insert freelancer with RETURNING id
         cur.execute(
-            "INSERT INTO freelancer (name,email,password) VALUES (?,?,?)",
+            "INSERT INTO freelancer (name, email, password) VALUES (%s, %s, %s) RETURNING id",
             (name, email, generate_password_hash(password))
         )
-        freelancer_id = cur.lastrowid
+        freelancer_id = cur.fetchone()[0]
+        print(f"Freelancer inserted with ID: {freelancer_id}")
 
-        cur.execute("DELETE FROM freelancer_otp WHERE email=?", (email,))
+        # Clean up OTP
+        cur.execute("DELETE FROM freelancer_otp WHERE email=%s", (email,))
         conn.commit()
-        conn.close()
+        print("Transaction committed")
 
         try:
             send_login_email(email, name, "Freelancer", "signup")
-        except:
-            pass
+        except Exception as e:
+            print(f"Email sending failed: {e}")
 
+        print("Returning success response")
         return jsonify({"success": True, "freelancer_id": freelancer_id})
 
-    except sqlite3.IntegrityError:
-        conn.close()
+    except psycopg2.errors.UniqueViolation as e:
+        print(f"UniqueViolation (duplicate email): {str(e)}")
+        if conn:
+            conn.rollback()
         return jsonify({"success": False, "msg": "Freelancer already exists"}), 409
+    except psycopg2.IntegrityError as e:
+        print(f"IntegrityError: {str(e)}")
+        if conn:
+            conn.rollback()
+        return jsonify({"success": False, "msg": "Database integrity error"}), 409
+    except psycopg2.Error as e:
+        print(f"PostgreSQL error: {type(e).__name__}: {str(e)}")
+        if conn:
+            conn.rollback()
+        return jsonify({"success": False, "msg": f"Database error: {str(e)}"}), 500
+    except Exception as e:
+        print(f"Unexpected error: {type(e).__name__}: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        if conn:
+            conn.rollback()
+        return jsonify({"success": False, "msg": f"Server error: {str(e)}"}), 500
+    finally:
+        if conn:
+            conn.close()
+            print("Database connection closed")
+        print("=== END FREELANCER VERIFY OTP DEBUG ===")
 
 # ============================================================
 # PASSWORD RESET – CLIENT
@@ -469,65 +675,135 @@ def freelancer_verify_otp():
 @app.route("/client/verify-otp-for-reset", methods=["POST"])
 def client_verify_otp_for_reset():
     """Verify OTP for password reset"""
+    print("=== CLIENT VERIFY OTP FOR RESET DEBUG ===")
+    
     d = get_json()
+    print(f"Received data: {d}")
+    
     missing = require_fields(d, ["email", "otp"])
     if missing:
+        print("Missing fields error")
         return jsonify({"success": False, "msg": "Missing fields"}), 400
 
     email = str(d["email"]).strip().lower()
     otp_in = str(d["otp"]).strip()
+    
+    print(f"Processed: email={email}, otp_entered={otp_in}")
 
-    conn = sqlite3.connect("client.db")
-    cur = conn.cursor()
-    cur.execute("SELECT otp, expires_at FROM client_otp WHERE email=?", (email,))
-    row = cur.fetchone()
-    
-    if not row:
-        conn.close()
-        return jsonify({"success": False, "msg": "OTP not found"}), 400
-    
-    stored_otp, expires_at = row
-    if now_ts() > expires_at:
-        conn.close()
-        return jsonify({"success": False, "msg": "OTP expired"}), 400
-    
-    if stored_otp != otp_in:
-        conn.close()
-        return jsonify({"success": False, "msg": "Invalid OTP"}), 400
-    
-    # OTP verified, allow password reset
-    conn.close()
-    return jsonify({"success": True, "msg": "OTP verified"})
+    conn = None
+    try:
+        conn = client_db()
+        cur = conn.cursor()
+        print("Database connection established")
+        
+        # PostgreSQL placeholder syntax
+        cur.execute("SELECT otp, expires_at FROM client_otp WHERE email=%s", (email,))
+        row = cur.fetchone()
+        print(f"OTP query result: {row}")
+        
+        if not row:
+            print("OTP not found for email:", email)
+            return jsonify({"success": False, "msg": "OTP not found"}), 400
+        
+        stored_otp, expires_at = row
+        print(f"Stored OTP: {stored_otp}, Entered OTP: {otp_in}")
+        print(f"Current time: {now_ts()}, Expires at: {expires_at}")
+        
+        if now_ts() > int(expires_at):
+            print("OTP expired")
+            # Clean up expired OTP
+            cur.execute("DELETE FROM client_otp WHERE email=%s", (email,))
+            conn.commit()
+            return jsonify({"success": False, "msg": "OTP expired"}), 400
+        
+        if str(stored_otp) != otp_in:
+            print(f"OTP mismatch: stored='{stored_otp}' vs entered='{otp_in}'")
+            return jsonify({"success": False, "msg": "Invalid OTP or OTP expired"}), 400
+        
+        print("OTP verified successfully")
+        # OTP verified, allow password reset
+        return jsonify({"success": True, "msg": "OTP verified"})
+        
+    except psycopg2.Error as e:
+        print(f"PostgreSQL error: {type(e).__name__}: {str(e)}")
+        if conn:
+            conn.rollback()
+        return jsonify({"success": False, "msg": f"Database error: {str(e)}"}), 500
+    except Exception as e:
+        print(f"Unexpected error: {type(e).__name__}: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        if conn:
+            conn.rollback()
+        return jsonify({"success": False, "msg": f"Server error: {str(e)}"}), 500
+    finally:
+        if conn:
+            conn.close()
+            print("Database connection closed")
+        print("=== END CLIENT VERIFY OTP FOR RESET DEBUG ===")
 
 @app.route("/client/reset-password", methods=["POST"])
 def client_reset_password():
     """Reset client password"""
+    print("=== CLIENT RESET PASSWORD DEBUG ===")
+    
     d = get_json()
+    print(f"Received data: {d}")
+    
     missing = require_fields(d, ["email", "new_password"])
     if missing:
+        print("Missing fields error")
         return jsonify({"success": False, "msg": "Missing fields"}), 400
 
     email = str(d["email"]).strip().lower()
     new_password = str(d["new_password"])
     
+    print(f"Processed: email={email}, password_length={len(new_password)}")
+    
     if len(new_password) < 6:
+        print("Password too short")
         return jsonify({"success": False, "msg": "Password must be at least 6 characters"}), 400
 
-    conn = sqlite3.connect("client.db")
-    cur = conn.cursor()
-    cur.execute("UPDATE client SET password=? WHERE email=?", 
-               (generate_password_hash(new_password), email))
-    
-    if cur.rowcount == 0:
-        conn.close()
-        return jsonify({"success": False, "msg": "Email not found"}), 404
-    
-    # Clean up OTP
-    cur.execute("DELETE FROM client_otp WHERE email=?", (email,))
-    conn.commit()
-    conn.close()
-    
-    return jsonify({"success": True, "msg": "Password reset successful"})
+    conn = None
+    try:
+        conn = client_db()
+        cur = conn.cursor()
+        print("Database connection established")
+        
+        # PostgreSQL placeholder syntax
+        cur.execute("UPDATE client SET password=%s WHERE email=%s", 
+                   (generate_password_hash(new_password), email))
+        
+        if cur.rowcount == 0:
+            print("No client found with email:", email)
+            return jsonify({"success": False, "msg": "Email not found"}), 404
+        
+        print(f"Password updated for {cur.rowcount} client(s)")
+        
+        # Clean up OTP after successful password reset
+        cur.execute("DELETE FROM client_otp WHERE email=%s", (email,))
+        conn.commit()
+        print("OTP cleaned up, transaction committed")
+        
+        return jsonify({"success": True, "msg": "Password reset successful"})
+        
+    except psycopg2.Error as e:
+        print(f"PostgreSQL error: {type(e).__name__}: {str(e)}")
+        if conn:
+            conn.rollback()
+        return jsonify({"success": False, "msg": f"Database error: {str(e)}"}), 500
+    except Exception as e:
+        print(f"Unexpected error: {type(e).__name__}: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        if conn:
+            conn.rollback()
+        return jsonify({"success": False, "msg": f"Server error: {str(e)}"}), 500
+    finally:
+        if conn:
+            conn.close()
+            print("Database connection closed")
+        print("=== END CLIENT RESET PASSWORD DEBUG ===")
 
 # ============================================================
 # PASSWORD RESET – FREELANCER
@@ -536,65 +812,135 @@ def client_reset_password():
 @app.route("/freelancer/verify-otp-for-reset", methods=["POST"])
 def freelancer_verify_otp_for_reset():
     """Verify OTP for password reset"""
+    print("=== FREELANCER VERIFY OTP FOR RESET DEBUG ===")
+    
     d = get_json()
+    print(f"Received data: {d}")
+    
     missing = require_fields(d, ["email", "otp"])
     if missing:
+        print("Missing fields error")
         return jsonify({"success": False, "msg": "Missing fields"}), 400
 
     email = str(d["email"]).strip().lower()
     otp_in = str(d["otp"]).strip()
+    
+    print(f"Processed: email={email}, otp_entered={otp_in}")
 
-    conn = sqlite3.connect("freelancer.db")
-    cur = conn.cursor()
-    cur.execute("SELECT otp, expires_at FROM freelancer_otp WHERE email=?", (email,))
-    row = cur.fetchone()
-    
-    if not row:
-        conn.close()
-        return jsonify({"success": False, "msg": "OTP not found"}), 400
-    
-    stored_otp, expires_at = row
-    if now_ts() > expires_at:
-        conn.close()
-        return jsonify({"success": False, "msg": "OTP expired"}), 400
-    
-    if stored_otp != otp_in:
-        conn.close()
-        return jsonify({"success": False, "msg": "Invalid OTP"}), 400
-    
-    # OTP verified, allow password reset
-    conn.close()
-    return jsonify({"success": True, "msg": "OTP verified"})
+    conn = None
+    try:
+        conn = freelancer_db()
+        cur = conn.cursor()
+        print("Database connection established")
+        
+        # PostgreSQL placeholder syntax
+        cur.execute("SELECT otp, expires_at FROM freelancer_otp WHERE email=%s", (email,))
+        row = cur.fetchone()
+        print(f"OTP query result: {row}")
+        
+        if not row:
+            print("OTP not found for email:", email)
+            return jsonify({"success": False, "msg": "OTP not found"}), 400
+        
+        stored_otp, expires_at = row
+        print(f"Stored OTP: {stored_otp}, Entered OTP: {otp_in}")
+        print(f"Current time: {now_ts()}, Expires at: {expires_at}")
+        
+        if now_ts() > int(expires_at):
+            print("OTP expired")
+            # Clean up expired OTP
+            cur.execute("DELETE FROM freelancer_otp WHERE email=%s", (email,))
+            conn.commit()
+            return jsonify({"success": False, "msg": "OTP expired"}), 400
+        
+        if str(stored_otp) != otp_in:
+            print(f"OTP mismatch: stored='{stored_otp}' vs entered='{otp_in}'")
+            return jsonify({"success": False, "msg": "Invalid OTP or OTP expired"}), 400
+        
+        print("OTP verified successfully")
+        # OTP verified, allow password reset
+        return jsonify({"success": True, "msg": "OTP verified"})
+        
+    except psycopg2.Error as e:
+        print(f"PostgreSQL error: {type(e).__name__}: {str(e)}")
+        if conn:
+            conn.rollback()
+        return jsonify({"success": False, "msg": f"Database error: {str(e)}"}), 500
+    except Exception as e:
+        print(f"Unexpected error: {type(e).__name__}: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        if conn:
+            conn.rollback()
+        return jsonify({"success": False, "msg": f"Server error: {str(e)}"}), 500
+    finally:
+        if conn:
+            conn.close()
+            print("Database connection closed")
+        print("=== END FREELANCER VERIFY OTP FOR RESET DEBUG ===")
 
 @app.route("/freelancer/reset-password", methods=["POST"])
 def freelancer_reset_password():
     """Reset freelancer password"""
+    print("=== FREELANCER RESET PASSWORD DEBUG ===")
+    
     d = get_json()
+    print(f"Received data: {d}")
+    
     missing = require_fields(d, ["email", "new_password"])
     if missing:
+        print("Missing fields error")
         return jsonify({"success": False, "msg": "Missing fields"}), 400
 
     email = str(d["email"]).strip().lower()
     new_password = str(d["new_password"])
     
+    print(f"Processed: email={email}, password_length={len(new_password)}")
+    
     if len(new_password) < 6:
+        print("Password too short")
         return jsonify({"success": False, "msg": "Password must be at least 6 characters"}), 400
 
-    conn = sqlite3.connect("freelancer.db")
-    cur = conn.cursor()
-    cur.execute("UPDATE freelancer SET password=? WHERE email=?", 
-               (generate_password_hash(new_password), email))
-    
-    if cur.rowcount == 0:
-        conn.close()
-        return jsonify({"success": False, "msg": "Email not found"}), 404
-    
-    # Clean up OTP
-    cur.execute("DELETE FROM freelancer_otp WHERE email=?", (email,))
-    conn.commit()
-    conn.close()
-    
-    return jsonify({"success": True, "msg": "Password reset successful"})
+    conn = None
+    try:
+        conn = freelancer_db()
+        cur = conn.cursor()
+        print("Database connection established")
+        
+        # PostgreSQL placeholder syntax
+        cur.execute("UPDATE freelancer SET password=%s WHERE email=%s", 
+                   (generate_password_hash(new_password), email))
+        
+        if cur.rowcount == 0:
+            print("No freelancer found with email:", email)
+            return jsonify({"success": False, "msg": "Email not found"}), 404
+        
+        print(f"Password updated for {cur.rowcount} freelancer(s)")
+        
+        # Clean up OTP after successful password reset
+        cur.execute("DELETE FROM freelancer_otp WHERE email=%s", (email,))
+        conn.commit()
+        print("OTP cleaned up, transaction committed")
+        
+        return jsonify({"success": True, "msg": "Password reset successful"})
+        
+    except psycopg2.Error as e:
+        print(f"PostgreSQL error: {type(e).__name__}: {str(e)}")
+        if conn:
+            conn.rollback()
+        return jsonify({"success": False, "msg": f"Database error: {str(e)}"}), 500
+    except Exception as e:
+        print(f"Unexpected error: {type(e).__name__}: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        if conn:
+            conn.rollback()
+        return jsonify({"success": False, "msg": f"Server error: {str(e)}"}), 500
+    finally:
+        if conn:
+            conn.close()
+            print("Database connection closed")
+        print("=== END FREELANCER RESET PASSWORD DEBUG ===")
 
 @app.route("/client/signup", methods=["POST"])
 def client_signup():
@@ -611,17 +957,17 @@ def client_signup():
     if not valid_email(email):
         return jsonify({"success": False, "msg": "Invalid email format"}), 400
     
-    conn = sqlite3.connect("client.db")
+    conn = client_db()
     cur = conn.cursor()
     
     # Check if email already exists
-    cur.execute("SELECT id FROM client WHERE email=?", (email,))
+    cur.execute("SELECT id FROM client WHERE email=%s", (email,))
     if cur.fetchone():
         conn.close()
         return jsonify({"success": False, "msg": "Email already exists"}), 400
     
     # Insert new client
-    cur.execute("INSERT INTO client (name, email, password) VALUES (?, ?, ?)", 
+    cur.execute("INSERT INTO client (name, email, password) VALUES (%s, %s, %s)", 
                (name, email, generate_password_hash(password)))
     client_id = cur.lastrowid
     conn.commit()
@@ -644,17 +990,17 @@ def freelancer_signup():
     if not valid_email(email):
         return jsonify({"success": False, "msg": "Invalid email format"}), 400
     
-    conn = sqlite3.connect("freelancer.db")
+    conn = freelancer_db()
     cur = conn.cursor()
     
     # Check if email already exists
-    cur.execute("SELECT id FROM freelancer WHERE email=?", (email,))
+    cur.execute("SELECT id FROM freelancer WHERE email=%s", (email,))
     if cur.fetchone():
         conn.close()
         return jsonify({"success": False, "msg": "Email already exists"}), 400
     
     # Insert new freelancer
-    cur.execute("INSERT INTO freelancer (name, email, password) VALUES (?, ?, ?)", 
+    cur.execute("INSERT INTO freelancer (name, email, password) VALUES (%s, %s, %s)", 
                (name, email, generate_password_hash(password)))
     freelancer_id = cur.lastrowid
     conn.commit()
@@ -676,18 +1022,18 @@ def client_login():
     email = str(d["email"]).strip().lower()
     password = str(d["password"])
 
-    conn = sqlite3.connect("client.db")
+    conn = client_db()
     cur = conn.cursor()
-    cur.execute("SELECT id,password,name FROM client WHERE email=?", (email,))
+    cur.execute("SELECT id,password,name FROM client WHERE email=%s", (email,))
     row = cur.fetchone()
     conn.close()
 
     if row and check_password_hash(row[1], password):
         if FEATURE_BLOCK_DISABLED_USERS:
             try:
-                c2 = sqlite3.connect("client.db")
+                c2 = client_db()
                 cur2 = c2.cursor()
-                cur2.execute("SELECT COALESCE(is_enabled,1) FROM client WHERE id=?", (row[0],))
+                cur2.execute("SELECT COALESCE(is_enabled,1) FROM client WHERE id=%s", (row[0],))
                 en = cur2.fetchone()
                 c2.close()
                 if en and int(en[0]) != 1:
@@ -712,18 +1058,18 @@ def freelancer_login():
     email = str(d["email"]).strip().lower()
     password = str(d["password"])
 
-    conn = sqlite3.connect("freelancer.db")
+    conn = freelancer_db()
     cur = conn.cursor()
-    cur.execute("SELECT id,password,name FROM freelancer WHERE email=?", (email,))
+    cur.execute("SELECT id,password,name FROM freelancer WHERE email=%s", (email,))
     row = cur.fetchone()
     conn.close()
 
     if row and check_password_hash(row[1], password):
         if FEATURE_BLOCK_DISABLED_USERS:
             try:
-                f2 = sqlite3.connect("freelancer.db")
+                f2 = freelancer_db()
                 cur2 = f2.cursor()
-                cur2.execute("SELECT COALESCE(is_enabled,1) FROM freelancer WHERE id=?", (row[0],))
+                cur2.execute("SELECT COALESCE(is_enabled,1) FROM freelancer WHERE id=%s", (row[0],))
                 en = cur2.fetchone()
                 f2.close()
                 if en and int(en[0]) != 1:
@@ -771,11 +1117,11 @@ def client_profile():
     if (lat is None or lon is None) and d.get("location"):
         lat, lon = geocode_address(d["location"])
         
-    conn = sqlite3.connect("client.db")
+    conn = client_db()
     cur = conn.cursor()
     cur.execute("""
         INSERT INTO client_profile (client_id, phone, location, bio, pincode, latitude, longitude, dob)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
         ON CONFLICT(client_id) DO UPDATE SET
         phone=excluded.phone,
         location=excluded.location,
@@ -788,12 +1134,12 @@ def client_profile():
     conn.commit()
     conn.close()
 
-    # Add notification (store in client.db)
-    c2 = sqlite3.connect("client.db")
+    # Add notification (store in PostgreSQL)
+    c2 = client_db()
     cur2 = c2.cursor()
     cur2.execute("""
         INSERT INTO notification (client_id, message, created_at)
-        VALUES (?, ?, ?)
+        VALUES (%s, %s, %s)
     """, (d["client_id"], "Profile updated successfully", now_ts()))
     c2.commit()
     c2.close()
@@ -863,13 +1209,13 @@ def freelancer_profile():
 
     freelancer_id = int(d["freelancer_id"])
 
-    conn = sqlite3.connect("freelancer.db")
+    conn = freelancer_db()
     cur = conn.cursor()
     cur.execute(
         """
         INSERT INTO freelancer_profile
         (freelancer_id, title, skills, experience, min_budget, max_budget, bio, category, location, pincode, latitude, longitude, dob, availability_status)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         ON CONFLICT(freelancer_id) DO UPDATE SET
             title=excluded.title,
             skills=excluded.skills,
@@ -932,13 +1278,13 @@ def update_freelancer_availability():
     freelancer_id = int(d["freelancer_id"])
     availability_status = d["availability_status"]
     
-    conn = sqlite3.connect("freelancer.db")
+    conn = freelancer_db()
     cur = conn.cursor()
     try:
         cur.execute("""
             UPDATE freelancer_profile 
-            SET availability_status = ?
-            WHERE freelancer_id = ?
+            SET availability_status = %s
+            WHERE freelancer_id = %s
         """, (availability_status, freelancer_id))
         conn.commit()
         
@@ -976,10 +1322,10 @@ def freelancers_search():
     if client_id:
         try:
             cid = int(client_id)
-            cconn = sqlite3.connect("client.db")
+            cconn = client_db()
             ccur = cconn.cursor()
             ccur.execute(
-                "SELECT latitude, longitude FROM client_profile WHERE client_id=?",
+                "SELECT latitude, longitude FROM client_profile WHERE client_id=%s",
                 (cid,),
             )
             row = ccur.fetchone()
@@ -991,7 +1337,7 @@ def freelancers_search():
             client_lat = client_lon = None
 
     try:
-        conn = sqlite3.connect("freelancer.db")
+        conn = freelancer_db()
         cur = conn.cursor()
 
         rows = []
@@ -1018,6 +1364,7 @@ def freelancers_search():
                         fp.category,
                         fp.latitude,
                         fp.longitude,
+                        fp.availability_status,
                         COALESCE(fs.plan_name, 'BASIC') as subscription_plan,
                         bm25(freelancer_search) as rank
                     FROM freelancer_search
@@ -1027,9 +1374,9 @@ def freelancers_search():
                         ON f.id = fp.freelancer_id
                     LEFT JOIN freelancer_subscription fs
                         ON fs.freelancer_id = fp.freelancer_id
-                    WHERE freelancer_search MATCH ?
-                      AND fp.min_budget <= ?
-                      AND fp.max_budget >= ?{cond_verified}
+                    WHERE freelancer_search MATCH %s
+                      AND fp.min_budget <= %s
+                      AND fp.max_budget >= %s{cond_verified}
                 """
                 cur.execute(sql, (fts_query, budget, budget))
                 rows = cur.fetchall()
@@ -1053,6 +1400,7 @@ def freelancers_search():
                         fp.category,
                         fp.latitude,
                         fp.longitude,
+                        fp.availability_status,
                         COALESCE(fs.plan_name, 'BASIC') as subscription_plan
                     FROM freelancer_profile fp
                     JOIN freelancer f
@@ -1106,6 +1454,7 @@ def freelancers_search():
                             fp.category,
                             fp.latitude,
                             fp.longitude,
+                            fp.availability_status,
                             COALESCE(fs.plan_name, 'BASIC') as subscription_plan,
                             999999.0 as rank
                         FROM freelancer_profile fp
@@ -1139,6 +1488,7 @@ def freelancers_search():
                     fp.category,
                     fp.latitude,
                     fp.longitude,
+                    fp.availability_status,
                     COALESCE(fs.plan_name, 'BASIC') as subscription_plan,
                     999999.0 as rank
                 FROM freelancer_profile fp
@@ -1146,8 +1496,8 @@ def freelancers_search():
                     ON f.id = fp.freelancer_id
                 LEFT JOIN freelancer_subscription fs
                     ON fs.freelancer_id = fp.freelancer_id
-                WHERE fp.min_budget <= ?
-                  AND fp.max_budget >= ?{cond_verified}
+                WHERE fp.min_budget <= %s
+                  AND fp.max_budget >= %s{cond_verified}
                 """,
                 (budget, budget),
             )
@@ -1155,7 +1505,7 @@ def freelancers_search():
 
         conn.close()
 
-    except sqlite3.Error as e:
+    except Exception as e:
         return jsonify(
             {
                 "success": False,
@@ -1183,7 +1533,7 @@ def freelancers_search():
              if fuzzy_score(spec, spec_db) < 70:
                continue   
 
-        f_lat, f_lon = r[9], r[10]
+        f_lat, f_lon = r[10], r[11]  # latitude, longitude moved to indices 10, 11
 
         if client_lat and client_lon and f_lat and f_lon:
             dist = calculate_distance(
@@ -1194,7 +1544,7 @@ def freelancers_search():
 
         # Apply rank boost based on subscription
         rank_boost = 0
-        subscription_plan = r[11]  # subscription_plan field
+        subscription_plan = r[12]  # subscription_plan field (moved to index 12)
         
         # Migrate old plans
         if subscription_plan == "FREE":
@@ -1206,7 +1556,7 @@ def freelancers_search():
             rank_boost = 1
         
         # Adjust rank with boost
-        adjusted_rank = r[12] - (rank_boost * 100)  # Lower rank number = higher position
+        adjusted_rank = r[13] - (rank_boost * 100)  # Lower rank number = higher position
         
         # Add badge
         badge = None
@@ -1225,7 +1575,8 @@ def freelancers_search():
             "distance": round(dist, 2),
             "rank": adjusted_rank,
             "badge": badge,
-            "subscription_plan": subscription_plan
+            "subscription_plan": subscription_plan,
+            "availability_status": r[11]
         })
         
     # ============================================
@@ -1291,9 +1642,8 @@ def freelancers_search():
 @app.route("/freelancers/all", methods=["GET"])
 def freelancers_all():
     # NEW CODE: Add Row factory for safe column access
-    conn = sqlite3.connect("freelancer.db")
-    conn.row_factory = sqlite3.Row
-    cur = conn.cursor()
+    conn = freelancer_db()
+    cur = conn.cursor(cursor_factory=RealDictCursor)
     cur.execute("""
         SELECT
             f.id,
@@ -1385,23 +1735,23 @@ def client_send_message():
     if missing:
         return jsonify({"success": False, "msg": "Missing fields"}), 400
 
-    conn = sqlite3.connect("freelancer.db")
+    conn = freelancer_db()
     cur = conn.cursor()
     cur.execute("""
         INSERT INTO message (sender_role, sender_id, receiver_id, text, timestamp)
-        VALUES (?, ?, ?, ?, ?)
+        VALUES (%s, %s, %s, %s, %s)
     """, ("client", int(d["client_id"]), int(d["freelancer_id"]), str(d["text"]), now_ts()))
 
     # Add notification for client in client.db - get freelancer name
-    cur.execute("SELECT name FROM freelancer WHERE id=?", (int(d["freelancer_id"]),))
+    cur.execute("SELECT name FROM freelancer WHERE id=%s", (int(d["freelancer_id"]),))
     freelancer_row = cur.fetchone()
     freelancer_name = freelancer_row[0] if freelancer_row else "Freelancer"
     
-    cconn = sqlite3.connect("client.db")
+    cconn = client_db()
     ccur = cconn.cursor()
     ccur.execute("""
         INSERT INTO notification (client_id, message, created_at)
-        VALUES (?, ?, ?)
+        VALUES (%s, %s, %s)
     """, (int(d["client_id"]), f"You messaged {freelancer_name}", now_ts()))
     cconn.commit()
     cconn.close()
@@ -1418,11 +1768,11 @@ def freelancer_send_message():
     if missing:
         return jsonify({"success": False, "msg": "Missing fields"}), 400
 
-    conn = sqlite3.connect("freelancer.db")
+    conn = freelancer_db()
     cur = conn.cursor()
     cur.execute("""
         INSERT INTO message (sender_role, sender_id, receiver_id, text, timestamp)
-        VALUES (?, ?, ?, ?, ?)
+        VALUES (%s, %s, %s, %s, %s)
     """, ("freelancer", int(d["freelancer_id"]), int(d["client_id"]), str(d["text"]), now_ts()))
     conn.commit()
     conn.close()
@@ -1439,13 +1789,13 @@ def message_history():
     client_id = int(client_id)
     freelancer_id = int(freelancer_id)
 
-    conn = sqlite3.connect("freelancer.db")
+    conn = freelancer_db()
     cur = conn.cursor()
     cur.execute("""
         SELECT sender_role, sender_id, text, timestamp
         FROM message
-        WHERE (sender_role='client' AND sender_id=? AND receiver_id=?)
-           OR (sender_role='freelancer' AND sender_id=? AND receiver_id=?)
+        WHERE (sender_role='client' AND sender_id=%s AND receiver_id=%s)
+           OR (sender_role='freelancer' AND sender_id=%s AND receiver_id=%s)
         ORDER BY timestamp
     """, (client_id, freelancer_id, freelancer_id, client_id))
     rows = cur.fetchall()
@@ -1478,27 +1828,44 @@ def client_hire():
     contract_type = str(d["contract_type"]).upper()
     note = str(d.get("note", "")).strip()
     
+    # Extract and validate date/time slots
+    event_date = d.get("event_date", "").strip()
+    start_time = d.get("start_time", "").strip()
+    end_time = d.get("end_time", "").strip()
+    
+    # Validate date/time slot if provided
+    if event_date or start_time or end_time:
+        if not all([event_date, start_time, end_time]):
+            return jsonify({"success": False, "msg": "All date/time fields (event_date, start_time, end_time) must be provided together"}), 400
+        
+        # Validate the time slot
+        is_valid, error_msg = validate_hire_request_slot(
+            freelancer_id, event_date, start_time, end_time
+        )
+        if not is_valid:
+            return jsonify({"success": False, "msg": error_msg}), 400
+    
     # Validate contract type
     if contract_type not in ["FIXED", "HOURLY", "EVENT"]:
         return jsonify({"success": False, "msg": "Invalid contract type. Use FIXED, HOURLY, or EVENT"}), 400
 
     # simple existence check
-    conn = sqlite3.connect("freelancer.db")
+    conn = freelancer_db()
     cur = conn.cursor()
-    cur.execute("SELECT id FROM freelancer WHERE id=?", (freelancer_id,))
+    cur.execute("SELECT id FROM freelancer WHERE id=%s", (freelancer_id,))
     if not cur.fetchone():
         conn.close()
         return jsonify({"success": False, "msg": "Freelancer not found"}), 404
     
     # Check freelancer availability status
-    cur.execute("SELECT availability_status FROM freelancer_profile WHERE freelancer_id=?", (freelancer_id,))
+    cur.execute("SELECT availability_status FROM freelancer_profile WHERE freelancer_id=%s", (freelancer_id,))
     availability_result = cur.fetchone()
     if availability_result and availability_result[0] == "ON_LEAVE":
         conn.close()
         return jsonify({"success": False, "msg": "Freelancer is currently not accepting new projects"}), 403
     if FEATURE_ENFORCE_VERIFIED_FOR_HIRE_MESSAGE:
         try:
-            cur.execute("SELECT COALESCE(is_verified,0) FROM freelancer_profile WHERE freelancer_id=?", (freelancer_id,))
+            cur.execute("SELECT COALESCE(is_verified,0) FROM freelancer_profile WHERE freelancer_id=%s", (freelancer_id,))
             vr = cur.fetchone()
             if not vr or int(vr[0]) != 1:
                 conn.close()
@@ -1512,9 +1879,9 @@ def client_hire():
     if contract_type == "FIXED":
         # Keep existing budget logic unchanged
         cur.execute("""
-            INSERT INTO hire_request (client_id, freelancer_id, job_title, proposed_budget, note, status, contract_type, created_at)
-            VALUES (?, ?, ?, ?, ?, 'PENDING', ?, ?)
-        """, (client_id, freelancer_id, job_title, proposed_budget, note, contract_type, now_ts()))
+            INSERT INTO hire_request (client_id, freelancer_id, job_title, proposed_budget, note, status, contract_type, created_at, event_date, start_time, end_time)
+            VALUES (%s, %s, %s, %s, %s, 'PENDING', %s, %s, %s, %s, %s)
+        """, (client_id, freelancer_id, job_title, proposed_budget, note, contract_type, now_ts(), event_date, start_time, end_time))
     elif contract_type == "HOURLY":
         # Require hourly rate fields
         if "contract_hourly_rate" not in d or "weekly_limit" not in d:
@@ -1528,9 +1895,9 @@ def client_hire():
             return jsonify({"success": False, "msg": "HOURLY contracts require positive rates and limits"}), 400
         
         cur.execute("""
-            INSERT INTO hire_request (client_id, freelancer_id, job_title, proposed_budget, note, status, contract_type, contract_hourly_rate, contract_overtime_rate, weekly_limit, max_daily_hours, created_at)
-            VALUES (?, ?, ?, ?, ?, 'PENDING', ?, ?, ?, ?, ?, ?)
-        """, (client_id, freelancer_id, job_title, proposed_budget, note, contract_type, hourly_rate, hourly_rate * 1.5, weekly_limit, max_daily_hours, now_ts()))
+            INSERT INTO hire_request (client_id, freelancer_id, job_title, proposed_budget, note, status, contract_type, contract_hourly_rate, contract_overtime_rate, weekly_limit, max_daily_hours, created_at, event_date, start_time, end_time)
+            VALUES (%s, %s, %s, %s, %s, 'PENDING', %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        """, (client_id, freelancer_id, job_title, proposed_budget, note, contract_type, hourly_rate, hourly_rate * 1.5, weekly_limit, max_daily_hours, now_ts(), event_date, start_time, end_time))
     elif contract_type == "EVENT":
         # Require event fields
         required_event_fields = ["event_base_fee", "event_included_hours", "event_overtime_rate"]
@@ -1547,20 +1914,20 @@ def client_hire():
             return jsonify({"success": False, "msg": "EVENT contracts require non-negative values"}), 400
         
         cur.execute("""
-            INSERT INTO hire_request (client_id, freelancer_id, job_title, proposed_budget, note, status, contract_type, event_base_fee, event_included_hours, event_overtime_rate, advance_paid, created_at)
-            VALUES (?, ?, ?, ?, ?, 'PENDING', ?, ?, ?, ?, ?, ?)
-        """, (client_id, freelancer_id, job_title, proposed_budget, note, contract_type, event_base_fee, event_included_hours, event_overtime_rate, advance_paid, now_ts()))
+            INSERT INTO hire_request (client_id, freelancer_id, job_title, proposed_budget, note, status, contract_type, event_base_fee, event_included_hours, event_overtime_rate, advance_paid, created_at, event_date, start_time, end_time)
+            VALUES (%s, %s, %s, %s, %s, 'PENDING', %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        """, (client_id, freelancer_id, job_title, proposed_budget, note, contract_type, event_base_fee, event_included_hours, event_overtime_rate, advance_paid, now_ts(), event_date, start_time, end_time))
     else:
         return jsonify({"success": False, "msg": "Invalid contract type"}), 400
     req_id = cur.lastrowid
 
     # Add notification for client in client.db
     notification_msg = f'Job "{job_title if job_title else "Untitled"}" posted'
-    cconn = sqlite3.connect("client.db")
+    cconn = client_db()
     ccur = cconn.cursor()
     ccur.execute("""
         INSERT INTO notification (client_id, message, created_at)
-        VALUES (?, ?, ?)
+        VALUES (%s, %s, %s)
     """, (client_id, notification_msg, now_ts()))
     cconn.commit()
     cconn.close()
@@ -1577,7 +1944,7 @@ def freelancer_hire_inbox():
         return jsonify({"success": False, "msg": "Missing freelancer_id"}), 400
     freelancer_id = int(freelancer_id)
 
-    conn = sqlite3.connect("freelancer.db")
+    conn = freelancer_db()
     cur = conn.cursor()
     cur.execute("""
         SELECT id, client_id, proposed_budget, note, status, created_at, 
@@ -1585,19 +1952,19 @@ def freelancer_hire_inbox():
                weekly_limit, max_daily_hours, event_base_fee, event_included_hours, 
                event_overtime_rate, advance_paid
         FROM hire_request
-        WHERE freelancer_id=?
+        WHERE freelancer_id=%s
         ORDER BY created_at DESC
     """, (freelancer_id,))
     rows = cur.fetchall()
     conn.close()
 
     # fetch client names from client.db (separate db => done per client_id)
-    client_conn = sqlite3.connect("client.db")
+    client_conn = client_db()
     client_cur = client_conn.cursor()
 
     out = []
     for r in rows:
-        client_cur.execute("SELECT name, email FROM client WHERE id=?", (int(r[1]),))
+        client_cur.execute("SELECT name, email FROM client WHERE id=%s", (int(r[1]),))
         c = client_cur.fetchone()
         out.append({
             "request_id": r[0],
@@ -1638,12 +2005,12 @@ def freelancer_hire_respond():
 
     new_status = "ACCEPTED" if action == "ACCEPT" else "REJECTED"
 
-    conn = sqlite3.connect("freelancer.db")
+    conn = freelancer_db()
     cur = conn.cursor()
     cur.execute("""
         UPDATE hire_request
-        SET status=?
-        WHERE id=? AND freelancer_id=?
+        SET status=%s
+        WHERE id=%s AND freelancer_id=%s
     """, (new_status, request_id, freelancer_id))
 
     if cur.rowcount == 0:
@@ -1672,7 +2039,7 @@ def client_message_threads():
 
     conn = None
     try:
-        conn = sqlite3.connect("freelancer.db")
+        conn = freelancer_db()
         cur = conn.cursor()
         cur.execute("""
             SELECT DISTINCT
@@ -1681,8 +2048,8 @@ def client_message_threads():
                     ELSE sender_id
                 END AS freelancer_id
             FROM message
-            WHERE (sender_role='client' AND sender_id=?)
-               OR (sender_role='freelancer' AND receiver_id=?)
+            WHERE (sender_role='client' AND sender_id=%s)
+               OR (sender_role='freelancer' AND receiver_id=%s)
             ORDER BY freelancer_id DESC
         """, (client_id, client_id))
         ids = [int(r[0]) for r in cur.fetchall() if r and r[0] is not None]
@@ -1693,7 +2060,7 @@ def client_message_threads():
 
         out = []
         for fid in ids:
-            cur.execute("SELECT name, email FROM freelancer WHERE id=?", (fid,))
+            cur.execute("SELECT name, email FROM freelancer WHERE id=%s", (fid,))
             fr = cur.fetchone()
             out.append({
                 "freelancer_id": fid,
@@ -1725,7 +2092,7 @@ def client_job_requests():
 
     conn = None
     try:
-        conn = sqlite3.connect("freelancer.db")
+        conn = freelancer_db()
         cur = conn.cursor()
         cur.execute("""
             SELECT
@@ -1740,7 +2107,7 @@ def client_job_requests():
                 hr.created_at
             FROM hire_request hr
             JOIN freelancer f ON f.id = hr.freelancer_id
-            WHERE hr.client_id=?
+            WHERE hr.client_id=%s
             ORDER BY hr.created_at DESC
         """, (client_id,))
         rows = cur.fetchall()
@@ -1783,12 +2150,12 @@ def client_jobs():
 
     conn = None
     try:
-        conn = sqlite3.connect("freelancer.db")
+        conn = freelancer_db()
         cur = conn.cursor()
         cur.execute("""
             SELECT job_title, proposed_budget, status
             FROM hire_request
-            WHERE client_id=?
+            WHERE client_id=%s
             ORDER BY created_at DESC
         """, (client_id,))
         rows = cur.fetchall()
@@ -1820,11 +2187,12 @@ def save_freelancer():
 
     conn = None
     try:
-        conn = sqlite3.connect("freelancer.db")
+        conn = freelancer_db()
         cur = conn.cursor()
         cur.execute("""
-            INSERT OR IGNORE INTO saved_freelancer (client_id, freelancer_id)
-            VALUES (?,?)
+            INSERT INTO saved_freelancer (client_id, freelancer_id)
+            VALUES (%s,%s)
+            ON CONFLICT (client_id, freelancer_id) DO NOTHING
         """, (int(d["client_id"]), int(d["freelancer_id"])))
         conn.commit()
         conn.close()
@@ -1851,14 +2219,14 @@ def saved_freelancers():
 
     conn = None
     try:
-        conn = sqlite3.connect("freelancer.db")
+        conn = freelancer_db()
         cur = conn.cursor()
         cur.execute("""
             SELECT f.id, f.name, fp.category
             FROM saved_freelancer s
             JOIN freelancer f ON f.id = s.freelancer_id
             LEFT JOIN freelancer_profile fp ON fp.freelancer_id = f.id
-            WHERE s.client_id=?
+            WHERE s.client_id=%s
         """, (client_id,))
         rows = cur.fetchall()
         conn.close()
@@ -1888,12 +2256,12 @@ def client_notifications():
         return jsonify({"success": False, "msg": "Invalid client_id"}), 400
 
     try:
-        conn = sqlite3.connect("client.db")
+        conn = client_db()
         cur = conn.cursor()
         cur.execute("""
             SELECT message
             FROM notification
-            WHERE client_id=?
+            WHERE client_id=%s
             ORDER BY created_at DESC
         """, (client_id,))
         rows = cur.fetchall()
@@ -1922,14 +2290,14 @@ def freelancer_stats():
 
     conn = None
     try:
-        conn = sqlite3.connect("freelancer.db")
+        conn = freelancer_db()
         cur = conn.cursor()
 
         # Total earnings and completed jobs (ACCEPTED)
         cur.execute("""
             SELECT COUNT(*), COALESCE(SUM(proposed_budget), 0)
             FROM hire_request
-            WHERE freelancer_id=? AND status='ACCEPTED'
+            WHERE freelancer_id=%s AND status='ACCEPTED'
         """, (freelancer_id,))
         row = cur.fetchone()
         completed_jobs = int(row[0] or 0)
@@ -1939,7 +2307,7 @@ def freelancer_stats():
         cur.execute("""
             SELECT COUNT(*)
             FROM hire_request
-            WHERE freelancer_id=?
+            WHERE freelancer_id=%s
         """, (freelancer_id,))
         total_jobs_row = cur.fetchone()
         total_jobs = int(total_jobs_row[0] or 0)
@@ -1948,7 +2316,7 @@ def freelancer_stats():
         cur.execute("""
             SELECT COALESCE(rating, 0)
             FROM freelancer_profile
-            WHERE freelancer_id=?
+            WHERE freelancer_id=%s
         """, (freelancer_id,))
         rating_row = cur.fetchone()
         rating = float(rating_row[0] or 0.0) if rating_row else 0.0
@@ -1983,11 +2351,12 @@ def freelancer_save_client():
 
     conn = None
     try:
-        conn = sqlite3.connect("freelancer.db")
+        conn = freelancer_db()
         cur = conn.cursor()
         cur.execute("""
-            INSERT OR IGNORE INTO saved_client (freelancer_id, client_id)
-            VALUES (?, ?)
+            INSERT INTO saved_client (freelancer_id, client_id)
+            VALUES (%s, %s)
+            ON CONFLICT (freelancer_id, client_id) DO NOTHING
         """, (int(d["freelancer_id"]), int(d["client_id"])))
         conn.commit()
         conn.close()
@@ -2012,12 +2381,12 @@ def freelancer_saved_clients():
     conn = None
     client_conn = None
     try:
-        conn = sqlite3.connect("freelancer.db")
+        conn = freelancer_db()
         cur = conn.cursor()
         cur.execute("""
             SELECT client_id
             FROM saved_client
-            WHERE freelancer_id=?
+            WHERE freelancer_id=%s
         """, (freelancer_id,))
         rows = cur.fetchall()
         conn.close()
@@ -2026,12 +2395,12 @@ def freelancer_saved_clients():
         if not client_ids:
             return jsonify([])
 
-        client_conn = sqlite3.connect("client.db")
+        client_conn = client_db()
         client_cur = client_conn.cursor()
 
         out = []
         for cid in client_ids:
-            client_cur.execute("SELECT name, email FROM client WHERE id=?", (cid,))
+            client_cur.execute("SELECT name, email FROM client WHERE id=%s", (cid,))
             c = client_cur.fetchone()
             if c:
                 out.append({
@@ -2066,9 +2435,9 @@ def freelancer_change_password():
 
     conn = None
     try:
-        conn = sqlite3.connect("freelancer.db")
+        conn = freelancer_db()
         cur = conn.cursor()
-        cur.execute("SELECT password FROM freelancer WHERE id=?", (freelancer_id,))
+        cur.execute("SELECT password FROM freelancer WHERE id=%s", (freelancer_id,))
         row = cur.fetchone()
         if not row:
             conn.close()
@@ -2079,7 +2448,7 @@ def freelancer_change_password():
             return jsonify({"success": False, "msg": "Old password incorrect"}), 400
 
         cur.execute(
-            "UPDATE freelancer SET password=? WHERE id=?",
+            "UPDATE freelancer SET password=%s WHERE id=%s",
             (generate_password_hash(new_password), freelancer_id)
         )
         conn.commit()
@@ -2106,16 +2475,16 @@ def freelancer_update_email():
 
     conn = None
     try:
-        conn = sqlite3.connect("freelancer.db")
+        conn = freelancer_db()
         cur = conn.cursor()
         cur.execute(
-            "UPDATE freelancer SET email=? WHERE id=?",
+            "UPDATE freelancer SET email=%s WHERE id=%s",
             (new_email, freelancer_id)
         )
         conn.commit()
         conn.close()
         return jsonify({"success": True})
-    except sqlite3.IntegrityError:
+    except psycopg2.errors.UniqueViolation:
         if conn:
             conn.close()
         return jsonify({"success": False, "msg": "Email already in use"}), 409
@@ -2141,7 +2510,7 @@ def freelancer_notifications():
 
     conn = None
     try:
-        conn = sqlite3.connect("freelancer.db")
+        conn = freelancer_db()
         cur = conn.cursor()
 
         notifications = []
@@ -2150,7 +2519,7 @@ def freelancer_notifications():
         cur.execute("""
             SELECT job_title, status, created_at
             FROM hire_request
-            WHERE freelancer_id=?
+            WHERE freelancer_id=%s
             ORDER BY created_at DESC
             LIMIT 20
         """, (freelancer_id,))
@@ -2299,10 +2668,10 @@ def google_oauth_callback():
 
     # 3) Upsert user into correct DB based on role
     if role == "client":
-        conn = sqlite3.connect("client.db")
+        conn = client_db()
         cur = conn.cursor()
 
-        cur.execute("SELECT id, password, auth_provider, google_sub FROM client WHERE email=?", (email,))
+        cur.execute("SELECT id, password, auth_provider, google_sub FROM client WHERE email=%s", (email,))
         row = cur.fetchone()
 
         if row:
@@ -2310,7 +2679,7 @@ def google_oauth_callback():
             if not provider:
                 provider = "local"
             if not gsub:
-                cur.execute("UPDATE client SET google_sub=? WHERE id=?", (sub, client_id))
+                cur.execute("UPDATE client SET google_sub=%s WHERE id=%s", (sub, client_id))
             conn.commit()
             conn.close()
 
@@ -2328,11 +2697,12 @@ def google_oauth_callback():
         # ✅ IMPORTANT FIX: store a random hashed password so existing login logic never crashes
         random_pwd_hash = generate_password_hash(secrets.token_urlsafe(32))
 
-        cur.execute(
-            "INSERT INTO client (name, email, password, auth_provider, google_sub) VALUES (?,?,?,?,?)",
-            (name, email, random_pwd_hash, "google", sub)
-        )
-        client_id = cur.lastrowid
+        cur.execute("""
+            INSERT INTO client (name, email, password, auth_provider, google_sub)
+            VALUES (%s,%s,%s,%s,%s)
+            RETURNING id
+        """, (name, email, random_pwd_hash, "google", sub))
+        client_id = cur.fetchone()[0]
         conn.commit()
         conn.close()
 
@@ -2345,10 +2715,10 @@ def google_oauth_callback():
         """
 
     else:
-        conn = sqlite3.connect("freelancer.db")
+        conn = freelancer_db()
         cur = conn.cursor()
 
-        cur.execute("SELECT id, password, auth_provider, google_sub FROM freelancer WHERE email=?", (email,))
+        cur.execute("SELECT id, password, auth_provider, google_sub FROM freelancer WHERE email=%s", (email,))
         row = cur.fetchone()
 
         if row:
@@ -2356,7 +2726,7 @@ def google_oauth_callback():
             if not provider:
                 provider = "local"
             if not gsub:
-                cur.execute("UPDATE freelancer SET google_sub=? WHERE id=?", (sub, freelancer_id))
+                cur.execute("UPDATE freelancer SET google_sub=%s WHERE id=%s", (sub, freelancer_id))
             conn.commit()
             conn.close()
 
@@ -2374,11 +2744,12 @@ def google_oauth_callback():
         # ✅ IMPORTANT FIX: store a random hashed password so existing login logic never crashes
         random_pwd_hash = generate_password_hash(secrets.token_urlsafe(32))
 
-        cur.execute(
-            "INSERT INTO freelancer (name, email, password, auth_provider, google_sub) VALUES (?,?,?,?,?)",
-            (name, email, random_pwd_hash, "google", sub)
-        )
-        freelancer_id = cur.lastrowid
+        cur.execute("""
+            INSERT INTO freelancer (name, email, password, auth_provider, google_sub)
+            VALUES (%s,%s,%s,%s,%s)
+            RETURNING id
+        """, (name, email, random_pwd_hash, "google", sub))
+        freelancer_id = cur.fetchone()[0]
         conn.commit()
         conn.close()
 
@@ -2452,9 +2823,9 @@ def client_upload_photo():
     image_path = str(d["image_path"]).strip()
     
     # Validate client exists
-    conn = sqlite3.connect("client.db")
+    conn = client_db()
     cur = conn.cursor()
-    cur.execute("SELECT id FROM client WHERE id=?", (client_id,))
+    cur.execute("SELECT id FROM client WHERE id=%s", (client_id,))
     if not cur.fetchone():
         conn.close()
         return jsonify({"success": False, "msg": "Client not found"}), 404
@@ -2466,7 +2837,7 @@ def client_upload_photo():
         return jsonify({"success": False, "msg": "Failed to upload image"}), 400
     
     # Update database
-    cur.execute("UPDATE client SET profile_image=? WHERE id=?", (uploaded_path, client_id))
+    cur.execute("UPDATE client SET profile_image=%s WHERE id=%s", (uploaded_path, client_id))
     conn.commit()
     conn.close()
     
@@ -2484,9 +2855,9 @@ def freelancer_upload_photo():
     image_path = str(d["image_path"]).strip()
     
     # Validate freelancer exists
-    conn = sqlite3.connect("freelancer.db")
+    conn = freelancer_db()
     cur = conn.cursor()
-    cur.execute("SELECT id FROM freelancer WHERE id=?", (freelancer_id,))
+    cur.execute("SELECT id FROM freelancer WHERE id=%s", (freelancer_id,))
     if not cur.fetchone():
         conn.close()
         return jsonify({"success": False, "msg": "Freelancer not found"}), 404
@@ -2498,7 +2869,7 @@ def freelancer_upload_photo():
         return jsonify({"success": False, "msg": "Failed to upload image"}), 400
     
     # Update database
-    cur.execute("UPDATE freelancer SET profile_image=? WHERE id=?", (uploaded_path, freelancer_id))
+    cur.execute("UPDATE freelancer SET profile_image=%s WHERE id=%s", (uploaded_path, freelancer_id))
     conn.commit()
     conn.close()
     
@@ -2507,16 +2878,15 @@ def freelancer_upload_photo():
 @app.route("/client/profile/<int:client_id>", methods=["GET"])
 def get_client_profile(client_id):
     """NEW CODE: Get client profile with photo"""
-    conn = sqlite3.connect("client.db")
-    conn.row_factory = sqlite3.Row
-    cur = conn.cursor()
+    conn = client_db()
+    cur = conn.cursor(cursor_factory=RealDictCursor)
     
     cur.execute("""
         SELECT c.id, c.name, c.email, c.profile_image,
                cp.phone, cp.location, cp.bio
         FROM client c
         LEFT JOIN client_profile cp ON cp.client_id = c.id
-        WHERE c.id = ?
+        WHERE c.id = %s
     """, (client_id,))
     
     row = cur.fetchone()
@@ -2539,17 +2909,16 @@ def get_client_profile(client_id):
 @app.route("/freelancer/profile/<int:freelancer_id>", methods=["GET"])
 def get_freelancer_profile(freelancer_id):
     """NEW CODE: Get freelancer profile with photo"""
-    conn = sqlite3.connect("freelancer.db")
-    conn.row_factory = sqlite3.Row
-    cur = conn.cursor()
+    conn = freelancer_db()
+    cur = conn.cursor(cursor_factory=RealDictCursor)
     
     cur.execute("""
         SELECT f.id, f.name, f.email, f.profile_image,
                fp.title, fp.skills, fp.experience, fp.min_budget, fp.max_budget,
-               fp.rating, fp.category, fp.bio
+               fp.rating, fp.category, fp.bio, fp.availability_status
         FROM freelancer f
         LEFT JOIN freelancer_profile fp ON fp.freelancer_id = f.id
-        WHERE f.id = ?
+        WHERE f.id = %s
     """, (freelancer_id,))
     
     row = cur.fetchone()
@@ -2571,7 +2940,8 @@ def get_freelancer_profile(freelancer_id):
         "max_budget": row["max_budget"],
         "rating": row["rating"],
         "category": row["category"],
-        "bio": row["bio"]
+        "bio": row["bio"],
+        "availability_status": row["availability_status"]
     })
 
 # ============================================================
@@ -2606,9 +2976,9 @@ def add_portfolio_item():
     media_url = str(d.get("media_url") or "").strip() if media_type in ("VIDEO", "DOC") else None
     
     # Validate freelancer exists
-    conn = sqlite3.connect("freelancer.db")
+    conn = freelancer_db()
     cur = conn.cursor()
-    cur.execute("SELECT id FROM freelancer WHERE id=?", (freelancer_id,))
+    cur.execute("SELECT id FROM freelancer WHERE id=%s", (freelancer_id,))
     if not cur.fetchone():
         conn.close()
         return jsonify({"success": False, "msg": "Freelancer not found"}), 404
@@ -2627,7 +2997,7 @@ def add_portfolio_item():
     # Insert portfolio item with media columns
     cur.execute("""
         INSERT INTO portfolio (freelancer_id, title, description, image_path, image_data, created_at, media_type, media_url)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
     """, (freelancer_id, title, description, image_path, image_binary, now_ts(), media_type, media_url))
     
     portfolio_id = cur.lastrowid
@@ -2639,14 +3009,13 @@ def add_portfolio_item():
 @app.route("/freelancer/portfolio/<int:freelancer_id>", methods=["GET"])
 def get_freelancer_portfolio(freelancer_id):
     """NEW CODE: Get all portfolio items for a freelancer"""
-    conn = sqlite3.connect("freelancer.db")
-    conn.row_factory = sqlite3.Row
-    cur = conn.cursor()
+    conn = freelancer_db()
+    cur = conn.cursor(cursor_factory=RealDictCursor)
     
     cur.execute("""
         SELECT id, title, description, image_path, image_data, created_at, media_type, media_url
         FROM portfolio
-        WHERE freelancer_id = ?
+        WHERE freelancer_id = %s
         ORDER BY created_at DESC
     """, (freelancer_id,))
     
@@ -2732,9 +3101,8 @@ def recommend_freelancers():
     target_budget = float(d["budget"])
     
     # Fetch all freelancers with profile data
-    conn = sqlite3.connect("freelancer.db")
-    conn.row_factory = sqlite3.Row
-    cur = conn.cursor()
+    conn = freelancer_db()
+    cur = conn.cursor(cursor_factory=RealDictCursor)
     
     cur.execute("""
         SELECT
@@ -2814,11 +3182,11 @@ def start_call():
     room_url = "https://meet.jit.si/" + room_name
     
     # Insert call session
-    conn = sqlite3.connect("freelancer.db")
+    conn = freelancer_db()
     cur = conn.cursor()
     cur.execute("""
         INSERT INTO call_session (caller_role, caller_id, receiver_role, receiver_id, call_type, room_name, status, created_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
     """, (caller_role, caller_id, receiver_role, receiver_id, call_type, room_name, "PENDING", now_ts()))
     
     call_id = cur.lastrowid
@@ -2852,14 +3220,13 @@ def get_incoming_calls():
     except ValueError:
         return jsonify({"success": False, "msg": "Invalid user ID"}), 400
     
-    conn = sqlite3.connect("freelancer.db")
-    conn.row_factory = sqlite3.Row
-    cur = conn.cursor()
+    conn = freelancer_db()
+    cur = conn.cursor(cursor_factory=RealDictCursor)
     
     cur.execute("""
         SELECT id, caller_role, caller_id, call_type, room_name, status, created_at
         FROM call_session
-        WHERE receiver_role = ? AND receiver_id = ? AND status = 'PENDING'
+        WHERE receiver_role = %s AND receiver_id = %s AND status = 'PENDING'
         ORDER BY created_at DESC
     """, (receiver_role, receiver_id))
     
@@ -2894,12 +3261,12 @@ def respond_to_call():
     if action not in ["accept", "reject"]:
         return jsonify({"success": False, "msg": "Invalid action"}), 400
     
-    conn = sqlite3.connect("freelancer.db")
+    conn = freelancer_db()
     cur = conn.cursor()
     
     # Update call status
     status = "ACCEPTED" if action == "accept" else "REJECTED"
-    cur.execute("UPDATE call_session SET status = ? WHERE id = ?", (status, call_id))
+    cur.execute("UPDATE call_session SET status = %s WHERE id = %s", (status, call_id))
     
     conn.commit()
     conn.close()
@@ -2916,9 +3283,9 @@ def end_call():
     
     call_id = int(d["call_id"])
     
-    conn = sqlite3.connect("freelancer.db")
+    conn = freelancer_db()
     cur = conn.cursor()
-    cur.execute("UPDATE call_session SET status = 'ENDED' WHERE id = ?", (call_id,))
+    cur.execute("UPDATE call_session SET status = 'ENDED' WHERE id = %s", (call_id,))
     conn.commit()
     conn.close()
     
@@ -2981,6 +3348,185 @@ def ai_chat():
                 "answer": "Action cancelled."
             })
 
+    # NEW: Try natural language query parsing first
+    from query_parser import parse_query
+    parsed_filters = parse_query(message)
+    
+    if parsed_filters:
+        # Use existing freelancer search logic with parsed filters
+        try:
+            # Build search parameters from parsed filters
+            search_params = {}
+            
+            if 'category' in parsed_filters:
+                search_params['category'] = parsed_filters['category']
+            
+            # Use max_budget for the budget parameter
+            if 'max_budget' in parsed_filters:
+                search_params['budget'] = parsed_filters['max_budget']
+            elif 'min_budget' in parsed_filters:
+                search_params['budget'] = parsed_filters['min_budget']
+            else:
+                search_params['budget'] = 0  # Default budget
+            
+            # Use location as specialization query for better matching
+            if 'location' in parsed_filters:
+                search_params['q'] = parsed_filters['location']
+            
+            # Add tags to query if present
+            if 'tags' in parsed_filters and parsed_filters['tags']:
+                tag_query = ' '.join(parsed_filters['tags'])
+                if 'q' in search_params:
+                    search_params['q'] += ' ' + tag_query
+                else:
+                    search_params['q'] = tag_query
+            
+            # Call existing search logic
+            conn = freelancer_db()
+            from psycopg2.extras import RealDictCursor
+            cur = conn.cursor()
+            
+            rows = []
+            q = search_params.get('q', '')
+            budget = search_params.get('budget', 0)
+            category = search_params.get('category', '')
+            
+            # Use similar logic as /freelancers/search endpoint
+            if q:
+                # PostgreSQL full-text search
+                tokens = [t.strip() for t in q.split() if t.strip()]
+                fts_query = " ".join([t + "*" for t in tokens]) if tokens else ""
+                
+                if fts_query:
+                    cond_verified = " AND COALESCE(fp.is_verified,0)=1" if FEATURE_HIDE_UNVERIFIED_FROM_SEARCH else ""
+                    sql = f"""
+                        SELECT
+                            fp.freelancer_id,
+                            f.name,
+                            fp.title,
+                            fp.skills,
+                            fp.experience,
+                            fp.min_budget,
+                            fp.max_budget,
+                            fp.rating,
+                            fp.category,
+                            fp.latitude,
+                            fp.longitude,
+                            COALESCE(fs.plan_name, 'BASIC') as subscription_plan,
+                            ts_rank(to_tsvector('english', freelancer_search.title || ' ' || freelancer_search.skills || ' ' || freelancer_search.bio || ' ' || freelancer_search.tags || ' ' || freelancer_search.portfolio_text), plainto_tsquery('english', ?)) as rank
+                        FROM freelancer_search
+                        JOIN freelancer_profile fp
+                            ON fp.freelancer_id = freelancer_search.freelancer_id
+                        JOIN freelancer f
+                            ON f.id = fp.freelancer_id
+                        LEFT JOIN freelancer_subscription fs
+                            ON fs.freelancer_id = fp.freelancer_id
+                        WHERE to_tsvector('english', freelancer_search.title || ' ' || freelancer_search.skills || ' ' || freelancer_search.bio || ' ' || freelancer_search.tags || ' ' || freelancer_search.portfolio_text) @@ plainto_tsquery('english', %s)
+                          AND fp.min_budget <= %s
+                          AND fp.max_budget >= %s{cond_verified}
+                    """
+                    if category:
+                        sql += " AND LOWER(fp.category) = LOWER(%s)"
+                        cur.execute(sql, (fts_query, fts_query, budget, budget, category))
+                    else:
+                        cur.execute(sql, (fts_query, fts_query, budget, budget))
+                    rows = cur.fetchall()
+            
+            # Fallback to category/budget search if no results
+            if not rows:
+                cond_verified = " AND COALESCE(fp.is_verified,0)=1" if FEATURE_HIDE_UNVERIFIED_FROM_SEARCH else ""
+                sql = f"""
+                    SELECT
+                        fp.freelancer_id,
+                        f.name,
+                        fp.title,
+                        fp.skills,
+                        fp.experience,
+                        fp.min_budget,
+                        fp.max_budget,
+                        fp.rating,
+                        fp.category,
+                        fp.latitude,
+                        fp.longitude,
+                        COALESCE(fs.plan_name, 'BASIC') as subscription_plan,
+                        999999.0 as rank
+                    FROM freelancer_profile fp
+                    JOIN freelancer f
+                        ON f.id = fp.freelancer_id
+                    LEFT JOIN freelancer_subscription fs
+                        ON fs.freelancer_id = fp.freelancer_id
+                    WHERE fp.min_budget <= ?
+                      AND fp.max_budget >= ?{cond_verified}
+                """
+                params = [budget, budget]
+                if category:
+                    sql += " AND LOWER(fp.category) = LOWER(?)"
+                    params.append(category)
+                
+                cur.execute(sql, params)
+                rows = cur.fetchall()
+            
+            conn.close()
+            
+            # Format results for chatbot response
+            if rows:
+                # Calculate distances if location was specified
+                location_specified = 'location' in parsed_filters
+                formatted_results = []
+                
+                for i, row in enumerate(rows[:5], 1):  # Limit to top 5 results
+                    freelancer_data = dict(row)
+                    
+                    # Calculate distance if location specified and we have coordinates
+                    distance_text = ""
+                    if location_specified and freelancer_data.get('latitude') and freelancer_data.get('longitude'):
+                        # For now, just show location info
+                        distance_text = f"Location: {freelancer_data.get('category', 'Unknown')}\n"
+                    
+                    result_text = f"{i}. {freelancer_data['name']}"
+                    if freelancer_data.get('title'):
+                        result_text += f" — {freelancer_data['title']}"
+                    result_text += f"\nRating: {freelancer_data.get('rating', 0)}"
+                    
+                    if freelancer_data.get('min_budget') or freelancer_data.get('max_budget'):
+                        result_text += f"\nBudget: ₹{freelancer_data.get('min_budget', 0)}-₹{freelancer_data.get('max_budget', 0)}"
+                    
+                    if freelancer_data.get('category'):
+                        result_text += f"\nCategory: {freelancer_data['category']}"
+                    
+                    if distance_text:
+                        result_text += f"\n{distance_text}"
+                    
+                    formatted_results.append(result_text)
+                
+                # Create response header based on filters
+                header = "Top matching freelancers"
+                if 'category' in parsed_filters:
+                    header += f" in {parsed_filters['category']}"
+                if 'location' in parsed_filters:
+                    header += f" near {parsed_filters['location'].title()}"
+                header += ":\n\n"
+                
+                response_text = header + "\n\n".join(formatted_results)
+                
+                return jsonify({
+                    "success": True,
+                    "mode": "answer",
+                    "answer": response_text,
+                    "sources": ["query_parser", "database"]
+                })
+            else:
+                return jsonify({
+                    "success": True,
+                    "mode": "answer", 
+                    "answer": "No freelancers found matching your query.",
+                    "sources": ["query_parser", "database"]
+                })
+                
+        except Exception as e:
+            print(f"Error in query parsing search: {e}")
+            # Fall through to existing chatbot logic on error
+    
     result = generate_ai_response(user_id, role, message)
     
     # If the AI system already executed an action, return the result
@@ -3206,11 +3752,11 @@ def freelancer_subscription_upgrade():
         
         # Add notification for subscription upgrade
         try:
-            conn = sqlite3.connect("freelancer.db")
+            conn = freelancer_db()
             cur = conn.cursor()
             cur.execute("""
                 INSERT INTO notification (freelancer_id, message, created_at)
-                VALUES (?, ?, ?)
+                VALUES (%s, %s, %s)
             """, (freelancer_id, f"Successfully upgraded to {plan_name}! Active until {expiry_date.strftime('%Y-%m-%d')}", int(time.time())))
             conn.commit()
             conn.close()
@@ -3288,16 +3834,41 @@ def client_projects_create():
         budget_max = float(d["budget_max"])
     except Exception:
         return jsonify({"success": False, "msg": "Invalid payload"}), 400
-    conn = sqlite3.connect("freelancer.db")
+    
+    conn = freelancer_db()
     try:
         cur = conn.cursor()
+        # PostgreSQL syntax with RETURNING id and default status 'pending'
         cur.execute("""
             INSERT INTO project_post (client_id, title, description, category, skills, budget_type, budget_min, budget_max, status, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'OPEN', ?)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, 'pending', %s) RETURNING id
         """, (client_id, title, description, category, skills, budget_type, budget_min, budget_max, now_ts()))
-        pid = cur.lastrowid
+        
+        project_id = cur.fetchone()[0]
         conn.commit()
-        return jsonify({"success": True, "project_id": pid})
+        
+        # Enhanced response with status and next actions
+        return jsonify({
+            "success": True,
+            "msg": "Project posted successfully",
+            "project_id": project_id,
+            "status": "pending",
+            "next_actions": [
+                "view_profile",
+                "edit_profile"
+            ]
+        })
+        
+    except psycopg2.Error as e:
+        print(f"Database error in project creation: {type(e).__name__}: {str(e)}")
+        if conn:
+            conn.rollback()
+        return jsonify({"success": False, "msg": f"Database error: {str(e)}"}), 500
+    except Exception as e:
+        print(f"Unexpected error in project creation: {type(e).__name__}: {str(e)}")
+        if conn:
+            conn.rollback()
+        return jsonify({"success": False, "msg": f"Server error: {str(e)}"}), 500
     finally:
         conn.close()
 
@@ -3309,14 +3880,14 @@ def client_projects_list():
         cid = int(client_id)
     except Exception:
         return jsonify({"success": False, "msg": "client_id required"}), 400
-    conn = sqlite3.connect("freelancer.db")
-    conn.row_factory = sqlite3.Row
+    conn = freelancer_db()
+    from psycopg2.extras import RealDictCursor
     try:
         cur = conn.cursor()
         cur.execute("""
             SELECT id, title, description, category, skills, budget_type, budget_min, budget_max, status, created_at
             FROM project_post
-            WHERE client_id=?
+            WHERE client_id=%s
             ORDER BY created_at DESC
         """, (cid,))
         rows = cur.fetchall()
@@ -3348,18 +3919,18 @@ def client_projects_applicants():
         pid = int(project_id)
     except Exception:
         return jsonify({"success": False, "msg": "client_id and project_id required"}), 400
-    conn = sqlite3.connect("freelancer.db")
-    conn.row_factory = sqlite3.Row
+    conn = freelancer_db()
+    from psycopg2.extras import RealDictCursor
     try:
         cur = conn.cursor()
-        cur.execute("SELECT client_id FROM project_post WHERE id=?", (pid,))
+        cur.execute("SELECT client_id FROM project_post WHERE id=%s", (pid,))
         r = cur.fetchone()
         if not r or int(r["client_id"]) != cid:
             return jsonify({"success": False, "msg": "Not authorized"}), 403
         cur.execute("""
             SELECT id, freelancer_id, proposal_text, bid_amount, hourly_rate, event_base_fee, status, created_at
             FROM project_application
-            WHERE project_id=?
+            WHERE project_id=%s
             ORDER BY created_at DESC
         """, (pid,))
         rows = cur.fetchall()
@@ -3391,14 +3962,14 @@ def client_projects_close():
         pid = int(d["project_id"])
     except Exception:
         return jsonify({"success": False, "msg": "Invalid payload"}), 400
-    conn = sqlite3.connect("freelancer.db")
+    conn = freelancer_db()
     try:
         cur = conn.cursor()
-        cur.execute("SELECT client_id FROM project_post WHERE id=?", (pid,))
+        cur.execute("SELECT client_id FROM project_post WHERE id=%s", (pid,))
         r = cur.fetchone()
         if not r or int(r[0]) != cid:
             return jsonify({"success": False, "msg": "Not authorized"}), 403
-        cur.execute("UPDATE project_post SET status='CLOSED' WHERE id=?", (pid,))
+        cur.execute("UPDATE project_post SET status='CLOSED' WHERE id=%s", (pid,))
         conn.commit()
         return jsonify({"success": True})
     finally:
@@ -3417,10 +3988,10 @@ def client_projects_accept_application():
         aid = int(d["application_id"])
     except Exception:
         return jsonify({"success": False, "msg": "Invalid payload"}), 400
-    conn = sqlite3.connect("freelancer.db")
+    conn = freelancer_db()
     try:
         cur = conn.cursor()
-        cur.execute("SELECT client_id, title, budget_type FROM project_post WHERE id=?", (pid,))
+        cur.execute("SELECT client_id, title, budget_type FROM project_post WHERE id=%s", (pid,))
         pr = cur.fetchone()
         if not pr or int(pr[0]) != cid:
             return jsonify({"success": False, "msg": "Not authorized"}), 403
@@ -3429,7 +4000,7 @@ def client_projects_accept_application():
         cur.execute("""
             SELECT freelancer_id, bid_amount, hourly_rate, event_base_fee, status
             FROM project_application
-            WHERE id=? AND project_id=?
+            WHERE id=%s AND project_id=%s
         """, (aid, pid))
         ar = cur.fetchone()
         if not ar:
@@ -3446,11 +4017,11 @@ def client_projects_accept_application():
             proposed_budget = hourly_rate
         else:
             proposed_budget = event_base_fee
-        cur.execute("UPDATE project_application SET status='ACCEPTED' WHERE id=?", (aid,))
-        cur.execute("UPDATE project_post SET status='HIRED' WHERE id=?", (pid,))
+        cur.execute("UPDATE project_application SET status='ACCEPTED' WHERE id=%s", (aid,))
+        cur.execute("UPDATE project_post SET status='HIRED' WHERE id=%s", (pid,))
         cur.execute("""
             INSERT INTO hire_request (client_id, freelancer_id, job_title, proposed_budget, note, status, created_at, contract_type)
-            VALUES (?, ?, ?, ?, ?, 'PENDING', ?, ?)
+            VALUES (%s, %s, %s, %s, %s, 'PENDING', %s, %s)
         """, (cid, freelancer_id, project_title, proposed_budget, f"Created from project application #{aid}", now_ts(), budget_type))
         conn.commit()
         return jsonify({"success": True})
@@ -3460,8 +4031,8 @@ def client_projects_accept_application():
 
 @app.route("/freelancer/projects/feed", methods=["GET"])
 def freelancer_projects_feed():
-    conn = sqlite3.connect("freelancer.db")
-    conn.row_factory = sqlite3.Row
+    conn = freelancer_db()
+    from psycopg2.extras import RealDictCursor
     try:
         cur = conn.cursor()
         cur.execute("""
@@ -3505,18 +4076,37 @@ def freelancer_projects_apply():
         event_base_fee = float(d.get("event_base_fee")) if d.get("event_base_fee") is not None else None
     except Exception:
         return jsonify({"success": False, "msg": "Invalid payload"}), 400
-    conn = sqlite3.connect("freelancer.db")
+    
+    conn = freelancer_db()
     try:
         cur = conn.cursor()
-        cur.execute("SELECT 1 FROM project_application WHERE project_id=? AND freelancer_id=?", (pid, fid))
+        # PostgreSQL syntax
+        cur.execute("SELECT 1 FROM project_application WHERE project_id=%s AND freelancer_id=%s", (pid, fid))
         if cur.fetchone():
             return jsonify({"success": False, "msg": "Already applied"}), 400
+        
+        # Insert application with PostgreSQL syntax
         cur.execute("""
             INSERT INTO project_application (project_id, freelancer_id, proposal_text, bid_amount, hourly_rate, event_base_fee, status, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, 'APPLIED', ?)
+            VALUES (%s, %s, %s, %s, %s, %s, 'APPLIED', %s)
         """, (pid, fid, proposal_text, bid_amount, hourly_rate, event_base_fee, now_ts()))
+        
+        # Update project status to 'applied' when freelancer applies
+        cur.execute("UPDATE project_post SET status='applied' WHERE id=%s", (pid,))
+        
         conn.commit()
-        return jsonify({"success": True})
+        return jsonify({"success": True, "msg": "Application submitted successfully"})
+        
+    except psycopg2.Error as e:
+        print(f"Database error in project application: {type(e).__name__}: {str(e)}")
+        if conn:
+            conn.rollback()
+        return jsonify({"success": False, "msg": f"Database error: {str(e)}"}), 500
+    except Exception as e:
+        print(f"Unexpected error in project application: {type(e).__name__}: {str(e)}")
+        if conn:
+            conn.rollback()
+        return jsonify({"success": False, "msg": f"Server error: {str(e)}"}), 500
     finally:
         conn.close()
 
@@ -3536,14 +4126,14 @@ def client_rate():
     hire_request_id = int(d["hire_request_id"])
     review_text = d["review"]
     
-    conn = sqlite3.connect("freelancer.db")
+    conn = freelancer_db()
     cur = conn.cursor()
     
     # Check if hire request belongs to client and status is PAID
     cur.execute("""
         SELECT freelancer_id, status 
         FROM hire_request 
-        WHERE id = ? AND client_id = ?
+        WHERE id = %s AND client_id = ?
     """, (hire_request_id, client_id))
     
     request = cur.fetchone()
@@ -3557,7 +4147,7 @@ def client_rate():
         return jsonify({"success": False, "msg": "Rating only allowed for paid jobs"}), 400
     
     # Check if already rated
-    cur.execute("SELECT id FROM review WHERE hire_request_id = ?", (hire_request_id,))
+    cur.execute("SELECT id FROM review WHERE hire_request_id = %s", (hire_request_id,))
     if cur.fetchone():
         conn.close()
         return jsonify({"success": False, "msg": "Already rated"}), 400
@@ -3566,7 +4156,7 @@ def client_rate():
     cur.execute("""
         SELECT rating, total_projects, total_rating_sum 
         FROM freelancer_profile 
-        WHERE freelancer_id = ?
+        WHERE freelancer_id = %s
     """, (freelancer_id,))
     
     stats = cur.fetchone()
@@ -3586,21 +4176,21 @@ def client_rate():
     # Update freelancer profile
     cur.execute("""
         UPDATE freelancer_profile 
-        SET rating = ?, total_projects = ?, total_rating_sum = ?
-        WHERE freelancer_id = ?
+        SET rating = %s, total_projects = %s, total_rating_sum = %s
+        WHERE freelancer_id = %s
     """, (new_average, new_total_projects, new_total_rating_sum, freelancer_id))
     
     # Insert review
     cur.execute("""
         INSERT INTO review (hire_request_id, client_id, freelancer_id, rating, review_text, created_at)
-        VALUES (?, ?, ?, ?, ?, ?)
+        VALUES (%s, %s, %s, %s, %s, %s)
     """, (hire_request_id, client_id, freelancer_id, rating, review_text, now_ts()))
     
     # Update hire request status
     cur.execute("""
         UPDATE hire_request 
         SET status = 'RATED' 
-        WHERE id = ?
+        WHERE id = %s
     """, (hire_request_id,))
     
     conn.commit()
@@ -3624,14 +4214,14 @@ def hourly_log():
     freelancer_id = int(d["freelancer_id"])
     hours = float(d["hours"])
     
-    conn = sqlite3.connect("freelancer.db")
+    conn = freelancer_db()
     cur = conn.cursor()
     
     # Fetch contract snapshot
     cur.execute("""
         SELECT contract_type, contract_hourly_rate, contract_overtime_rate, max_daily_hours
         FROM hire_request 
-        WHERE id = ? AND freelancer_id = ?
+        WHERE id = %s AND freelancer_id = ?
     """, (hire_request_id, freelancer_id))
     
     contract = cur.fetchone()
@@ -3664,7 +4254,7 @@ def hourly_log():
     # Insert work log
     cur.execute("""
         INSERT INTO work_log (hire_request_id, freelancer_id, work_date, hours, calculated_regular, calculated_overtime, calculated_amount, created_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
     """, (hire_request_id, freelancer_id, now_ts().split()[0], hours, regular, overtime, amount, now_ts()))
     
     conn.commit()
@@ -3687,14 +4277,14 @@ def hourly_generate_invoice():
     
     hire_request_id = int(d["hire_request_id"])
     
-    conn = sqlite3.connect("freelancer.db")
+    conn = freelancer_db()
     cur = conn.cursor()
     
     # Verify contract is HOURLY
     cur.execute("""
         SELECT contract_type
         FROM hire_request 
-        WHERE id = ?
+        WHERE id = %s
     """, (hire_request_id,))
     
     contract = cur.fetchone()
@@ -3724,7 +4314,7 @@ def hourly_generate_invoice():
     
     cur.execute("""
         INSERT INTO invoice (hire_request_id, total_amount, week_start, week_end, created_at)
-        VALUES (?, ?, ?, ?, ?)
+        VALUES (%s, %s, %s, %s, %s)
     """, (hire_request_id, total_amount, week_start, week_end, now_ts()))
     
     conn.commit()
@@ -3748,14 +4338,14 @@ def event_complete():
     hire_request_id = int(d["hire_request_id"])
     actual_hours = float(d["actual_hours"])
     
-    conn = sqlite3.connect("freelancer.db")
+    conn = freelancer_db()
     cur = conn.cursor()
     
     # Verify contract is EVENT
     cur.execute("""
         SELECT contract_type, event_base_fee, event_included_hours, event_overtime_rate, advance_paid
         FROM hire_request 
-        WHERE id = ?
+        WHERE id = %s
     """, (hire_request_id,))
     
     contract = cur.fetchone()
@@ -3808,21 +4398,21 @@ def platform_stats():
     """Get platform-wide statistics"""
     try:
         # Get total freelancers
-        conn = sqlite3.connect("freelancer.db")
+        conn = freelancer_db()
         cur = conn.cursor()
         cur.execute("SELECT COUNT(*) FROM freelancer")
         total_freelancers = cur.fetchone()[0]
         conn.close()
         
         # Get total clients
-        conn = sqlite3.connect("client.db")
+        conn = client_db()
         cur = conn.cursor()
         cur.execute("SELECT COUNT(*) FROM client")
         total_clients = cur.fetchone()[0]
         conn.close()
         
         # Get gigs completed
-        conn = sqlite3.connect("freelancer.db")
+        conn = freelancer_db()
         cur = conn.cursor()
         cur.execute("SELECT COUNT(*) FROM hire_request WHERE status='ACCEPTED'")
         gigs_completed = cur.fetchone()[0]
@@ -3844,21 +4434,21 @@ def freelancer_profile_stats(freelancer_id):
     """Get freelancer-specific statistics"""
     try:
         # Get rating
-        conn = sqlite3.connect("freelancer.db")
+        conn = freelancer_db()
         cur = conn.cursor()
-        cur.execute("SELECT rating FROM freelancer_profile WHERE freelancer_id=?", (freelancer_id,))
+        cur.execute("SELECT rating FROM freelancer_profile WHERE freelancer_id=%s", (freelancer_id,))
         rating_row = cur.fetchone()
         rating = rating_row[0] if rating_row else 0.0
         conn.close()
         
         # Get gigs completed
-        conn = sqlite3.connect("client.db")
+        conn = client_db()
         cur = conn.cursor()
-        cur.execute("SELECT COUNT(*) FROM hire_request WHERE freelancer_id=? AND status='ACCEPTED'", (freelancer_id,))
+        cur.execute("SELECT COUNT(*) FROM hire_request WHERE freelancer_id=%s AND status='ACCEPTED'", (freelancer_id,))
         gigs_completed = cur.fetchone()[0]
         
         # Get earnings
-        cur.execute("SELECT SUM(proposed_budget) FROM hire_request WHERE freelancer_id=? AND status='ACCEPTED'", (freelancer_id,))
+        cur.execute("SELECT SUM(proposed_budget) FROM hire_request WHERE freelancer_id=%s AND status='ACCEPTED'", (freelancer_id,))
         earnings_row = cur.fetchone()
         earnings = earnings_row[0] if earnings_row and earnings_row[0] is not None else 0
         conn.close()

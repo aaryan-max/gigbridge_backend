@@ -46,7 +46,7 @@ def kyc_upload():
     fconn = freelancer_db()
     try:
         cur = fconn.cursor()
-        cur.execute("SELECT id FROM freelancer WHERE id=?", (fid_int,))
+        cur.execute("SELECT id FROM freelancer WHERE id=%s", (fid_int,))
         r = cur.fetchone()
         if not r:
             return jsonify({"success": False, "msg": "Freelancer not found"}), 404
@@ -61,17 +61,17 @@ def kyc_upload():
             cur.execute("""
                 UPDATE kyc_document
                 SET status='REPLACED'
-                WHERE freelancer_id=? AND doc_type=? AND status='PENDING'
+                WHERE freelancer_id=%s AND doc_type=%s AND status='PENDING'
             """, (fid_int, doc_type))
         cur.execute("""
             INSERT INTO kyc_document (freelancer_id, doc_type, file_path, status, uploaded_at)
-            VALUES (?,?,?,?,?)
+            VALUES (%s, %s, %s, %s, %s)
         """, (fid_int, doc_type, full_path, "PENDING", _now()))
         doc_id = cur.lastrowid
         cur.execute("""
             UPDATE freelancer_profile
             SET verification_status='PENDING', is_verified=0
-            WHERE freelancer_id=?
+            WHERE freelancer_id=%s
         """, (fid_int,))
         fconn.commit()
         return jsonify({"success": True, "doc_id": doc_id})
