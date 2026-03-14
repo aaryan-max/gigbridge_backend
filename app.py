@@ -15,12 +15,12 @@ import urllib.parse
 import shutil
 from email.message import EmailMessage
 from werkzeug.security import generate_password_hash, check_password_hash
-from llm_chatbot import generate_ai_response, PENDING_ACTIONS, execute_agent_action
 from admin_db import ensure_admin_tables
 from admin_routes import admin_bp
 from kyc_routes import kyc_bp
 from client_kyc_routes import client_kyc_bp
 from ai_chat import register_chat_routes
+from ai_chat_routes import register_ai_chat_routes
 
 from database import create_tables, rebuild_freelancer_search_index
 from settings import (
@@ -161,6 +161,9 @@ app.register_blueprint(client_kyc_bp)
 
 # Register database chat routes
 register_chat_routes(app)
+
+# Register AI chat routes
+register_ai_chat_routes(app)
 
 # Try to load semantic index (optional; app still works without it)
 try:
