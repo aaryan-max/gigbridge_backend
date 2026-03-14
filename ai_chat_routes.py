@@ -4,9 +4,9 @@ POST /ai/chat endpoint for natural language database queries
 """
 
 from flask import request, jsonify
-from intent_parser import IntentParser
-from intent_validator import IntentValidator
-from query_builder import QueryBuilder
+from intent_parser_llm import LLMIntentParser
+from intent_validator_llm import LLMIntentValidator
+from query_builder_llm import LLMQueryBuilder
 from query_executor import QueryExecutor
 from response_formatter import ResponseFormatter
 from ai_guardrails import AIGuardrails
@@ -15,10 +15,10 @@ from ai_guardrails import AIGuardrails
 def register_ai_chat_routes(app):
     """Register AI chat routes with Flask app"""
     
-    # Initialize components
-    intent_parser = IntentParser()
-    intent_validator = IntentValidator()
-    query_builder = QueryBuilder()
+    # Initialize LLM-based components
+    intent_parser = LLMIntentParser()
+    intent_validator = LLMIntentValidator()
+    query_builder = LLMQueryBuilder()
     query_executor = QueryExecutor()
     response_formatter = ResponseFormatter()
     guardrails = AIGuardrails()
@@ -86,13 +86,16 @@ def register_ai_chat_routes(app):
                     "answer": guardrails_result["reason"]
                 })
             
-            # Parse intent
-            parsed_intent = intent_parser.parse(message)
+            # Parse intent using LLM
+            parsed_intent = intent_parser.parse(message, user_id, role)
             if not parsed_intent:
-                return jsonify({
-                    "success": False,
-                    "answer": "I couldn't understand your question. Please try rephrasing it."
-                })
+                # Try emergency fallback
+                parsed_intent = intent_parser.emergency_fallback(message)
+                if not parsed_intent:
+                    return jsonify({
+                        "success": False,
+                        "answer": "I couldn't understand your GigBridge request. Please rephrase it."
+                    })
             
             # Validate intent
             validation_result = intent_validator.validate(parsed_intent, role, user_id)
@@ -111,7 +114,11 @@ def register_ai_chat_routes(app):
                 })
             
             # Execute query
-            execution_result = query_executor.execute(query_result["query"], query_result["params"])
+            execution_result = query_executor.execute(
+                query_result["query"], 
+                query_result["params"], 
+                query_result["db"]
+            )
             if not execution_result["success"]:
                 return jsonify({
                     "success": False,

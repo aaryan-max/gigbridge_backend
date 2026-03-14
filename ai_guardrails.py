@@ -80,48 +80,58 @@ class AIGuardrails:
         ]
     
     def check_message(self, message: str) -> Dict:
-        """Check if message is allowed (GigBridge-related only)"""
+        """Check if message is within allowed scope"""
         if not message or not message.strip():
-            return {
-                "allowed": False,
-                "reason": "Empty message is not allowed."
-            }
+            return {"allowed": False, "reason": "Empty message"}
         
         message_lower = message.lower().strip()
         
-        # Check for blocked keywords first (more restrictive)
-        for keyword in self.blocked_keywords:
-            if keyword in message_lower:
-                return {
-                    "allowed": False,
-                    "reason": "I can only answer GigBridge-related questions about freelancers, clients, projects, hire requests, reviews, portfolio, and messages."
-                }
+        # Check for GigBridge-related keywords first
+        gigbridge_keywords = [
+            "freelancer", "freelancers", "client", "project", "projects",
+            "hire", "request", "requests", "message", "messages",
+            "profile", "portfolio", "review", "reviews", "rating",
+            "singer", "singers", "dancer", "dancers", "photographer",
+            "photographers", "dj", "videographer", "videographers"
+        ]
         
-        # Check for blocked patterns
-        for pattern in self.blocked_patterns:
+        has_gigbridge_keyword = any(keyword in message_lower for keyword in gigbridge_keywords)
+        
+        # Check for user-specific indicators
+        user_specific_indicators = ["my profile", "my messages", "my hire requests", "my projects"]
+        has_user_specific = any(indicator in message_lower for indicator in user_specific_indicators)
+        
+        # Check for action words that indicate GigBridge intent
+        gigbridge_actions = ["show", "list", "get", "find", "give", "tell", "search"]
+        has_gigbridge_action = any(action in message_lower for action in gigbridge_actions)
+        
+        # Special case: allow "give information about" if it looks like freelancer inquiry
+        if "give information about" in message_lower or "tell me about" in message_lower:
+            return {"allowed": True}
+        
+        # Allow if it has GigBridge keywords and user-specific indicators
+        if has_gigbridge_keyword and (has_user_specific or has_gigbridge_action):
+            return {"allowed": True}
+        
+        # Check for blocked patterns (more specific now)
+        blocked_patterns = [
+            r"who\s+is\s+(?:the\s+)?(?:president|prime minister|pm|governor)",
+            r"what\s+(?:is|was|will\s+be)\s+(?:the\s+)?(?:weather|temperature|time|date)",
+            r"tell\s+me\s+(?:a\s+)?(?:joke|story|fact)",
+            r"what\s+(?:is|are)\s+(?:the\s+)?(?:news|stock|crypto|bitcoin)",
+            r"how\s+(?:to|do|can\s+i)\s+(?:cook|learn|make|build|create)",
+            r"translate\s+.+",
+            r"define\s+.+",
+            r"meaning\s+of\s+.+"
+        ]
+        
+        for pattern in blocked_patterns:
             if re.search(pattern, message_lower):
-                return {
-                    "allowed": False,
-                    "reason": "I can only answer GigBridge-related questions about freelancers, clients, projects, hire requests, reviews, portfolio, and messages."
-                }
+                return {"allowed": False, "reason": "I can only answer GigBridge-related questions about freelancers, clients, projects, hire requests, reviews, portfolio, and messages."}
         
-        # Check if message contains GigBridge keywords or patterns
-        has_gigbridge_keyword = any(keyword in message_lower for keyword in self.gigbridge_keywords)
-        has_gigbridge_pattern = any(re.search(pattern, message_lower) for pattern in self.gigbridge_patterns)
+        # If it has GigBridge keywords but no clear action, allow it
+        if has_gigbridge_keyword:
+            return {"allowed": True}
         
-        # Also allow very short messages that might be partial queries
-        is_short_query = len(message_lower.split()) <= 3 and any(
-            word in self.gigbridge_keywords for word in message_lower.split()
-        )
-        
-        if has_gigbridge_keyword or has_gigbridge_pattern or is_short_query:
-            return {
-                "allowed": True,
-                "reason": None
-            }
-        
-        # Default to blocked if no clear indication of GigBridge relevance
-        return {
-            "allowed": False,
-            "reason": "I can only answer GigBridge-related questions about freelancers, clients, projects, hire requests, reviews, portfolio, and messages."
-        }
+        # Default to blocked if no clear GigBridge intent
+        return {"allowed": False, "reason": "I can only answer GigBridge-related questions about freelancers, clients, projects, hire requests, reviews, portfolio, and messages."}
