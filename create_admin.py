@@ -1,14 +1,15 @@
-import sqlite3
-from werkzeug.security import generate_password_hash
 import time
+from postgres_config import get_postgres_connection, get_dict_cursor
+from security import generate_password_hash
 
-conn = sqlite3.connect("freelancer.db")
-cur = conn.cursor()
+conn = get_postgres_connection()
+cur = get_dict_cursor(conn)
 
 cur.execute("""
-INSERT OR IGNORE INTO admin_user
+INSERT INTO admin_user
 (email, password_hash, role, is_enabled, created_at)
-VALUES (?, ?, ?, ?, ?)
+VALUES (%s, %s, %s, %s, %s)
+ON CONFLICT (email) DO NOTHING
 """, (
     "admin@gigbridge.com",
     generate_password_hash("admin123"),

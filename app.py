@@ -3,6 +3,7 @@ import psycopg2.errors
 from flask import Flask, request, jsonify
 from database import client_db, freelancer_db
 from psycopg2.extras import RealDictCursor
+from postgres_config import get_postgres_connection, get_dict_cursor
 from booking_service import validate_hire_request_slot, format_time_slot_display
 import random
 import time
@@ -19,6 +20,7 @@ from admin_db import ensure_admin_tables
 from admin_routes import admin_bp
 from kyc_routes import kyc_bp
 from client_kyc_routes import client_kyc_bp
+from payment_routes import payment_bp
 from ai_chat import register_chat_routes
 from ai_chat_routes import register_ai_chat_routes
 
@@ -116,39 +118,39 @@ ensure_admin_tables()
 def validate_startup():
     """Validate database connectivity and required tables"""
     try:
-        print("🔍 Validating database connectivity...")
+        print("Validating database connectivity...")
         
         # Test client database
         client_conn = client_db()
-        client_cur = client_conn.cursor()
+        client_cur = get_dict_cursor(client_conn)
         client_cur.execute("SELECT 1")
         client_conn.close()
-        print("✅ Client database connection: OK")
+        print("[OK] Client database connection")
         
         # Test freelancer database
         freelancer_conn = freelancer_db()
-        freelancer_cur = freelancer_conn.cursor()
+        freelancer_cur = get_dict_cursor(freelancer_conn)
         freelancer_cur.execute("SELECT 1")
         freelancer_conn.close()
-        print("✅ Freelancer database connection: OK")
+        print("[OK] Freelancer database connection")
         
         # Check required tables exist
         conn = client_db()
-        cur = conn.cursor()
+        cur = get_dict_cursor(conn)
         
         tables_to_check = ['client', 'client_otp', 'freelancer', 'freelancer_otp']
         for table in tables_to_check:
             try:
                 cur.execute(f"SELECT 1 FROM {table} LIMIT 1")
-                print(f"✅ Table '{table}': OK")
+                print(f"[OK] Table '{table}'")
             except Exception as e:
-                print(f"❌ Table '{table}': ERROR - {str(e)}")
+                print(f"[ERROR] Table '{table}': {str(e)}")
         
         conn.close()
-        print("🎉 Startup validation completed successfully!")
+        print("Startup validation completed successfully!")
         
     except Exception as e:
-        print(f"❌ Startup validation failed: {str(e)}")
+        print(f"Startup validation failed: {str(e)}")
         import traceback
         traceback.print_exc()
 
@@ -158,6 +160,7 @@ validate_startup()
 app.register_blueprint(admin_bp)
 app.register_blueprint(kyc_bp)
 app.register_blueprint(client_kyc_bp)
+app.register_blueprint(payment_bp)
 
 # Register database chat routes
 register_chat_routes(app)
@@ -356,7 +359,7 @@ Your OTP for GigBridge signup is:
 
 def create_otp_tables():
     conn = client_db()
-    cur = conn.cursor()
+    cur = get_dict_cursor(conn)
     cur.execute("""
         CREATE TABLE IF NOT EXISTS client_otp (
             email TEXT PRIMARY KEY,
@@ -368,7 +371,7 @@ def create_otp_tables():
     conn.close()
 
     conn = freelancer_db()
-    cur = conn.cursor()
+    cur = get_dict_cursor(conn)
     cur.execute("""
         CREATE TABLE IF NOT EXISTS freelancer_otp (
             email TEXT PRIMARY KEY,
@@ -400,7 +403,7 @@ def client_send_otp():
     expires_at = now_ts() + OTP_TTL_SECONDS
 
     conn = client_db()
-    cur = conn.cursor()
+    cur = get_dict_cursor(conn)
     cur.execute(
         "INSERT INTO client_otp (email, otp, expires_at) VALUES (%s, %s, %s) ON CONFLICT (email) DO UPDATE SET otp=EXCLUDED.otp, expires_at=EXCLUDED.expires_at",
         (email, otp, expires_at)
@@ -437,7 +440,7 @@ def client_verify_otp():
     conn = None
     try:
         conn = client_db()
-        cur = conn.cursor()
+        cur = get_dict_cursor(conn)
         print("Database connection established")
         
         # Verify OTP
@@ -449,8 +452,9 @@ def client_verify_otp():
             print("OTP not found")
             return jsonify({"success": False, "msg": "OTP not found"}), 400
 
-        db_otp, expires_at = row
-        if now_ts() > int(expires_at):
+        db_otp = row["otp"]
+        expires_at = int(row["expires_at"])
+        if now_ts() > expires_at:
             print("OTP expired")
             cur.execute("DELETE FROM client_otp WHERE email=%s", (email,))
             conn.commit()
@@ -466,7 +470,8 @@ def client_verify_otp():
             "INSERT INTO client (name, email, password) VALUES (%s, %s, %s) RETURNING id",
             (name, email, generate_password_hash(password))
         )
-        client_id = cur.fetchone()[0]
+        row = cur.fetchone()
+        client_id = row["id"] if isinstance(row, dict) else row[0]
         print(f"Client inserted with ID: {client_id}")
 
         # Clean up OTP
@@ -527,7 +532,7 @@ def freelancer_send_otp():
     conn = None
     try:
         conn = freelancer_db()
-        cur = conn.cursor()
+        cur = get_dict_cursor(conn)
         print("Database connection established")
         
         # PostgreSQL UPSERT syntax
@@ -598,7 +603,7 @@ def freelancer_verify_otp():
     conn = None
     try:
         conn = freelancer_db()
-        cur = conn.cursor()
+        cur = get_dict_cursor(conn)
         print("Database connection established")
         
         # Verify OTP
@@ -610,8 +615,9 @@ def freelancer_verify_otp():
             print("OTP not found")
             return jsonify({"success": False, "msg": "OTP not found"}), 400
 
-        db_otp, expires_at = row
-        if now_ts() > int(expires_at):
+        db_otp = row["otp"]
+        expires_at = int(row["expires_at"])
+        if now_ts() > expires_at:
             print("OTP expired")
             cur.execute("DELETE FROM freelancer_otp WHERE email=%s", (email,))
             conn.commit()
@@ -627,7 +633,8 @@ def freelancer_verify_otp():
             "INSERT INTO freelancer (name, email, password) VALUES (%s, %s, %s) RETURNING id",
             (name, email, generate_password_hash(password))
         )
-        freelancer_id = cur.fetchone()[0]
+        row = cur.fetchone()
+        freelancer_id = row["id"] if isinstance(row, dict) else row[0]
         print(f"Freelancer inserted with ID: {freelancer_id}")
 
         # Clean up OTP
@@ -696,7 +703,7 @@ def client_verify_otp_for_reset():
     conn = None
     try:
         conn = client_db()
-        cur = conn.cursor()
+        cur = get_dict_cursor(conn)
         print("Database connection established")
         
         # PostgreSQL placeholder syntax
@@ -708,11 +715,12 @@ def client_verify_otp_for_reset():
             print("OTP not found for email:", email)
             return jsonify({"success": False, "msg": "OTP not found"}), 400
         
-        stored_otp, expires_at = row
+        stored_otp = row["otp"]
+        expires_at = int(row["expires_at"])
         print(f"Stored OTP: {stored_otp}, Entered OTP: {otp_in}")
         print(f"Current time: {now_ts()}, Expires at: {expires_at}")
         
-        if now_ts() > int(expires_at):
+        if now_ts() > expires_at:
             print("OTP expired")
             # Clean up expired OTP
             cur.execute("DELETE FROM client_otp WHERE email=%s", (email,))
@@ -770,7 +778,7 @@ def client_reset_password():
     conn = None
     try:
         conn = client_db()
-        cur = conn.cursor()
+        cur = get_dict_cursor(conn)
         print("Database connection established")
         
         # PostgreSQL placeholder syntax
@@ -833,7 +841,7 @@ def freelancer_verify_otp_for_reset():
     conn = None
     try:
         conn = freelancer_db()
-        cur = conn.cursor()
+        cur = get_dict_cursor(conn)
         print("Database connection established")
         
         # PostgreSQL placeholder syntax
@@ -845,11 +853,12 @@ def freelancer_verify_otp_for_reset():
             print("OTP not found for email:", email)
             return jsonify({"success": False, "msg": "OTP not found"}), 400
         
-        stored_otp, expires_at = row
+        stored_otp = row["otp"]
+        expires_at = int(row["expires_at"])
         print(f"Stored OTP: {stored_otp}, Entered OTP: {otp_in}")
         print(f"Current time: {now_ts()}, Expires at: {expires_at}")
         
-        if now_ts() > int(expires_at):
+        if now_ts() > expires_at:
             print("OTP expired")
             # Clean up expired OTP
             cur.execute("DELETE FROM freelancer_otp WHERE email=%s", (email,))
@@ -907,7 +916,7 @@ def freelancer_reset_password():
     conn = None
     try:
         conn = freelancer_db()
-        cur = conn.cursor()
+        cur = get_dict_cursor(conn)
         print("Database connection established")
         
         # PostgreSQL placeholder syntax
@@ -961,7 +970,7 @@ def client_signup():
         return jsonify({"success": False, "msg": "Invalid email format"}), 400
     
     conn = client_db()
-    cur = conn.cursor()
+    cur = get_dict_cursor(conn)
     
     # Check if email already exists
     cur.execute("SELECT id FROM client WHERE email=%s", (email,))
@@ -994,7 +1003,7 @@ def freelancer_signup():
         return jsonify({"success": False, "msg": "Invalid email format"}), 400
     
     conn = freelancer_db()
-    cur = conn.cursor()
+    cur = get_dict_cursor(conn)
     
     # Check if email already exists
     cur.execute("SELECT id FROM freelancer WHERE email=%s", (email,))
@@ -1026,28 +1035,28 @@ def client_login():
     password = str(d["password"])
 
     conn = client_db()
-    cur = conn.cursor()
+    cur = get_dict_cursor(conn)
     cur.execute("SELECT id,password,name FROM client WHERE email=%s", (email,))
     row = cur.fetchone()
     conn.close()
 
-    if row and check_password_hash(row[1], password):
+    if row and check_password_hash(row["password"], password):
         if FEATURE_BLOCK_DISABLED_USERS:
             try:
                 c2 = client_db()
-                cur2 = c2.cursor()
-                cur2.execute("SELECT COALESCE(is_enabled,1) FROM client WHERE id=%s", (row[0],))
+                cur2 = get_dict_cursor(c2)
+                cur2.execute("SELECT COALESCE(is_enabled,1) as is_enabled FROM client WHERE id=%s", (row["id"],))
                 en = cur2.fetchone()
                 c2.close()
-                if en and int(en[0]) != 1:
+                if en and int(en.get("is_enabled", 1)) != 1:
                     return jsonify({"success": False, "msg": "Account disabled"}), 403
             except Exception:
                 pass
         try:
-            send_login_email(email, row[2], "Client", "login")
+            send_login_email(email, row["name"], "Client", "login")
         except:
             pass
-        return jsonify({"success": True, "client_id": row[0]})
+        return jsonify({"success": True, "client_id": row["id"]})
 
     return jsonify({"success": False, "msg": "Invalid credentials"})
 
@@ -1062,28 +1071,28 @@ def freelancer_login():
     password = str(d["password"])
 
     conn = freelancer_db()
-    cur = conn.cursor()
+    cur = get_dict_cursor(conn)
     cur.execute("SELECT id,password,name FROM freelancer WHERE email=%s", (email,))
     row = cur.fetchone()
     conn.close()
 
-    if row and check_password_hash(row[1], password):
+    if row and check_password_hash(row["password"], password):
         if FEATURE_BLOCK_DISABLED_USERS:
             try:
                 f2 = freelancer_db()
-                cur2 = f2.cursor()
-                cur2.execute("SELECT COALESCE(is_enabled,1) FROM freelancer WHERE id=%s", (row[0],))
+                cur2 = get_dict_cursor(f2)
+                cur2.execute("SELECT COALESCE(is_enabled,1) as is_enabled FROM freelancer WHERE id=%s", (row["id"],))
                 en = cur2.fetchone()
                 f2.close()
-                if en and int(en[0]) != 1:
+                if en and int(en.get("is_enabled", 1)) != 1:
                     return jsonify({"success": False, "msg": "Account disabled"}), 403
             except Exception:
                 pass
         try:
-            send_login_email(email, row[2], "Freelancer", "login")
+            send_login_email(email, row["name"], "Freelancer", "login")
         except:
             pass
-        return jsonify({"success": True, "freelancer_id": row[0]})
+        return jsonify({"success": True, "freelancer_id": row["id"]})
 
     return jsonify({"success": False, "msg": "Invalid credentials"})
 
@@ -1121,7 +1130,7 @@ def client_profile():
         lat, lon = geocode_address(d["location"])
         
     conn = client_db()
-    cur = conn.cursor()
+    cur = get_dict_cursor(conn)
     cur.execute("""
         INSERT INTO client_profile (client_id, phone, location, bio, pincode, latitude, longitude, dob)
         VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
@@ -1139,7 +1148,7 @@ def client_profile():
 
     # Add notification (store in PostgreSQL)
     c2 = client_db()
-    cur2 = c2.cursor()
+    cur2 = get_dict_cursor(c2)
     cur2.execute("""
         INSERT INTO notification (client_id, message, created_at)
         VALUES (%s, %s, %s)
@@ -1213,12 +1222,12 @@ def freelancer_profile():
     freelancer_id = int(d["freelancer_id"])
 
     conn = freelancer_db()
-    cur = conn.cursor()
+    cur = get_dict_cursor(conn)
     cur.execute(
         """
         INSERT INTO freelancer_profile
         (freelancer_id, title, skills, experience, min_budget, max_budget, bio, category, location, pincode, latitude, longitude, dob, availability_status)
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         ON CONFLICT(freelancer_id) DO UPDATE SET
             title=excluded.title,
             skills=excluded.skills,
@@ -1282,7 +1291,7 @@ def update_freelancer_availability():
     availability_status = d["availability_status"]
     
     conn = freelancer_db()
-    cur = conn.cursor()
+    cur = get_dict_cursor(conn)
     try:
         cur.execute("""
             UPDATE freelancer_profile 
@@ -1326,7 +1335,7 @@ def freelancers_search():
         try:
             cid = int(client_id)
             cconn = client_db()
-            ccur = cconn.cursor()
+            ccur = get_dict_cursor(cconn)
             ccur.execute(
                 "SELECT latitude, longitude FROM client_profile WHERE client_id=%s",
                 (cid,),
@@ -1335,25 +1344,25 @@ def freelancers_search():
             cconn.close()
 
             if row:
-                client_lat, client_lon = row[0], row[1]
+                client_lat, client_lon = row.get("latitude"), row.get("longitude")
         except Exception:
             client_lat = client_lon = None
 
     try:
         conn = freelancer_db()
-        cur = conn.cursor()
+        cur = get_dict_cursor(conn)
 
         rows = []
 
         # ============================================
-        # IF SPECIALIZATION QUERY EXISTS → USE FTS5
+        # IF SPECIALIZATION QUERY EXISTS → USE PostgreSQL full-text search
         # ============================================
         if q:
-            tokens = [t.strip() for t in q.split() if t.strip()]
-            fts_query = " ".join([t + "*" for t in tokens]) if tokens else ""
+            cond_verified = " AND COALESCE(fp.is_verified,0)=1" if FEATURE_HIDE_UNVERIFIED_FROM_SEARCH else ""
+            tsvec = "to_tsvector('english', COALESCE(fs2.title,'') || ' ' || COALESCE(fs2.skills,'') || ' ' || COALESCE(fs2.bio,'') || ' ' || COALESCE(fs2.tags,'') || ' ' || COALESCE(fs2.portfolio_text,''))"
+            tsq = "plainto_tsquery('english', %s)"
 
-            if fts_query:
-                cond_verified = " AND COALESCE(fp.is_verified,0)=1" if FEATURE_HIDE_UNVERIFIED_FROM_SEARCH else ""
+            try:
                 sql = f"""
                     SELECT
                         fp.freelancer_id,
@@ -1369,20 +1378,19 @@ def freelancers_search():
                         fp.longitude,
                         fp.availability_status,
                         COALESCE(fs.plan_name, 'BASIC') as subscription_plan,
-                        bm25(freelancer_search) as rank
-                    FROM freelancer_search
-                    JOIN freelancer_profile fp
-                        ON fp.freelancer_id = freelancer_search.freelancer_id
-                    JOIN freelancer f
-                        ON f.id = fp.freelancer_id
-                    LEFT JOIN freelancer_subscription fs
-                        ON fs.freelancer_id = fp.freelancer_id
-                    WHERE freelancer_search MATCH %s
+                        ts_rank({tsvec}, {tsq}) as rank
+                    FROM freelancer_search fs2
+                    JOIN freelancer_profile fp ON fp.freelancer_id = fs2.freelancer_id
+                    JOIN freelancer f ON f.id = fp.freelancer_id
+                    LEFT JOIN freelancer_subscription fs ON fs.freelancer_id = fp.freelancer_id
+                    WHERE {tsvec} @@ {tsq}
                       AND fp.min_budget <= %s
                       AND fp.max_budget >= %s{cond_verified}
                 """
-                cur.execute(sql, (fts_query, budget, budget))
+                cur.execute(sql, (q, q, budget, budget))
                 rows = cur.fetchall()
+            except Exception:
+                rows = []
 
             # ============================================
             # FUZZY FALLBACK IF FTS RETURNS NOTHING
@@ -1410,8 +1418,8 @@ def freelancers_search():
                         ON f.id = fp.freelancer_id
                     LEFT JOIN freelancer_subscription fs
                         ON fs.freelancer_id = fp.freelancer_id
-                    WHERE fp.min_budget <= ?
-                      AND fp.max_budget >= ?{cond_verified}
+                    WHERE fp.min_budget <= %s
+                      AND fp.max_budget >= %s{cond_verified}
                     """,
                     (budget, budget),
                 )
@@ -1420,15 +1428,19 @@ def freelancers_search():
                 scored = []
 
                 for r in candidates:
-                    combined = f"{r[2] or ''} {r[3] or ''} {r[8] or ''}".lower()
+                    combined = f"{r.get('title') or ''} {r.get('skills') or ''} {r.get('category') or ''}".lower()
                     score = fuzzy_score(q, combined)
                     scored.append((score, r))
 
                 scored.sort(key=lambda x: x[0], reverse=True)
                 scored = [x for x in scored if x[0] >= 60]
 
-                # Add a fake 'rank' column at the end, so formatting stays consistent
-                rows = [x[1] + (999999.0,) for x in scored[:20]]
+                # Add a fake 'rank' column - use dict with rank key for consistent formatting
+                rows = []
+                for _, r in scored[:20]:
+                    rd = dict(r) if isinstance(r, dict) else {}
+                    rd["rank"] = 999999.0
+                    rows.append(rd)
 
             # ============================================
             # SEMANTIC FALLBACK (RAG-style retrieval)
@@ -1441,7 +1453,7 @@ def freelancers_search():
                     sem_ids = []
 
                 if sem_ids:
-                    placeholders = ",".join(["?"] * len(sem_ids))
+                    placeholders = ",".join(["%s"] * len(sem_ids))
                     cond_verified = " AND COALESCE(fp.is_verified,0)=1" if FEATURE_HIDE_UNVERIFIED_FROM_SEARCH else ""
                     cur.execute(
                         f"""
@@ -1465,18 +1477,23 @@ def freelancers_search():
                         LEFT JOIN freelancer_subscription fs
                             ON fs.freelancer_id = fp.freelancer_id
                         WHERE fp.freelancer_id IN ({placeholders})
-                          AND fp.min_budget <= ?
-                          AND fp.max_budget >= ?{cond_verified}
+                          AND fp.min_budget <= %s
+                          AND fp.max_budget >= %s{cond_verified}
                         """,
                         (*sem_ids, budget, budget),
                     )
                     rows = cur.fetchall()
 
         # ============================================
-        # NO SPECIALIZATION → BUDGET ONLY SEARCH
+        # NO SPECIALIZATION → BUDGET ONLY SEARCH (with ILIKE for partial matches)
         # ============================================
         else:
             cond_verified = " AND COALESCE(fp.is_verified,0)=1" if FEATURE_HIDE_UNVERIFIED_FROM_SEARCH else ""
+            params = [budget, budget]
+            extra_where = ""
+            if category:
+                extra_where += " AND fp.category ILIKE %s"
+                params.append(f"%{category}%")
             cur.execute(
                 f"""
                 SELECT
@@ -1500,9 +1517,9 @@ def freelancers_search():
                 LEFT JOIN freelancer_subscription fs
                     ON fs.freelancer_id = fp.freelancer_id
                 WHERE fp.min_budget <= %s
-                  AND fp.max_budget >= %s{cond_verified}
+                  AND fp.max_budget >= %s{cond_verified}{extra_where}
                 """,
-                (budget, budget),
+                tuple(params),
             )
             rows = cur.fetchall()
 
@@ -1524,19 +1541,29 @@ def freelancers_search():
     enriched = []
 
     for r in rows:
+        # Support both dict (RealDictCursor) and tuple access
+        def _v(r, key_or_idx, default=None):
+            if isinstance(r, dict):
+                return r.get(key_or_idx, default)
+            try:
+                return r[key_or_idx] if key_or_idx < len(r) else default
+            except (TypeError, KeyError):
+                return default
+        _get = lambda k, d=None: _v(r, k, d)
 
         if category:
-            cat_db = (r[8] or "").lower()
+            cat_db = (str(_get("category", _get(8, ""))) or "").lower()
             if fuzzy_score(category, cat_db) < 70:
                 continue
 
         spec = (q or "").strip().lower()
         if spec:
-             spec_db = (r[3] or "").strip().lower()
+             spec_db = (str(_get("skills", _get(3, ""))) or "").strip().lower()
              if fuzzy_score(spec, spec_db) < 70:
-               continue   
+               continue
 
-        f_lat, f_lon = r[10], r[11]  # latitude, longitude moved to indices 10, 11
+        f_lat = _get("latitude", _get(9))
+        f_lon = _get("longitude", _get(10))
 
         if client_lat and client_lon and f_lat and f_lon:
             dist = calculate_distance(
@@ -1547,7 +1574,7 @@ def freelancers_search():
 
         # Apply rank boost based on subscription
         rank_boost = 0
-        subscription_plan = r[12]  # subscription_plan field (moved to index 12)
+        subscription_plan = _get("subscription_plan", _get(12))
         
         # Migrate old plans
         if subscription_plan == "FREE":
@@ -1559,7 +1586,8 @@ def freelancers_search():
             rank_boost = 1
         
         # Adjust rank with boost
-        adjusted_rank = r[13] - (rank_boost * 100)  # Lower rank number = higher position
+        base_rank = _get("rank", _get(13, 999999))
+        adjusted_rank = (float(base_rank) if base_rank is not None else 999999) - (rank_boost * 100)  # Lower rank number = higher position
         
         # Add badge
         badge = None
@@ -1567,19 +1595,19 @@ def freelancers_search():
             badge = "🟣 PREMIUM"
         
         enriched.append({
-            "freelancer_id": r[0],
-            "name": r[1],
-            "title": r[2],
-            "skills": r[3],
-            "experience": r[4],
-            "budget_range": f"{r[5]} - {r[6]}",
-            "rating": r[7],
-            "category": r[8],
+            "freelancer_id": _get("freelancer_id", _get(0)),
+            "name": _get("name", _get(1)),
+            "title": _get("title", _get(2)),
+            "skills": _get("skills", _get(3)),
+            "experience": _get("experience", _get(4)),
+            "budget_range": f"{_get('min_budget', _get(5))} - {_get('max_budget', _get(6))}",
+            "rating": _get("rating", _get(7)),
+            "category": _get("category", _get(8)),
             "distance": round(dist, 2),
             "rank": adjusted_rank,
             "badge": badge,
             "subscription_plan": subscription_plan,
-            "availability_status": r[11]
+            "availability_status": _get("availability_status", _get(11))
         })
         
     # ============================================
@@ -1739,7 +1767,7 @@ def client_send_message():
         return jsonify({"success": False, "msg": "Missing fields"}), 400
 
     conn = freelancer_db()
-    cur = conn.cursor()
+    cur = get_dict_cursor(conn)
     cur.execute("""
         INSERT INTO message (sender_role, sender_id, receiver_id, text, timestamp)
         VALUES (%s, %s, %s, %s, %s)
@@ -1748,11 +1776,11 @@ def client_send_message():
     # Add notification for client in client.db - get freelancer name
     cur.execute("SELECT name FROM freelancer WHERE id=%s", (int(d["freelancer_id"]),))
     freelancer_row = cur.fetchone()
-    freelancer_name = freelancer_row[0] if freelancer_row else "Freelancer"
+    freelancer_name = (freelancer_row.get("name") if isinstance(freelancer_row, dict) else (freelancer_row[0] if freelancer_row else None)) or "Freelancer"
     
     cconn = client_db()
-    ccur = cconn.cursor()
-    ccur.execute("""
+    ccur2 = get_dict_cursor(cconn)
+    ccur2.execute("""
         INSERT INTO notification (client_id, message, created_at)
         VALUES (%s, %s, %s)
     """, (int(d["client_id"]), f"You messaged {freelancer_name}", now_ts()))
@@ -1772,7 +1800,7 @@ def freelancer_send_message():
         return jsonify({"success": False, "msg": "Missing fields"}), 400
 
     conn = freelancer_db()
-    cur = conn.cursor()
+    cur = get_dict_cursor(conn)
     cur.execute("""
         INSERT INTO message (sender_role, sender_id, receiver_id, text, timestamp)
         VALUES (%s, %s, %s, %s, %s)
@@ -1793,7 +1821,7 @@ def message_history():
     freelancer_id = int(freelancer_id)
 
     conn = freelancer_db()
-    cur = conn.cursor()
+    cur = get_dict_cursor(conn)
     cur.execute("""
         SELECT sender_role, sender_id, text, timestamp
         FROM message
@@ -1806,12 +1834,15 @@ def message_history():
 
     chat = []
     for r in rows:
-        chat.append({
-            "sender_role": r[0],
-            "sender_id": r[1],
-            "text": r[2],
-            "timestamp": r[3]
-        })
+        if isinstance(r, dict):
+            chat.append({
+                "sender_role": r.get("sender_role"),
+                "sender_id": r.get("sender_id"),
+                "text": r.get("text"),
+                "timestamp": r.get("timestamp")
+            })
+        else:
+            chat.append({"sender_role": r[0], "sender_id": r[1], "text": r[2], "timestamp": r[3]})
     return jsonify({"success": True, "messages": chat})
 
 # ============================================================
@@ -1854,7 +1885,7 @@ def client_hire():
 
     # simple existence check
     conn = freelancer_db()
-    cur = conn.cursor()
+    cur = get_dict_cursor(conn)
     cur.execute("SELECT id FROM freelancer WHERE id=%s", (freelancer_id,))
     if not cur.fetchone():
         conn.close()
@@ -1863,14 +1894,16 @@ def client_hire():
     # Check freelancer availability status
     cur.execute("SELECT availability_status FROM freelancer_profile WHERE freelancer_id=%s", (freelancer_id,))
     availability_result = cur.fetchone()
-    if availability_result and availability_result[0] == "ON_LEAVE":
+    av = availability_result.get("availability_status") if isinstance(availability_result, dict) else (availability_result[0] if availability_result else None)
+    if av == "ON_LEAVE":
         conn.close()
         return jsonify({"success": False, "msg": "Freelancer is currently not accepting new projects"}), 403
     if FEATURE_ENFORCE_VERIFIED_FOR_HIRE_MESSAGE:
         try:
-            cur.execute("SELECT COALESCE(is_verified,0) FROM freelancer_profile WHERE freelancer_id=%s", (freelancer_id,))
+            cur.execute("SELECT COALESCE(is_verified,0) as is_verified FROM freelancer_profile WHERE freelancer_id=%s", (freelancer_id,))
             vr = cur.fetchone()
-            if not vr or int(vr[0]) != 1:
+            vr_val = vr.get("is_verified", vr[0] if vr and not isinstance(vr, dict) else 0) if vr else 0
+            if not vr or int(vr_val) != 1:
                 conn.close()
                 return jsonify({"success": False, "msg": "Freelancer not verified"}), 403
         except Exception:
@@ -1884,6 +1917,7 @@ def client_hire():
         cur.execute("""
             INSERT INTO hire_request (client_id, freelancer_id, job_title, proposed_budget, note, status, contract_type, created_at, event_date, start_time, end_time)
             VALUES (%s, %s, %s, %s, %s, 'PENDING', %s, %s, %s, %s, %s)
+            RETURNING id
         """, (client_id, freelancer_id, job_title, proposed_budget, note, contract_type, now_ts(), event_date, start_time, end_time))
     elif contract_type == "HOURLY":
         # Require hourly rate fields
@@ -1900,6 +1934,7 @@ def client_hire():
         cur.execute("""
             INSERT INTO hire_request (client_id, freelancer_id, job_title, proposed_budget, note, status, contract_type, contract_hourly_rate, contract_overtime_rate, weekly_limit, max_daily_hours, created_at, event_date, start_time, end_time)
             VALUES (%s, %s, %s, %s, %s, 'PENDING', %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            RETURNING id
         """, (client_id, freelancer_id, job_title, proposed_budget, note, contract_type, hourly_rate, hourly_rate * 1.5, weekly_limit, max_daily_hours, now_ts(), event_date, start_time, end_time))
     elif contract_type == "EVENT":
         # Require event fields
@@ -1919,16 +1954,18 @@ def client_hire():
         cur.execute("""
             INSERT INTO hire_request (client_id, freelancer_id, job_title, proposed_budget, note, status, contract_type, event_base_fee, event_included_hours, event_overtime_rate, advance_paid, created_at, event_date, start_time, end_time)
             VALUES (%s, %s, %s, %s, %s, 'PENDING', %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            RETURNING id
         """, (client_id, freelancer_id, job_title, proposed_budget, note, contract_type, event_base_fee, event_included_hours, event_overtime_rate, advance_paid, now_ts(), event_date, start_time, end_time))
     else:
         return jsonify({"success": False, "msg": "Invalid contract type"}), 400
-    req_id = cur.lastrowid
+    req_row = cur.fetchone()
+    req_id = req_row["id"] if isinstance(req_row, dict) else req_row[0]
 
     # Add notification for client in client.db
     notification_msg = f'Job "{job_title if job_title else "Untitled"}" posted'
     cconn = client_db()
-    ccur = cconn.cursor()
-    ccur.execute("""
+    ccur2 = get_dict_cursor(cconn)
+    ccur2.execute("""
         INSERT INTO notification (client_id, message, created_at)
         VALUES (%s, %s, %s)
     """, (client_id, notification_msg, now_ts()))
@@ -1948,7 +1985,7 @@ def freelancer_hire_inbox():
     freelancer_id = int(freelancer_id)
 
     conn = freelancer_db()
-    cur = conn.cursor()
+    cur = get_dict_cursor(conn)
     cur.execute("""
         SELECT id, client_id, proposed_budget, note, status, created_at, 
                contract_type, contract_hourly_rate, contract_overtime_rate, 
@@ -1963,30 +2000,70 @@ def freelancer_hire_inbox():
 
     # fetch client names from client.db (separate db => done per client_id)
     client_conn = client_db()
-    client_cur = client_conn.cursor()
+    client_cur = get_dict_cursor(client_conn)
 
     out = []
     for r in rows:
-        client_cur.execute("SELECT name, email FROM client WHERE id=%s", (int(r[1]),))
+        if isinstance(r, dict):
+            cid = int(r.get("client_id"))
+            rid = r.get("id")
+            budget = r.get("proposed_budget")
+            note = r.get("note")
+            status = r.get("status")
+            created_at = r.get("created_at")
+            contract_type = r.get("contract_type")
+            hourly = r.get("contract_hourly_rate")
+            overtime = r.get("contract_overtime_rate")
+            limit = r.get("weekly_limit")
+            daily = r.get("max_daily_hours")
+            base = r.get("event_base_fee")
+            inc_hours = r.get("event_included_hours")
+            e_overtime = r.get("event_overtime_rate")
+            advance = r.get("advance_paid")
+        else:
+            cid = int(r[1])
+            rid = r[0]
+            budget = r[2]
+            note = r[3]
+            status = r[4]
+            created_at = r[5]
+            contract_type = r[6]
+            hourly = r[7]
+            overtime = r[8]
+            limit = r[9]
+            daily = r[10]
+            base = r[11]
+            inc_hours = r[12]
+            e_overtime = r[13]
+            advance = r[14]
+
+        client_cur.execute("SELECT name, email FROM client WHERE id=%s", (cid,))
         c = client_cur.fetchone()
+        if c:
+            cname = c.get("name") if isinstance(c, dict) else c[0]
+            cemail = c.get("email") if isinstance(c, dict) else c[1]
+        else:
+            cname = "Unknown"
+            cemail = ""
+
         out.append({
-            "request_id": r[0],
-            "client_id": r[1],
-            "client_name": (c[0] if c else "Unknown"),
-            "client_email": (c[1] if c else ""),
-            "proposed_budget": r[2],
-            "note": r[3],
-            "status": r[4],
-            "created_at": r[5],
-            "contract_type": r[6],
-            "contract_hourly_rate": r[7],
-            "contract_overtime_rate": r[8],
-            "weekly_limit": r[9],
-            "max_daily_hours": r[10],
-            "event_base_fee": r[11],
-            "event_included_hours": r[12],
-            "event_overtime_rate": r[13],
-            "advance_paid": r[14],
+            "request_id": rid,
+            "client_id": cid,
+            "client_name": cname,
+            "client_email": cemail,
+            "proposed_budget": budget,
+            "note": note,
+            "status": status,
+            "created_at": created_at,
+            "contract_type": contract_type,
+            "contract_hourly_rate": hourly,
+            "contract_overtime_rate": overtime,
+            "weekly_limit": limit,
+            "max_daily_hours": daily,
+            "event_base_fee": base,
+            "event_included_hours": inc_hours,
+            "event_overtime_rate": e_overtime,
+            "advance_paid": advance,
         })
 
     client_conn.close()
@@ -2009,7 +2086,7 @@ def freelancer_hire_respond():
     new_status = "ACCEPTED" if action == "ACCEPT" else "REJECTED"
 
     conn = freelancer_db()
-    cur = conn.cursor()
+    cur = get_dict_cursor(conn)
     cur.execute("""
         UPDATE hire_request
         SET status=%s
@@ -2043,7 +2120,7 @@ def client_message_threads():
     conn = None
     try:
         conn = freelancer_db()
-        cur = conn.cursor()
+        cur = get_dict_cursor(conn)
         cur.execute("""
             SELECT DISTINCT
                 CASE
@@ -2055,7 +2132,12 @@ def client_message_threads():
                OR (sender_role='freelancer' AND receiver_id=%s)
             ORDER BY freelancer_id DESC
         """, (client_id, client_id))
-        ids = [int(r[0]) for r in cur.fetchall() if r and r[0] is not None]
+        all_rows = cur.fetchall()
+        ids = []
+        for r in all_rows:
+            val = r.get("freelancer_id", r[0] if not isinstance(r, dict) else None) if r else None
+            if val is not None:
+                ids.append(int(val))
 
         if not ids:
             conn.close()
@@ -2065,11 +2147,10 @@ def client_message_threads():
         for fid in ids:
             cur.execute("SELECT name, email FROM freelancer WHERE id=%s", (fid,))
             fr = cur.fetchone()
-            out.append({
-                "freelancer_id": fid,
-                "name": (fr[0] if fr else "Freelancer"),
-                "email": (fr[1] if fr else "")
-            })
+            if isinstance(fr, dict):
+                out.append({"freelancer_id": fid, "name": fr.get("name") or "Freelancer", "email": fr.get("email") or ""})
+            else:
+                out.append({"freelancer_id": fid, "name": (fr[0] if fr else "Freelancer"), "email": (fr[1] if fr else "")})
 
         conn.close()
         return jsonify(out)
@@ -2096,7 +2177,7 @@ def client_job_requests():
     conn = None
     try:
         conn = freelancer_db()
-        cur = conn.cursor()
+        cur = get_dict_cursor(conn)
         cur.execute("""
             SELECT
                 hr.id,
@@ -2118,17 +2199,23 @@ def client_job_requests():
 
         out = []
         for r in rows:
-            out.append({
-                "request_id": r[0],
-                "freelancer_id": r[1],
-                "freelancer_name": r[2],
-                "freelancer_email": r[3],
-                "job_title": r[4] or "",
-                "proposed_budget": r[5],
-                "note": r[6] or "",
-                "status": r[7],
-                "created_at": r[8]
-            })
+            if isinstance(r, dict):
+                out.append({
+                    "request_id": r.get("id"),
+                    "freelancer_id": r.get("freelancer_id"),
+                    "freelancer_name": r.get("name"),
+                    "freelancer_email": r.get("email"),
+                    "job_title": r.get("job_title") or "",
+                    "proposed_budget": r.get("proposed_budget"),
+                    "note": r.get("note") or "",
+                    "status": r.get("status"),
+                    "created_at": r.get("created_at")
+                })
+            else:
+                out.append({
+                    "request_id": r[0], "freelancer_id": r[1], "freelancer_name": r[2], "freelancer_email": r[3],
+                    "job_title": r[4] or "", "proposed_budget": r[5], "note": r[6] or "", "status": r[7], "created_at": r[8]
+                })
 
         return jsonify(out)
     except Exception as e:
@@ -2154,9 +2241,9 @@ def client_jobs():
     conn = None
     try:
         conn = freelancer_db()
-        cur = conn.cursor()
+        cur = get_dict_cursor(conn)
         cur.execute("""
-            SELECT job_title, proposed_budget, status
+            SELECT id, job_title, proposed_budget, status
             FROM hire_request
             WHERE client_id=%s
             ORDER BY created_at DESC
@@ -2164,14 +2251,25 @@ def client_jobs():
         rows = cur.fetchall()
         conn.close()
 
-        return jsonify([
-            {
-                "title": r[0] or "",
-                "budget": r[1],
-                "status": "open" if r[2] == "PENDING" else r[2].lower()
-            }
-            for r in rows
-        ])
+        result = []
+        for r in rows:
+            if isinstance(r, dict):
+                st = r.get("status", "")
+                result.append({
+                    "id": r.get("id"),
+                    "title": r.get("job_title") or "",
+                    "budget": r.get("proposed_budget"),
+                    "status": "open" if st == "PENDING" else str(st).lower()
+                })
+            else:
+                st = r[3] if len(r) > 3 else r[2]
+                result.append({
+                    "id": r[0],
+                    "title": r[1] or "",
+                    "budget": r[2],
+                    "status": "open" if st == "PENDING" else str(st).lower()
+                })
+        return jsonify(result)
     except Exception as e:
         if conn:
             conn.close()
@@ -2191,7 +2289,7 @@ def save_freelancer():
     conn = None
     try:
         conn = freelancer_db()
-        cur = conn.cursor()
+        cur = get_dict_cursor(conn)
         cur.execute("""
             INSERT INTO saved_freelancer (client_id, freelancer_id)
             VALUES (%s,%s)
@@ -2223,7 +2321,7 @@ def saved_freelancers():
     conn = None
     try:
         conn = freelancer_db()
-        cur = conn.cursor()
+        cur = get_dict_cursor(conn)
         cur.execute("""
             SELECT f.id, f.name, fp.category
             FROM saved_freelancer s
@@ -2234,13 +2332,45 @@ def saved_freelancers():
         rows = cur.fetchall()
         conn.close()
 
-        return jsonify([
-            {"id": r[0], "name": r[1], "category": r[2] or ""}
-            for r in rows
-        ])
+        result = []
+        for r in rows:
+            if isinstance(r, dict):
+                result.append({"id": r.get("id"), "name": r.get("name"), "category": r.get("category") or ""})
+            else:
+                result.append({"id": r[0], "name": r[1], "category": (r[2] if len(r) > 2 else "") or ""})
+        return jsonify(result)
     except Exception as e:
         if conn:
             conn.close()
+        return jsonify({"success": False, "msg": str(e)}), 500
+
+# ============================================================
+# CLIENT – SEND NOTIFICATION (for verification/test)
+# ============================================================
+
+@app.route("/client/send-notification", methods=["POST"])
+def client_send_notification():
+    """Create a notification for a client (used by CLI/verification)"""
+    d = request.get_json() or {}
+    client_id = d.get("client_id")
+    message = d.get("message", "Notification")
+    if not client_id:
+        return jsonify({"success": False, "msg": "client_id required"}), 400
+    try:
+        client_id = int(client_id)
+    except (ValueError, TypeError):
+        return jsonify({"success": False, "msg": "Invalid client_id"}), 400
+    try:
+        conn = client_db()
+        cur = get_dict_cursor(conn)
+        cur.execute("""
+            INSERT INTO notification (client_id, message, created_at)
+            VALUES (%s, %s, %s)
+        """, (client_id, str(message), now_ts()))
+        conn.commit()
+        conn.close()
+        return jsonify({"success": True})
+    except Exception as e:
         return jsonify({"success": False, "msg": str(e)}), 500
 
 # ============================================================
@@ -2260,7 +2390,7 @@ def client_notifications():
 
     try:
         conn = client_db()
-        cur = conn.cursor()
+        cur = get_dict_cursor(conn)
         cur.execute("""
             SELECT message
             FROM notification
@@ -2270,7 +2400,13 @@ def client_notifications():
         rows = cur.fetchall()
         conn.close()
 
-        return jsonify([r[0] for r in rows])
+        result = []
+        for r in rows:
+            if isinstance(r, dict):
+                result.append(r.get("message", ""))
+            else:
+                result.append(r[0] if r else "")
+        return jsonify(result)
     except Exception as e:
         if conn:
             conn.close()
@@ -2294,35 +2430,45 @@ def freelancer_stats():
     conn = None
     try:
         conn = freelancer_db()
-        cur = conn.cursor()
+        cur = get_dict_cursor(conn)
 
         # Total earnings and completed jobs (ACCEPTED)
         cur.execute("""
-            SELECT COUNT(*), COALESCE(SUM(proposed_budget), 0)
+            SELECT COUNT(*) as cnt, COALESCE(SUM(proposed_budget), 0) as total
             FROM hire_request
             WHERE freelancer_id=%s AND status='ACCEPTED'
         """, (freelancer_id,))
         row = cur.fetchone()
-        completed_jobs = int(row[0] or 0)
-        total_earnings = float(row[1] or 0.0)
+        if isinstance(row, dict):
+            completed_jobs = int(row.get("cnt", 0) or 0)
+            total_earnings = float(row.get("total", 0) or 0.0)
+        else:
+            completed_jobs = int(row[0] if row else 0)
+            total_earnings = float(row[1] if row and len(row) > 1 else 0.0)
 
         # Total jobs for job success %
         cur.execute("""
-            SELECT COUNT(*)
+            SELECT COUNT(*) as cnt
             FROM hire_request
             WHERE freelancer_id=%s
         """, (freelancer_id,))
         total_jobs_row = cur.fetchone()
-        total_jobs = int(total_jobs_row[0] or 0)
+        if isinstance(total_jobs_row, dict):
+            total_jobs = int(total_jobs_row.get("cnt", 0) or 0)
+        else:
+            total_jobs = int(total_jobs_row[0] if total_jobs_row else 0)
 
         # Rating from profile
         cur.execute("""
-            SELECT COALESCE(rating, 0)
+            SELECT COALESCE(rating, 0) as rating
             FROM freelancer_profile
             WHERE freelancer_id=%s
         """, (freelancer_id,))
         rating_row = cur.fetchone()
-        rating = float(rating_row[0] or 0.0) if rating_row else 0.0
+        if isinstance(rating_row, dict):
+            rating = float(rating_row.get("rating", 0) or 0.0)
+        else:
+            rating = float(rating_row[0] if rating_row else 0.0)
 
         job_success = 0.0
         if total_jobs > 0:
@@ -2355,7 +2501,7 @@ def freelancer_save_client():
     conn = None
     try:
         conn = freelancer_db()
-        cur = conn.cursor()
+        cur = get_dict_cursor(conn)
         cur.execute("""
             INSERT INTO saved_client (freelancer_id, client_id)
             VALUES (%s, %s)
@@ -2385,7 +2531,7 @@ def freelancer_saved_clients():
     client_conn = None
     try:
         conn = freelancer_db()
-        cur = conn.cursor()
+        cur = get_dict_cursor(conn)
         cur.execute("""
             SELECT client_id
             FROM saved_client
@@ -2394,23 +2540,32 @@ def freelancer_saved_clients():
         rows = cur.fetchall()
         conn.close()
 
-        client_ids = [int(r[0]) for r in rows]
+        client_ids = []
+        for r in rows:
+            if isinstance(r, dict):
+                val = r.get("client_id")
+            else:
+                val = r[0]
+            if val is not None:
+                client_ids.append(int(val))
         if not client_ids:
             return jsonify([])
 
         client_conn = client_db()
-        client_cur = client_conn.cursor()
+        client_cur = get_dict_cursor(client_conn)
 
         out = []
         for cid in client_ids:
             client_cur.execute("SELECT name, email FROM client WHERE id=%s", (cid,))
             c = client_cur.fetchone()
             if c:
-                out.append({
-                    "client_id": cid,
-                    "name": c[0],
-                    "email": c[1]
-                })
+                if isinstance(c, dict):
+                    nm = c.get("name")
+                    em = c.get("email")
+                else:
+                    nm = c[0]
+                    em = c[1]
+                out.append({"client_id": cid, "name": nm, "email": em})
 
         client_conn.close()
         return jsonify(out)
@@ -2439,14 +2594,14 @@ def freelancer_change_password():
     conn = None
     try:
         conn = freelancer_db()
-        cur = conn.cursor()
+        cur = get_dict_cursor(conn)
         cur.execute("SELECT password FROM freelancer WHERE id=%s", (freelancer_id,))
         row = cur.fetchone()
         if not row:
             conn.close()
             return jsonify({"success": False, "msg": "Freelancer not found"}), 404
 
-        if not check_password_hash(row[0], old_password):
+        if not check_password_hash(row.get("password", row[0] if not isinstance(row, dict) else ""), old_password):
             conn.close()
             return jsonify({"success": False, "msg": "Old password incorrect"}), 400
 
@@ -2479,7 +2634,7 @@ def freelancer_update_email():
     conn = None
     try:
         conn = freelancer_db()
-        cur = conn.cursor()
+        cur = get_dict_cursor(conn)
         cur.execute(
             "UPDATE freelancer SET email=%s WHERE id=%s",
             (new_email, freelancer_id)
@@ -2514,7 +2669,7 @@ def freelancer_notifications():
     conn = None
     try:
         conn = freelancer_db()
-        cur = conn.cursor()
+        cur = get_dict_cursor(conn)
 
         notifications = []
 
@@ -2534,7 +2689,7 @@ def freelancer_notifications():
         cur.execute("""
             SELECT timestamp
             FROM message
-            WHERE receiver_id=? AND sender_role='client'
+            WHERE receiver_id=%s AND sender_role='client'
             ORDER BY timestamp DESC
             LIMIT 20
         """, (freelancer_id,))
@@ -2672,13 +2827,16 @@ def google_oauth_callback():
     # 3) Upsert user into correct DB based on role
     if role == "client":
         conn = client_db()
-        cur = conn.cursor()
+        cur = get_dict_cursor(conn)
 
         cur.execute("SELECT id, password, auth_provider, google_sub FROM client WHERE email=%s", (email,))
         row = cur.fetchone()
 
         if row:
-            client_id, pwd, provider, gsub = row
+            client_id = row.get("id")
+            pwd = row.get("password")
+            provider = row.get("auth_provider") or "local"
+            gsub = row.get("google_sub")
             if not provider:
                 provider = "local"
             if not gsub:
@@ -2705,7 +2863,8 @@ def google_oauth_callback():
             VALUES (%s,%s,%s,%s,%s)
             RETURNING id
         """, (name, email, random_pwd_hash, "google", sub))
-        client_id = cur.fetchone()[0]
+        row = cur.fetchone()
+        client_id = row["id"] if isinstance(row, dict) else row[0]
         conn.commit()
         conn.close()
 
@@ -2719,13 +2878,16 @@ def google_oauth_callback():
 
     else:
         conn = freelancer_db()
-        cur = conn.cursor()
+        cur = get_dict_cursor(conn)
 
         cur.execute("SELECT id, password, auth_provider, google_sub FROM freelancer WHERE email=%s", (email,))
         row = cur.fetchone()
 
         if row:
-            freelancer_id, pwd, provider, gsub = row
+            freelancer_id = row.get("id")
+            pwd = row.get("password")
+            provider = row.get("auth_provider") or "local"
+            gsub = row.get("google_sub")
             if not provider:
                 provider = "local"
             if not gsub:
@@ -2752,7 +2914,8 @@ def google_oauth_callback():
             VALUES (%s,%s,%s,%s,%s)
             RETURNING id
         """, (name, email, random_pwd_hash, "google", sub))
-        freelancer_id = cur.fetchone()[0]
+        row = cur.fetchone()
+        freelancer_id = row["id"] if isinstance(row, dict) else row[0]
         conn.commit()
         conn.close()
 
@@ -2827,7 +2990,7 @@ def client_upload_photo():
     
     # Validate client exists
     conn = client_db()
-    cur = conn.cursor()
+    cur = get_dict_cursor(conn)
     cur.execute("SELECT id FROM client WHERE id=%s", (client_id,))
     if not cur.fetchone():
         conn.close()
@@ -2859,7 +3022,7 @@ def freelancer_upload_photo():
     
     # Validate freelancer exists
     conn = freelancer_db()
-    cur = conn.cursor()
+    cur = get_dict_cursor(conn)
     cur.execute("SELECT id FROM freelancer WHERE id=%s", (freelancer_id,))
     if not cur.fetchone():
         conn.close()
@@ -2980,7 +3143,7 @@ def add_portfolio_item():
     
     # Validate freelancer exists
     conn = freelancer_db()
-    cur = conn.cursor()
+    cur = get_dict_cursor(conn)
     cur.execute("SELECT id FROM freelancer WHERE id=%s", (freelancer_id,))
     if not cur.fetchone():
         conn.close()
@@ -3186,13 +3349,14 @@ def start_call():
     
     # Insert call session
     conn = freelancer_db()
-    cur = conn.cursor()
+    cur = get_dict_cursor(conn)
     cur.execute("""
         INSERT INTO call_session (caller_role, caller_id, receiver_role, receiver_id, call_type, room_name, status, created_at)
         VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+        RETURNING id
     """, (caller_role, caller_id, receiver_role, receiver_id, call_type, room_name, "PENDING", now_ts()))
     
-    call_id = cur.lastrowid
+    call_id = cur.fetchone()["id"]
     conn.commit()
     conn.close()
     
@@ -3265,7 +3429,7 @@ def respond_to_call():
         return jsonify({"success": False, "msg": "Invalid action"}), 400
     
     conn = freelancer_db()
-    cur = conn.cursor()
+    cur = get_dict_cursor(conn)
     
     # Update call status
     status = "ACCEPTED" if action == "accept" else "REJECTED"
@@ -3287,7 +3451,7 @@ def end_call():
     call_id = int(d["call_id"])
     
     conn = freelancer_db()
-    cur = conn.cursor()
+    cur = get_dict_cursor(conn)
     cur.execute("UPDATE call_session SET status = 'ENDED' WHERE id = %s", (call_id,))
     conn.commit()
     conn.close()
@@ -3387,7 +3551,7 @@ def ai_chat():
             # Call existing search logic
             conn = freelancer_db()
             from psycopg2.extras import RealDictCursor
-            cur = conn.cursor()
+            cur = get_dict_cursor(conn)
             
             rows = []
             q = search_params.get('q', '')
@@ -3458,12 +3622,12 @@ def ai_chat():
                         ON f.id = fp.freelancer_id
                     LEFT JOIN freelancer_subscription fs
                         ON fs.freelancer_id = fp.freelancer_id
-                    WHERE fp.min_budget <= ?
-                      AND fp.max_budget >= ?{cond_verified}
+                    WHERE fp.min_budget <= %s
+                      AND fp.max_budget >= %s{cond_verified}
                 """
                 params = [budget, budget]
                 if category:
-                    sql += " AND LOWER(fp.category) = LOWER(?)"
+                    sql += " AND LOWER(fp.category) = LOWER(%s)"
                     params.append(category)
                 
                 cur.execute(sql, params)
@@ -3756,7 +3920,7 @@ def freelancer_subscription_upgrade():
         # Add notification for subscription upgrade
         try:
             conn = freelancer_db()
-            cur = conn.cursor()
+            cur = get_dict_cursor(conn)
             cur.execute("""
                 INSERT INTO notification (freelancer_id, message, created_at)
                 VALUES (%s, %s, %s)
@@ -3840,14 +4004,15 @@ def client_projects_create():
     
     conn = freelancer_db()
     try:
-        cur = conn.cursor()
+        cur = get_dict_cursor(conn)
         # PostgreSQL syntax with RETURNING id and default status 'pending'
         cur.execute("""
             INSERT INTO project_post (client_id, title, description, category, skills, budget_type, budget_min, budget_max, status, created_at)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, 'pending', %s) RETURNING id
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, 'OPEN', %s) RETURNING id
         """, (client_id, title, description, category, skills, budget_type, budget_min, budget_max, now_ts()))
         
-        project_id = cur.fetchone()[0]
+        proj_row = cur.fetchone()
+        project_id = proj_row["id"] if isinstance(proj_row, dict) else proj_row[0]
         conn.commit()
         
         # Enhanced response with status and next actions
@@ -3886,7 +4051,7 @@ def client_projects_list():
     conn = freelancer_db()
     from psycopg2.extras import RealDictCursor
     try:
-        cur = conn.cursor()
+        cur = get_dict_cursor(conn)
         cur.execute("""
             SELECT id, title, description, category, skills, budget_type, budget_min, budget_max, status, created_at
             FROM project_post
@@ -3925,7 +4090,7 @@ def client_projects_applicants():
     conn = freelancer_db()
     from psycopg2.extras import RealDictCursor
     try:
-        cur = conn.cursor()
+        cur = get_dict_cursor(conn)
         cur.execute("SELECT client_id FROM project_post WHERE id=%s", (pid,))
         r = cur.fetchone()
         if not r or int(r["client_id"]) != cid:
@@ -3967,10 +4132,10 @@ def client_projects_close():
         return jsonify({"success": False, "msg": "Invalid payload"}), 400
     conn = freelancer_db()
     try:
-        cur = conn.cursor()
+        cur = get_dict_cursor(conn)
         cur.execute("SELECT client_id FROM project_post WHERE id=%s", (pid,))
         r = cur.fetchone()
-        if not r or int(r[0]) != cid:
+        if not r or int(r.get("client_id", r[0] if not isinstance(r, dict) else 0)) != cid:
             return jsonify({"success": False, "msg": "Not authorized"}), 403
         cur.execute("UPDATE project_post SET status='CLOSED' WHERE id=%s", (pid,))
         conn.commit()
@@ -3993,13 +4158,13 @@ def client_projects_accept_application():
         return jsonify({"success": False, "msg": "Invalid payload"}), 400
     conn = freelancer_db()
     try:
-        cur = conn.cursor()
+        cur = get_dict_cursor(conn)
         cur.execute("SELECT client_id, title, budget_type FROM project_post WHERE id=%s", (pid,))
         pr = cur.fetchone()
-        if not pr or int(pr[0]) != cid:
+        if not pr or int(pr["client_id"]) != cid:
             return jsonify({"success": False, "msg": "Not authorized"}), 403
-        project_title = pr[1]
-        budget_type = (pr[2] or "FIXED").upper()
+        project_title = pr["title"]
+        budget_type = (pr["budget_type"] or "FIXED").upper()
         cur.execute("""
             SELECT freelancer_id, bid_amount, hourly_rate, event_base_fee, status
             FROM project_application
@@ -4008,12 +4173,13 @@ def client_projects_accept_application():
         ar = cur.fetchone()
         if not ar:
             return jsonify({"success": False, "msg": "Application not found"}), 404
-        if ar[4] != "APPLIED":
+        ar_status = ar["status"]
+        if ar_status != "APPLIED":
             return jsonify({"success": False, "msg": "Application not in APPLIED state"}), 400
-        freelancer_id = int(ar[0])
-        bid_amount = ar[1] or 0
-        hourly_rate = ar[2] or 0
-        event_base_fee = ar[3] or 0
+        freelancer_id = int(ar["freelancer_id"])
+        bid_amount = ar["bid_amount"] or 0
+        hourly_rate = ar["hourly_rate"] or 0
+        event_base_fee = ar["event_base_fee"] or 0
         if budget_type == "FIXED":
             proposed_budget = bid_amount
         elif budget_type == "HOURLY":
@@ -4037,7 +4203,7 @@ def freelancer_projects_feed():
     conn = freelancer_db()
     from psycopg2.extras import RealDictCursor
     try:
-        cur = conn.cursor()
+        cur = get_dict_cursor(conn)
         cur.execute("""
             SELECT id, client_id, title, description, category, skills, budget_type, budget_min, budget_max, created_at
             FROM project_post
@@ -4082,7 +4248,7 @@ def freelancer_projects_apply():
     
     conn = freelancer_db()
     try:
-        cur = conn.cursor()
+        cur = get_dict_cursor(conn)
         # PostgreSQL syntax
         cur.execute("SELECT 1 FROM project_application WHERE project_id=%s AND freelancer_id=%s", (pid, fid))
         if cur.fetchone():
@@ -4092,13 +4258,16 @@ def freelancer_projects_apply():
         cur.execute("""
             INSERT INTO project_application (project_id, freelancer_id, proposal_text, bid_amount, hourly_rate, event_base_fee, status, created_at)
             VALUES (%s, %s, %s, %s, %s, %s, 'APPLIED', %s)
+            RETURNING id
         """, (pid, fid, proposal_text, bid_amount, hourly_rate, event_base_fee, now_ts()))
+        app_row = cur.fetchone()
+        application_id = app_row["id"] if isinstance(app_row, dict) else app_row[0]
         
         # Update project status to 'applied' when freelancer applies
         cur.execute("UPDATE project_post SET status='applied' WHERE id=%s", (pid,))
         
         conn.commit()
-        return jsonify({"success": True, "msg": "Application submitted successfully"})
+        return jsonify({"success": True, "msg": "Application submitted successfully", "application_id": application_id})
         
     except psycopg2.Error as e:
         print(f"Database error in project application: {type(e).__name__}: {str(e)}")
@@ -4130,13 +4299,13 @@ def client_rate():
     review_text = d["review"]
     
     conn = freelancer_db()
-    cur = conn.cursor()
+    cur = get_dict_cursor(conn)
     
     # Check if hire request belongs to client and status is PAID
     cur.execute("""
         SELECT freelancer_id, status 
         FROM hire_request 
-        WHERE id = %s AND client_id = ?
+        WHERE id = %s AND client_id = %s
     """, (hire_request_id, client_id))
     
     request = cur.fetchone()
@@ -4218,13 +4387,13 @@ def hourly_log():
     hours = float(d["hours"])
     
     conn = freelancer_db()
-    cur = conn.cursor()
+    cur = get_dict_cursor(conn)
     
     # Fetch contract snapshot
     cur.execute("""
         SELECT contract_type, contract_hourly_rate, contract_overtime_rate, max_daily_hours
         FROM hire_request 
-        WHERE id = %s AND freelancer_id = ?
+        WHERE id = %s AND freelancer_id = %s
     """, (hire_request_id, freelancer_id))
     
     contract = cur.fetchone()
@@ -4281,7 +4450,7 @@ def hourly_generate_invoice():
     hire_request_id = int(d["hire_request_id"])
     
     conn = freelancer_db()
-    cur = conn.cursor()
+    cur = get_dict_cursor(conn)
     
     # Verify contract is HOURLY
     cur.execute("""
@@ -4304,7 +4473,7 @@ def hourly_generate_invoice():
     cur.execute("""
         SELECT SUM(calculated_amount)
         FROM work_log 
-        WHERE hire_request_id = ? AND approved = 1
+        WHERE hire_request_id = %s AND approved = 1
     """, (hire_request_id,))
     
     result = cur.fetchone()
@@ -4342,7 +4511,7 @@ def event_complete():
     actual_hours = float(d["actual_hours"])
     
     conn = freelancer_db()
-    cur = conn.cursor()
+    cur = get_dict_cursor(conn)
     
     # Verify contract is EVENT
     cur.execute("""
@@ -4402,23 +4571,23 @@ def platform_stats():
     try:
         # Get total freelancers
         conn = freelancer_db()
-        cur = conn.cursor()
-        cur.execute("SELECT COUNT(*) FROM freelancer")
-        total_freelancers = cur.fetchone()[0]
+        cur = get_dict_cursor(conn)
+        cur.execute("SELECT COUNT(*) as cnt FROM freelancer")
+        total_freelancers = (cur.fetchone() or {}).get("cnt", 0) or 0
         conn.close()
         
         # Get total clients
         conn = client_db()
-        cur = conn.cursor()
-        cur.execute("SELECT COUNT(*) FROM client")
-        total_clients = cur.fetchone()[0]
+        cur = get_dict_cursor(conn)
+        cur.execute("SELECT COUNT(*) as cnt FROM client")
+        total_clients = (cur.fetchone() or {}).get("cnt", 0) or 0
         conn.close()
         
         # Get gigs completed
         conn = freelancer_db()
-        cur = conn.cursor()
-        cur.execute("SELECT COUNT(*) FROM hire_request WHERE status='ACCEPTED'")
-        gigs_completed = cur.fetchone()[0]
+        cur = get_dict_cursor(conn)
+        cur.execute("SELECT COUNT(*) as cnt FROM hire_request WHERE status='ACCEPTED'")
+        gigs_completed = (cur.fetchone() or {}).get("cnt", 0) or 0
         conn.close()
         
         return jsonify({
@@ -4438,22 +4607,22 @@ def freelancer_profile_stats(freelancer_id):
     try:
         # Get rating
         conn = freelancer_db()
-        cur = conn.cursor()
+        cur = get_dict_cursor(conn)
         cur.execute("SELECT rating FROM freelancer_profile WHERE freelancer_id=%s", (freelancer_id,))
         rating_row = cur.fetchone()
-        rating = rating_row[0] if rating_row else 0.0
+        rating = (rating_row.get("rating", rating_row[0] if rating_row and not isinstance(rating_row, dict) else 0) or 0.0) if rating_row else 0.0
         conn.close()
         
         # Get gigs completed
         conn = client_db()
-        cur = conn.cursor()
-        cur.execute("SELECT COUNT(*) FROM hire_request WHERE freelancer_id=%s AND status='ACCEPTED'", (freelancer_id,))
-        gigs_completed = cur.fetchone()[0]
+        cur = get_dict_cursor(conn)
+        cur.execute("SELECT COUNT(*) as cnt FROM hire_request WHERE freelancer_id=%s AND status='ACCEPTED'", (freelancer_id,))
+        gigs_completed = (cur.fetchone() or {}).get("cnt", 0) or 0
         
         # Get earnings
-        cur.execute("SELECT SUM(proposed_budget) FROM hire_request WHERE freelancer_id=%s AND status='ACCEPTED'", (freelancer_id,))
+        cur.execute("SELECT SUM(proposed_budget) as total FROM hire_request WHERE freelancer_id=%s AND status='ACCEPTED'", (freelancer_id,))
         earnings_row = cur.fetchone()
-        earnings = earnings_row[0] if earnings_row and earnings_row[0] is not None else 0
+        earnings = (earnings_row.get("total") if isinstance(earnings_row, dict) else (earnings_row[0] if earnings_row else None)) or 0
         conn.close()
         
         return jsonify({

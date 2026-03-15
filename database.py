@@ -1,7 +1,7 @@
 import psycopg2
 from psycopg2.extras import RealDictCursor
 import psycopg2.errors
-from postgres_config import get_postgres_connection, is_column_exists_error, is_table_exists_error, is_unique_violation_error
+from postgres_config import get_postgres_connection, is_column_exists_error, is_table_exists_error, is_unique_violation_error, get_dict_cursor
 
 def client_db():
     return get_postgres_connection()
@@ -30,7 +30,7 @@ def create_tables():
     # CLIENT DB
     # ==========================
     db = client_db()
-    cur = db.cursor()
+    cur = get_dict_cursor(db)
 
     cur.execute("""
     CREATE TABLE IF NOT EXISTS client (
@@ -167,7 +167,7 @@ def create_tables():
     # FREELANCER DB
     # ==========================
     db = freelancer_db()
-    cur = db.cursor()
+    cur = get_dict_cursor(db)
 
     cur.execute("""
     CREATE TABLE IF NOT EXISTS freelancer (
@@ -429,6 +429,72 @@ def create_tables():
     _try_add_column(cur, "hire_request", "event_date TEXT")
     _try_add_column(cur, "hire_request", "start_time TEXT")
     _try_add_column(cur, "hire_request", "end_time TEXT")
+    # Payment & event lifecycle (Razorpay + dispute extension)
+    _try_add_column(cur, "hire_request", "payment_status TEXT DEFAULT 'pending'")
+    _try_add_column(cur, "hire_request", "payout_status TEXT DEFAULT 'on_hold'")
+    _try_add_column(cur, "hire_request", "event_status TEXT DEFAULT 'scheduled'")
+    _try_add_column(cur, "hire_request", "checkin_time INTEGER")
+    _try_add_column(cur, "hire_request", "checkin_latitude REAL")
+    _try_add_column(cur, "hire_request", "checkin_longitude REAL")
+    _try_add_column(cur, "hire_request", "checkin_verified INTEGER DEFAULT 0")
+    _try_add_column(cur, "hire_request", "completion_note TEXT")
+    _try_add_column(cur, "hire_request", "completion_proof TEXT")
+    _try_add_column(cur, "hire_request", "completed_at INTEGER")
+
+    # ==========================
+    # PAYMENT RECORDS (Razorpay hire & subscription)
+    # ==========================
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS payment_records (
+        payment_id SERIAL PRIMARY KEY,
+        hire_id INTEGER,
+        subscription_id INTEGER,
+        record_type TEXT NOT NULL DEFAULT 'hire',
+        razorpay_order_id TEXT,
+        razorpay_payment_id TEXT,
+        razorpay_signature TEXT,
+        amount REAL NOT NULL,
+        currency TEXT DEFAULT 'INR',
+        status TEXT NOT NULL DEFAULT 'pending',
+        created_at INTEGER
+    )
+    """)
+
+    # ==========================
+    # PAYOUT DETAILS (freelancer bank/UPI - separate from profile)
+    # ==========================
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS payout_details (
+        id SERIAL PRIMARY KEY,
+        freelancer_id INTEGER NOT NULL,
+        payout_method TEXT NOT NULL,
+        account_holder_name TEXT,
+        account_number TEXT,
+        ifsc_code TEXT,
+        upi_id TEXT,
+        razorpay_contact_id TEXT,
+        razorpay_fund_account_id TEXT,
+        created_at INTEGER
+    )
+    """)
+
+    # ==========================
+    # DISPUTES
+    # ==========================
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS disputes (
+        dispute_id SERIAL PRIMARY KEY,
+        hire_id INTEGER NOT NULL,
+        raised_by TEXT NOT NULL,
+        dispute_reason TEXT,
+        proof TEXT,
+        status TEXT DEFAULT 'OPEN',
+        admin_decision TEXT,
+        admin_note TEXT,
+        resolution_type TEXT,
+        resolved_at INTEGER
+    )
+    """)
 
     db.commit()
 
@@ -466,12 +532,12 @@ def rebuild_freelancer_search_index(freelancer_id: int):
 
     conn = freelancer_db()
     try:
-        cur = conn.cursor()
+        cur = get_dict_cursor(conn)
 
         cur.execute("""
             SELECT COALESCE(title,''), COALESCE(skills,''), COALESCE(bio,''), COALESCE(tags,'')
             FROM freelancer_profile
-            WHERE freelancer_id=?
+            WHERE freelancer_id=%s
         """, (fid,))
         row = cur.fetchone()
         if not row:
@@ -484,7 +550,7 @@ def rebuild_freelancer_search_index(freelancer_id: int):
         cur.execute("""
             SELECT STRING_AGG(COALESCE(title,'') || ' ' || COALESCE(description,''), ' ')
             FROM portfolio
-            WHERE freelancer_id=?
+            WHERE freelancer_id=%s
         """, (fid,))
         prow = cur.fetchone()
         portfolio_text = (prow[0] if prow and prow[0] else "")
@@ -524,30 +590,44 @@ def get_latest_hire_requests_for_client(client_id: int, limit: int = 20):
         return []
     conn = freelancer_db()
     try:
-        cur = conn.cursor()
+        cur = get_dict_cursor(conn)
         cur.execute("""
             SELECT h.id, h.client_id, h.freelancer_id, f.name, f.email, h.job_title, h.proposed_budget, h.note, h.status, h.created_at
             FROM hire_request h
             LEFT JOIN freelancer f ON f.id = h.freelancer_id
-            WHERE h.client_id=?
+            WHERE h.client_id=%s
             ORDER BY h.created_at DESC
-            LIMIT ?
+            LIMIT %s
         """, (cid, int(limit)))
         rows = cur.fetchall()
         out = []
         for r in rows:
-            out.append({
-                "request_id": r[0],
-                "client_id": r[1],
-                "freelancer_id": r[2],
-                "freelancer_name": r[3],
-                "freelancer_email": r[4],
-                "job_title": r[5],
-                "proposed_budget": r[6],
-                "note": r[7],
-                "status": r[8],
-                "created_at": r[9],
-            })
+            if isinstance(r, dict):
+                out.append({
+                    "id": r.get("id"),
+                    "client_id": r.get("client_id"),
+                    "freelancer_id": r.get("freelancer_id"),
+                    "freelancer_name": r.get("name"),
+                    "freelancer_email": r.get("email"),
+                    "job_title": r.get("job_title"),
+                    "proposed_budget": r.get("proposed_budget"),
+                    "note": r.get("note"),
+                    "status": r.get("status"),
+                    "created_at": r.get("created_at"),
+                })
+            else:
+                out.append({
+                    "request_id": r[0],
+                    "client_id": r[1],
+                    "freelancer_id": r[2],
+                    "freelancer_name": r[3],
+                    "freelancer_email": r[4],
+                    "job_title": r[5],
+                    "proposed_budget": r[6],
+                    "note": r[7],
+                    "status": r[8],
+                    "created_at": r[9],
+                })
         return out
     except Exception:
         return []
@@ -562,26 +642,32 @@ def get_latest_hire_requests_for_freelancer(freelancer_id: int, limit: int = 20)
         return []
     conn = freelancer_db()
     try:
-        cur = conn.cursor()
+        cur = get_dict_cursor(conn)
         cur.execute("""
             SELECT id, client_id, job_title, proposed_budget, note, status, created_at
             FROM hire_request
-            WHERE freelancer_id=?
+            WHERE freelancer_id=%s
             ORDER BY created_at DESC
-            LIMIT ?
+            LIMIT %s
         """, (fid, int(limit)))
         rows = cur.fetchall()
         out = []
         for r in rows:
+            client_id = r.get("client_id") if isinstance(r, dict) else r[1]
             client_name = None
             client_email = None
             try:
                 cconn = client_db()
-                ccur = cconn.cursor()
-                ccur.execute("SELECT name, email FROM client WHERE id=%s", (r[1],))
+                ccur = get_dict_cursor(cconn)
+                ccur.execute("SELECT name, email FROM client WHERE id=%s", (client_id,))
                 crow = ccur.fetchone()
                 if crow:
-                    client_name, client_email = crow[0], crow[1]
+                    if isinstance(crow, dict):
+                        client_name = crow.get("name")
+                        client_email = crow.get("email")
+                    else:
+                        client_name = crow[0]
+                        client_email = crow[1]
             except Exception:
                 pass
             finally:
@@ -589,17 +675,31 @@ def get_latest_hire_requests_for_freelancer(freelancer_id: int, limit: int = 20)
                     cconn.close()
                 except Exception:
                     pass
-            out.append({
-                "request_id": r[0],
-                "client_id": r[1],
-                "client_name": client_name,
-                "client_email": client_email,
-                "job_title": r[2],
-                "proposed_budget": r[3],
-                "note": r[4],
-                "status": r[5],
-                "created_at": r[6],
-            })
+            
+            if isinstance(r, dict):
+                out.append({
+                    "request_id": r.get("id"),
+                    "client_id": client_id,
+                    "client_name": client_name,
+                    "client_email": client_email,
+                    "job_title": r.get("job_title"),
+                    "proposed_budget": r.get("proposed_budget"),
+                    "note": r.get("note"),
+                    "status": r.get("status"),
+                    "created_at": r.get("created_at"),
+                })
+            else:
+                out.append({
+                    "request_id": r[0],
+                    "client_id": client_id,
+                    "client_name": client_name,
+                    "client_email": client_email,
+                    "job_title": r[2],
+                    "proposed_budget": r[3],
+                    "note": r[4],
+                    "status": r[5],
+                    "created_at": r[6],
+                })
         return out
     except Exception:
         return []
@@ -614,25 +714,34 @@ def get_latest_messages_for_client(client_id: int, limit: int = 50):
         return []
     conn = freelancer_db()
     try:
-        cur = conn.cursor()
+        cur = get_dict_cursor(conn)
         cur.execute("""
             SELECT sender_role, sender_id, receiver_id, text, timestamp
             FROM message
-            WHERE (sender_role='client' AND sender_id=?)
-               OR (sender_role='freelancer' AND receiver_id=?)
+            WHERE (sender_role='client' AND sender_id=%s)
+               OR (sender_role='freelancer' AND receiver_id=%s)
             ORDER BY timestamp DESC
-            LIMIT ?
+            LIMIT %s
         """, (cid, cid, int(limit)))
         rows = cur.fetchall()
         out = []
         for r in rows:
-            out.append({
-                "sender_role": r[0],
-                "sender_id": r[1],
-                "receiver_id": r[2],
-                "text": r[3],
-                "timestamp": r[4],
-            })
+            if isinstance(r, dict):
+                out.append({
+                    "sender_role": r.get("sender_role"),
+                    "sender_id": r.get("sender_id"),
+                    "receiver_id": r.get("receiver_id"),
+                    "text": r.get("text"),
+                    "timestamp": r.get("timestamp"),
+                })
+            else:
+                out.append({
+                    "sender_role": r[0],
+                    "sender_id": r[1],
+                    "receiver_id": r[2],
+                    "text": r[3],
+                    "timestamp": r[4],
+                })
         return out
     except Exception:
         return []
@@ -647,25 +756,34 @@ def get_latest_messages_for_freelancer(freelancer_id: int, limit: int = 50):
         return []
     conn = freelancer_db()
     try:
-        cur = conn.cursor()
+        cur = get_dict_cursor(conn)
         cur.execute("""
             SELECT sender_role, sender_id, receiver_id, text, timestamp
             FROM message
-            WHERE (sender_role='freelancer' AND sender_id=?)
-               OR (sender_role='client' AND receiver_id=?)
+            WHERE (sender_role='freelancer' AND sender_id=%s)
+               OR (sender_role='client' AND receiver_id=%s)
             ORDER BY timestamp DESC
-            LIMIT ?
+            LIMIT %s
         """, (fid, fid, int(limit)))
         rows = cur.fetchall()
         out = []
         for r in rows:
-            out.append({
-                "sender_role": r[0],
-                "sender_id": r[1],
-                "receiver_id": r[2],
-                "text": r[3],
-                "timestamp": r[4],
-            })
+            if isinstance(r, dict):
+                out.append({
+                    "sender_role": r.get("sender_role"),
+                    "sender_id": r.get("sender_id"),
+                    "receiver_id": r.get("receiver_id"),
+                    "text": r.get("text"),
+                    "timestamp": r.get("timestamp"),
+                })
+            else:
+                out.append({
+                    "sender_role": r[0],
+                    "sender_id": r[1],
+                    "receiver_id": r[2],
+                    "text": r[3],
+                    "timestamp": r[4],
+                })
         return out
     except Exception:
         return []
@@ -680,21 +798,27 @@ def get_latest_notifications_for_client(client_id: int, limit: int = 50):
         return []
     conn = client_db()
     try:
-        cur = conn.cursor()
+        cur = get_dict_cursor(conn)
         cur.execute("""
             SELECT message, created_at
             FROM notification
-            WHERE client_id=?
+            WHERE client_id=%s
             ORDER BY created_at DESC
-            LIMIT ?
+            LIMIT %s
         """, (cid, int(limit)))
         rows = cur.fetchall()
         out = []
         for r in rows:
-            out.append({
-                "message": r[0],
-                "created_at": r[1],
-            })
+            if isinstance(r, dict):
+                out.append({
+                    "message": r.get("message"),
+                    "created_at": r.get("created_at"),
+                })
+            else:
+                out.append({
+                    "message": r[0],
+                    "created_at": r[1],
+                })
         return out
     except Exception:
         return []
@@ -709,29 +833,43 @@ def get_client_profile(client_id: int):
         return None
     conn = client_db()
     try:
-        cur = conn.cursor()
+        cur = get_dict_cursor(conn)
         cur.execute("""
             SELECT c.id, c.name, c.email, c.profile_image,
                    p.phone, p.location, p.bio, p.pincode, p.latitude, p.longitude
             FROM client c
             LEFT JOIN client_profile p ON p.client_id = c.id
-            WHERE c.id=?
+            WHERE c.id=%s
         """, (cid,))
         r = cur.fetchone()
         if not r:
             return None
-        return {
-            "id": r[0],
-            "name": r[1],
-            "email": r[2],
-            "profile_image": r[3],
-            "phone": r[4],
-            "location": r[5],
-            "bio": r[6],
-            "pincode": r[7],
-            "latitude": r[8],
-            "longitude": r[9],
-        }
+        if isinstance(r, dict):
+            return {
+                "id": r.get("id"),
+                "name": r.get("name"),
+                "email": r.get("email"),
+                "profile_image": r.get("profile_image"),
+                "phone": r.get("phone"),
+                "location": r.get("location"),
+                "bio": r.get("bio"),
+                "pincode": r.get("pincode"),
+                "latitude": r.get("latitude"),
+                "longitude": r.get("longitude"),
+            }
+        else:
+            return {
+                "id": r[0],
+                "name": r[1],
+                "email": r[2],
+                "profile_image": r[3],
+                "phone": r[4],
+                "location": r[5],
+                "bio": r[6],
+                "pincode": r[7],
+                "latitude": r[8],
+                "longitude": r[9],
+            }
     except Exception:
         return None
     finally:
@@ -747,15 +885,17 @@ def get_completed_project_count(freelancer_id: int):
     
     conn = freelancer_db()
     try:
-        cur = conn.cursor()
+        cur = get_dict_cursor(conn)
         cur.execute("""
             SELECT COUNT(*)
             FROM hire_request
-            WHERE freelancer_id = ?
+            WHERE freelancer_id = %s
             AND status = 'COMPLETED'
         """, (fid,))
         result = cur.fetchone()
-        return result[0] if result and result[0] is not None else 0
+        if result:
+            return result.get("count", result[0] if not isinstance(result, dict) else 0)
+        return 0
     except Exception:
         return 0
     finally:
@@ -769,14 +909,14 @@ def get_freelancer_profile(freelancer_id: int):
         return None
     conn = freelancer_db()
     try:
-        cur = conn.cursor()
+        cur = get_dict_cursor(conn)
         cur.execute("""
             SELECT f.id, f.name, f.email, f.profile_image,
                    p.title, p.skills, p.experience, p.min_budget, p.max_budget,
                    p.rating, p.total_projects, p.bio, p.category, p.location, p.pincode, p.latitude, p.longitude, COALESCE(p.tags,''), COALESCE(p.availability_status,'AVAILABLE')
             FROM freelancer f
             LEFT JOIN freelancer_profile p ON p.freelancer_id = f.id
-            WHERE f.id=?
+            WHERE f.id=%s
         """, (fid,))
         r = cur.fetchone()
         if not r:
@@ -786,7 +926,11 @@ def get_freelancer_profile(freelancer_id: int):
         completed_projects = get_completed_project_count(fid)
         
         # Format experience from decimal to years and months
-        experience_decimal = r[6] or 0
+        if isinstance(r, dict):
+            experience_decimal = r.get("experience", 0) or 0
+        else:
+            experience_decimal = r[6] or 0
+            
         years = int(experience_decimal)
         months = round((experience_decimal - years) * 12)
         
@@ -805,29 +949,54 @@ def get_freelancer_profile(freelancer_id: int):
         else:
             experience_str = f"{years} years {months} months"
         
-        return {
-            "id": r[0],
-            "name": r[1],
-            "email": r[2],
-            "profile_image": r[3],
-            "title": r[4],
-            "skills": r[5],
-            "experience": experience_decimal,  # Keep decimal for backward compatibility
-            "experience_formatted": experience_str,  # New formatted string
-            "min_budget": r[7],
-            "max_budget": r[8],
-            "rating": r[9],
-            "total_projects": r[10],
-            "projects_completed": completed_projects,  # New dynamic count
-            "bio": r[11],
-            "category": r[12],
-            "location": r[13],
-            "pincode": r[14],
-            "latitude": r[15],
-            "longitude": r[16],
-            "tags": r[17],
-            "availability_status": r[18],  # New availability status field
-        }
+        if isinstance(r, dict):
+            return {
+                "id": r.get("id"),
+                "name": r.get("name"),
+                "email": r.get("email"),
+                "profile_image": r.get("profile_image"),
+                "title": r.get("title"),
+                "skills": r.get("skills"),
+                "experience": experience_decimal,
+                "experience_formatted": experience_str,
+                "min_budget": r.get("min_budget"),
+                "max_budget": r.get("max_budget"),
+                "rating": r.get("rating"),
+                "total_projects": r.get("total_projects"),
+                "projects_completed": completed_projects,
+                "bio": r.get("bio"),
+                "category": r.get("category"),
+                "location": r.get("location"),
+                "pincode": r.get("pincode"),
+                "latitude": r.get("latitude"),
+                "longitude": r.get("longitude"),
+                "tags": r.get("tags"),
+                "availability_status": r.get("availability_status", "AVAILABLE"),
+            }
+        else:
+            return {
+                "id": r[0],
+                "name": r[1],
+                "email": r[2],
+                "profile_image": r[3],
+                "title": r[4],
+                "skills": r[5],
+                "experience": experience_decimal,
+                "experience_formatted": experience_str,
+                "min_budget": r[7],
+                "max_budget": r[8],
+                "rating": r[9],
+                "total_projects": r[10],
+                "projects_completed": completed_projects,
+                "bio": r[11],
+                "category": r[12],
+                "location": r[13],
+                "pincode": r[14],
+                "latitude": r[15],
+                "longitude": r[16],
+                "tags": r[17],
+                "availability_status": r[18],
+            }
     except Exception:
         return None
     finally:
@@ -847,26 +1016,26 @@ def get_freelancer_verification(freelancer_id: int):
     
     conn = freelancer_db()
     try:
-        cur = conn.cursor()
+        cur = get_dict_cursor(conn)
         cur.execute("""
             SELECT id, freelancer_id, government_id_path, pan_card_path, artist_proof_path,
                    status, submitted_at, reviewed_at, rejection_reason
             FROM freelancer_verification
-            WHERE freelancer_id=?
+            WHERE freelancer_id=%s
         """, (fid,))
         r = cur.fetchone()
         if not r:
             return None
         return {
-            "id": r[0],
-            "freelancer_id": r[1],
-            "government_id_path": r[2],
-            "pan_card_path": r[3],
-            "artist_proof_path": r[4],
-            "status": r[5],
-            "submitted_at": r[6],
-            "reviewed_at": r[7],
-            "rejection_reason": r[8],
+            "id": r.get("id", r[0]) if isinstance(r, dict) else r[0],
+            "freelancer_id": r.get("freelancer_id", r[1]) if isinstance(r, dict) else r[1],
+            "government_id_path": r.get("government_id_path", r[2]) if isinstance(r, dict) else r[2],
+            "pan_card_path": r.get("pan_card_path", r[3]) if isinstance(r, dict) else r[3],
+            "artist_proof_path": r.get("artist_proof_path", r[4]) if isinstance(r, dict) else r[4],
+            "status": r.get("status", r[5]) if isinstance(r, dict) else r[5],
+            "submitted_at": r.get("submitted_at", r[6]) if isinstance(r, dict) else r[6],
+            "reviewed_at": r.get("reviewed_at", r[7]) if isinstance(r, dict) else r[7],
+            "rejection_reason": r.get("rejection_reason", r[8]) if isinstance(r, dict) else r[8],
         }
     except Exception:
         return None
@@ -883,7 +1052,7 @@ def update_freelancer_verification(freelancer_id: int, government_id_path: str, 
     
     conn = freelancer_db()
     try:
-        cur = conn.cursor()
+        cur = get_dict_cursor(conn)
         import time
         current_time = int(time.time())
         
@@ -927,11 +1096,11 @@ def get_freelancer_plan(freelancer_id: int):
     
     conn = freelancer_db()
     try:
-        cur = conn.cursor()
+        cur = get_dict_cursor(conn)
         cur.execute("""
             SELECT plan_name
             FROM freelancer_subscription
-            WHERE freelancer_id=?
+            WHERE freelancer_id=%s
         """, (fid,))
         result = cur.fetchone()
         
@@ -963,12 +1132,12 @@ def get_freelancer_plan(freelancer_id: int):
             cur.execute("""
                 UPDATE freelancer_subscription 
                 SET plan_name='BASIC'
-                WHERE freelancer_id=?
+                WHERE freelancer_id=%s
             """, (fid,))
             cur.execute("""
                 UPDATE freelancer_profile 
                 SET current_plan='BASIC'
-                WHERE freelancer_id=?
+                WHERE freelancer_id=%s
             """, (fid,))
             conn.commit()
             return "BASIC"
@@ -996,11 +1165,11 @@ def get_freelancer_subscription(freelancer_id: int):
     
     conn = freelancer_db()
     try:
-        cur = conn.cursor()
+        cur = get_dict_cursor(conn)
         cur.execute("""
             SELECT id, freelancer_id, plan_name, start_date, end_date, status
             FROM freelancer_subscription
-            WHERE freelancer_id=?
+            WHERE freelancer_id=%s
         """, (fid,))
         r = cur.fetchone()
         if not r:
@@ -1014,7 +1183,7 @@ def get_freelancer_subscription(freelancer_id: int):
                 "status": "ACTIVE"
             }
         
-        plan_name = r[2]
+        plan_name = r.get("plan_name", r[2]) if isinstance(r, dict) else r[2]
         # Migrate old plans
         if plan_name == "FREE":
             plan_name = "BASIC"
@@ -1022,12 +1191,12 @@ def get_freelancer_subscription(freelancer_id: int):
             plan_name = "PREMIUM"
         
         return {
-            "id": r[0],
-            "freelancer_id": r[1],
+            "id": r.get("id", r[0]) if isinstance(r, dict) else r[0],
+            "freelancer_id": r.get("freelancer_id", r[1]) if isinstance(r, dict) else r[1],
             "plan_name": plan_name,
-            "start_date": r[3],
-            "end_date": r[4],
-            "status": r[5],
+            "start_date": r.get("start_date", r[3]) if isinstance(r, dict) else r[3],
+            "end_date": r.get("end_date", r[4]) if isinstance(r, dict) else r[4],
+            "status": r.get("status", r[5]) if isinstance(r, dict) else r[5],
         }
     except Exception:
         return None
@@ -1044,7 +1213,7 @@ def update_client_kyc(client_id: int, government_id_path: str, pan_card_path: st
     
     conn = client_db()
     try:
-        cur = conn.cursor()
+        cur = get_dict_cursor(conn)
         import time
         current_time = int(time.time())
         
@@ -1084,25 +1253,25 @@ def get_client_kyc(client_id: int):
     
     conn = client_db()
     try:
-        cur = conn.cursor()
+        cur = get_dict_cursor(conn)
         cur.execute("""
             SELECT id, client_id, government_id_path, pan_card_path,
                    status, submitted_at, reviewed_at, reviewed_by
             FROM client_kyc
-            WHERE client_id=?
+            WHERE client_id=%s
         """, (cid,))
         r = cur.fetchone()
         if not r:
             return None
         return {
-            "id": r[0],
-            "client_id": r[1],
-            "government_id_path": r[2],
-            "pan_card_path": r[3],
-            "status": r[4],
-            "submitted_at": r[5],
-            "reviewed_at": r[6],
-            "reviewed_by": r[7],
+            "id": r.get("id", r[0]) if isinstance(r, dict) else r[0],
+            "client_id": r.get("client_id", r[1]) if isinstance(r, dict) else r[1],
+            "government_id_path": r.get("government_id_path", r[2]) if isinstance(r, dict) else r[2],
+            "pan_card_path": r.get("pan_card_path", r[3]) if isinstance(r, dict) else r[3],
+            "status": r.get("status", r[4]) if isinstance(r, dict) else r[4],
+            "submitted_at": r.get("submitted_at", r[5]) if isinstance(r, dict) else r[5],
+            "reviewed_at": r.get("reviewed_at", r[6]) if isinstance(r, dict) else r[6],
+            "reviewed_by": r.get("reviewed_by", r[7]) if isinstance(r, dict) else r[7],
         }
     except Exception:
         return None
@@ -1123,14 +1292,14 @@ def update_client_kyc_review(client_id: int, status: str, reviewed_by: int):
     
     conn = client_db()
     try:
-        cur = conn.cursor()
+        cur = get_dict_cursor(conn)
         import time
         current_time = int(time.time())
         
         cur.execute("""
             UPDATE client_kyc 
-            SET status=?, reviewed_at=?, reviewed_by=?
-            WHERE client_id=?
+            SET status=%s, reviewed_at=%s, reviewed_by=%s
+            WHERE client_id=%s
         """, (status, current_time, reviewer_id, cid))
         
         conn.commit()
@@ -1145,7 +1314,7 @@ def get_pending_client_kyc():
     """Get all pending client KYC submissions"""
     conn = client_db()
     try:
-        cur = conn.cursor()
+        cur = get_dict_cursor(conn)
         cur.execute("""
             SELECT ck.id, ck.client_id, ck.government_id_path, ck.pan_card_path,
                    ck.status, ck.submitted_at, c.name, c.email
@@ -1183,7 +1352,7 @@ def update_freelancer_subscription(freelancer_id: int, plan_name: str, days: int
     
     conn = freelancer_db()
     try:
-        cur = conn.cursor()
+        cur = get_dict_cursor(conn)
         import time
         current_time = int(time.time())
         end_time = current_time + (days * 24 * 60 * 60)
@@ -1239,11 +1408,11 @@ def get_freelancer_job_applies(freelancer_id: int):
     
     conn = freelancer_db()
     try:
-        cur = conn.cursor()
+        cur = get_dict_cursor(conn)
         cur.execute("""
             SELECT current_plan, job_applies_used, job_applies_reset_date
             FROM freelancer_profile
-            WHERE freelancer_id=?
+            WHERE freelancer_id=%s
         """, (fid,))
         r = cur.fetchone()
         if not r:
@@ -1260,8 +1429,8 @@ def get_freelancer_job_applies(freelancer_id: int):
             applies_used = 0
             cur.execute("""
                 UPDATE freelancer_profile 
-                SET job_applies_used=0, job_applies_reset_date=?
-                WHERE freelancer_id=?
+                SET job_applies_used=0, job_applies_reset_date=%s
+                WHERE freelancer_id=%s
             """, (current_time + (30 * 24 * 60 * 60), fid))
             conn.commit()
         
@@ -1292,11 +1461,11 @@ def increment_job_applies(freelancer_id: int):
     
     conn = freelancer_db()
     try:
-        cur = conn.cursor()
+        cur = get_dict_cursor(conn)
         cur.execute("""
             UPDATE freelancer_profile 
             SET job_applies_used = job_applies_used + 1
-            WHERE freelancer_id=?
+            WHERE freelancer_id=%s
         """, (fid,))
         conn.commit()
         return True
@@ -1310,7 +1479,7 @@ def check_subscription_expiry():
     """Check and update expired subscriptions"""
     conn = freelancer_db()
     try:
-        cur = conn.cursor()
+        cur = get_dict_cursor(conn)
         import time
         current_time = int(time.time())
         
@@ -1318,7 +1487,7 @@ def check_subscription_expiry():
         cur.execute("""
             SELECT freelancer_id 
             FROM freelancer_subscription 
-            WHERE end_date < ? AND plan_name != 'BASIC'
+            WHERE end_date < %s AND plan_name != 'BASIC'
         """, (current_time,))
         expired = cur.fetchall()
         
@@ -1328,14 +1497,14 @@ def check_subscription_expiry():
             cur.execute("""
                 UPDATE freelancer_subscription 
                 SET plan_name='BASIC', status='ACTIVE', start_date=NULL, end_date=NULL
-                WHERE freelancer_id=?
+                WHERE freelancer_id=%s
             """, (freelancer_id,))
             
             # Update profile
             cur.execute("""
                 UPDATE freelancer_profile 
                 SET current_plan='BASIC', job_applies_used=0
-                WHERE freelancer_id=?
+                WHERE freelancer_id=%s
             """, (freelancer_id,))
         
         conn.commit()

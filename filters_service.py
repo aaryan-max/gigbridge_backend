@@ -1,13 +1,12 @@
-import sqlite3
 import time
+from postgres_config import get_postgres_connection, get_dict_cursor
 
 def _parse_bool(value):
     return str(value or "").strip().lower() in ("1", "true", "yes", "on")
 
 def fetch_filtered_freelancers(top_rated=None, category=None, subscribed=None, verified_only=None):
-    conn = sqlite3.connect("freelancer.db")
-    conn.row_factory = sqlite3.Row
-    cur = conn.cursor()
+    conn = get_postgres_connection()
+    cur = get_dict_cursor(conn)
     sql = """
         SELECT
             f.id,
@@ -31,13 +30,13 @@ def fetch_filtered_freelancers(top_rated=None, category=None, subscribed=None, v
     """
     params = []
     if category:
-        sql += " AND LOWER(fp.category) = LOWER(?)"
+        sql += " AND LOWER(fp.category) = LOWER(%s)"
         params.append(str(category).strip())
     if _parse_bool(verified_only):
         sql += " AND COALESCE(fp.is_verified,0) = 1"
     if _parse_bool(subscribed):
         now = int(time.time())
-        sql += " AND COALESCE(fs.plan_name,'BASIC') IN ('PREMIUM','PRO') AND COALESCE(fs.status,'ACTIVE')='ACTIVE' AND (fs.end_date IS NULL OR fs.end_date > ?)"
+        sql += " AND COALESCE(fs.plan_name,'BASIC') IN ('PREMIUM','PRO') AND COALESCE(fs.status,'ACTIVE')='ACTIVE' AND (fs.end_date IS NULL OR fs.end_date > %s)"
         params.append(now)
     if _parse_bool(top_rated):
         sql += " ORDER BY rating DESC, f.id DESC"
@@ -49,7 +48,7 @@ def fetch_filtered_freelancers(top_rated=None, category=None, subscribed=None, v
     out = []
     for r in rows:
         out.append({
-            "freelancer_id": r["id"],
+            "freelancer_id": r.get("id"),
             "name": r["name"],
             "title": r["title"],
             "skills": r["skills"],

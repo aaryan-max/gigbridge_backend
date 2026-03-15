@@ -1,5 +1,7 @@
 # categories.py (FINAL CATEGORY LIST)
-VALID_CATEGORIES = [
+
+# Reusable constant for freelancer profile validation and CLI display
+ALLOWED_FREELANCER_CATEGORIES = [
     "Photographer",
     "Videographer",
     "DJ",
@@ -17,7 +19,8 @@ VALID_CATEGORIES = [
     "Event Organizer"
 ]
 
-# Legacy alias for backward compatibility
+# Legacy aliases for backward compatibility
+VALID_CATEGORIES = ALLOWED_FREELANCER_CATEGORIES
 CATEGORIES = VALID_CATEGORIES
 
 def normalize(text):
@@ -30,4 +33,4 @@ def is_valid_category(cat):
 
 def get_all_categories():
     """Returns the final list of all valid categories"""
-    return VALID_CATEGORIES.copy()
+    return ALLOWED_FREELANCER_CATEGORIES.copy()

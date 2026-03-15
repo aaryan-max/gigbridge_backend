@@ -1,6 +1,5 @@
 import requests
 import time
-import sqlite3
 from datetime import datetime
 import webbrowser
 import uuid
@@ -712,14 +711,11 @@ def open_chat_with_freelancer(freelancer_id):
             print("❌ Failed to send message")
 
 def open_chat_with_client(client_id):
-    # Get client name
+    # Get client name via API
     try:
-        conn = sqlite3.connect("client.db")
-        cur = conn.cursor()
-        cur.execute("SELECT name FROM client WHERE id=?", (client_id,))
-        row = cur.fetchone()
-        client_name = row[0] if row else "Client"
-        conn.close()
+        res = requests.get(f"{BASE_URL}/clients/{client_id}")
+        client_data = res.json()
+        client_name = client_data.get("name", "Client")
     except:
         client_name = "Client"
     
@@ -822,24 +818,25 @@ def view_freelancer_details(fid):
         print("❌", data.get("msg"))
         return
 
+    # Safe dictionary access
     print("\n--- FREELANCER DETAILS ---")
-    print("ID:", data["freelancer_id"])
-    print("Name:", data["name"])
-    print("Email:", data["email"])
-    print("Category:", data["category"])
-    print("Title:", data["title"])
-    print("Skills:", data["skills"])
+    print("ID:", data.get("freelancer_id", fid))
+    print("Name:", data.get("name", "N/A"))
+    print("Email:", data.get("email", "N/A"))
+    print("Category:", data.get("category", "N/A"))
+    print("Title:", data.get("title", "N/A"))
+    print("Skills:", data.get("skills", "N/A"))
     
     # Display formatted experience if available, otherwise show decimal
     if data.get("experience_formatted"):
         print("Experience:", data["experience_formatted"])
     else:
-        print("Experience:", data["experience"])
+        print("Experience:", data.get("experience", "N/A"))
     
-    print("Min Budget:", data["min_budget"])
-    print("Max Budget:", data["max_budget"])
-    print("Rating:", data["rating"])
-    print("Bio:", data["bio"])
+    print("Min Budget:", data.get("min_budget", "N/A"))
+    print("Max Budget:", data.get("max_budget", "N/A"))
+    print("Rating:", data.get("rating", "N/A"))
+    print("Bio:", data.get("bio", "N/A"))
     
     # Display completed projects count if available
     if data.get("projects_completed") is not None:
@@ -1190,7 +1187,7 @@ def client_flow():
     while True:
         print("\n--- CLIENT DASHBOARD ---")
         print("1. Create/Update")
-        print("2. View All");
+        print("2. View All")
         print("3. Search")
         print("4. View My Jobs")
         print("5. Rate Freelancers")
@@ -1199,23 +1196,23 @@ def client_flow():
         print("8. Messages")
         print("9. Job Request Status")
         print("10. Recommended Freelancers (AI)")
-        print("11. Check Incoming Calls ")
-        print("0. Exit")
-        print("12. Logout")
-        print("13. Post Project")
-        print("14. My Projects")
-        print("15. View Applicants")
-        print("16. Accept Applicant")
-        print("17. Upload Verification Documents")
-        print("18. Check Verification Status")
+        print("11. Check Incoming Calls")
+        print("12. Post Project")
+        print("13. My Projects")
+        print("14. View Applicants")
+        print("15. Accept Applicant")
+        print("16. Upload Verification Documents")
+        print("17. Check Verification Status")
+        print("18. Logout")
+        print("19. Exit")
 
         choice = input("Choose: ")
         
-        if choice == "0":
+        if choice == "19":
             print("👋 Exiting GigBridge CLI")
             return
         
-        if choice == "12":
+        if choice == "18":
             current_client_id = None
             print("✅ Logged out successfully")
             return
@@ -1253,7 +1250,9 @@ def client_flow():
                 print("❌ No freelancers found")
                 continue
 
-            for f in freelancers:
+            current_index = 0
+            while current_index < len(freelancers):
+                f = freelancers[current_index]
                 print("\n--- Freelancer ---")
                 print("ID:", f["freelancer_id"])
                 print("Name:", f["name"])
@@ -1262,12 +1261,15 @@ def client_flow():
                 print("Budget:", f["budget_range"])
                 print("Rating:", f["rating"])
                 print("Status:", f["availability_status"])
+                print(f"Showing {current_index + 1} of {len(freelancers)}")
 
                 print("1. View Details")
                 print("2. Message")
                 print("3. Hire")
                 print("4. Save Freelancer")
                 print("5. Next")
+                print("6. Previous")
+                print("0. Back to Dashboard")
 
                 action = input("Choose: ")
                 if action == "1":
@@ -1282,6 +1284,16 @@ def client_flow():
                         "freelancer_id": f["freelancer_id"]
                     })
                     print(res.json())
+                elif action == "5":
+                    current_index += 1
+                    if current_index >= len(freelancers):
+                        current_index = 0  # Wrap around to beginning
+                elif action == "6":
+                    current_index -= 1
+                    if current_index < 0:
+                        current_index = len(freelancers) - 1  # Wrap around to end
+                elif action == "0":
+                    break
 
         elif choice == "3":
             category = input("Category (e.g., Dancer, Singer, Photographer): ").strip()
@@ -1314,7 +1326,9 @@ def client_flow():
                 print("❌ No freelancers found")
                 continue
 
-            for f in freelancers:
+            current_index = 0
+            while current_index < len(freelancers):
+                f = freelancers[current_index]
                 print("\n--- Freelancer ---")
                 print("ID:", f["freelancer_id"])
                 print("Name:", f["name"])
@@ -1323,12 +1337,15 @@ def client_flow():
                 print("Budget:", f["budget_range"])
                 print("Rating:", f["rating"])
                 print("Status:", f["availability_status"])
+                print(f"Showing {current_index + 1} of {len(freelancers)}")
 
                 print("1. View Details")
                 print("2. Message")
                 print("3. Hire")
                 print("4. Save Freelancer")
                 print("5. Next")
+                print("6. Previous")
+                print("0. Back to Dashboard")
 
                 action = input("Choose: ")
                 if action == "1":
@@ -1343,6 +1360,16 @@ def client_flow():
                         "freelancer_id": f["freelancer_id"]
                     })
                     print(res.json())
+                elif action == "5":
+                    current_index += 1
+                    if current_index >= len(freelancers):
+                        current_index = 0  # Wrap around to beginning
+                elif action == "6":
+                    current_index -= 1
+                    if current_index < 0:
+                        current_index = len(freelancers) - 1  # Wrap around to end
+                elif action == "0":
+                    break
 
         elif choice == "4":
             res = requests.get(f"{BASE_URL}/client/jobs", params={
@@ -1406,7 +1433,7 @@ def client_flow():
             except Exception as e:
                 print("❌ Error fetching jobs:", str(e))
 
-        elif choice == "13":
+        elif choice == "12":
             # Post Project
             title = input("Project Title: ").strip()
             description = input("Description: ").strip()
@@ -1433,7 +1460,7 @@ def client_flow():
             })
             print(res.json())
 
-        elif choice == "14":
+        elif choice == "13":
             # My Projects
             res = requests.get(f"{BASE_URL}/client/projects", params={"client_id": current_client_id})
             try:
@@ -1447,7 +1474,7 @@ def client_flow():
             except Exception as e:
                 print("❌ Error:", str(e))
 
-        elif choice == "15":
+        elif choice == "14":
             # View Applicants
             pid = input("Project ID: ").strip()
             res = requests.get(f"{BASE_URL}/client/projects/applicants", params={
@@ -1467,7 +1494,7 @@ def client_flow():
             except Exception as e:
                 print("❌ Error:", str(e))
 
-        elif choice == "16":
+        elif choice == "15":
             # Accept Applicant
             pid = input("Project ID: ").strip()
             aid = input("Application ID: ").strip()
@@ -1496,11 +1523,11 @@ def client_flow():
             except Exception as e:
                 print("❌ Error fetching saved freelancers:", str(e))
 
-        elif choice == "6":
+        elif choice == "7":
             res = requests.get(f"{BASE_URL}/client/notifications", params={
                 "client_id": current_client_id
             })
-            print("\n--- Notifications ---")
+            print("\n--- NOTIFICATIONS ---")
             try:
                 notifications = res.json()
                 if not notifications:
@@ -1509,67 +1536,24 @@ def client_flow():
                     for n in notifications:
                         print("*", n)
             except Exception as e:
-                print("❌ Error getting recommendations:", str(e))
-
-        elif choice == "7":
-            res = requests.get(f"{BASE_URL}/client/messages/threads", params={
-                "client_id": current_client_id
-            })
-            threads = res.json()
-            if not threads:
-                print("📭 No message threads found")
-            else:
-                print("\n--- MESSAGE THREADS ---")
-                for thread in threads:
-                    print(f"\nFreelancer: {thread['name']} (ID: {thread['freelancer_id']})")
-                    print("1. View Chat History")
-                    print("2. Send New Message")
-                    print("3. Voice Call 📞")
-                    print("4. Video Call 🎥")
-                    print("5. Next")
-                    msg_choice = input("Choose: ")
-                    
-                    if msg_choice == "1":
-                        # View chat history
-                        res_history = requests.get(f"{BASE_URL}/message/history", params={
-                            "client_id": current_client_id,
-                            "freelancer_id": thread['freelancer_id']
-                        })
-                        history = res_history.json()
-                        print("\n--- CHAT HISTORY ---")
-                        for msg in history:
-                            sender = "You" if msg['sender_role'] == 'client' else "Freelancer"
-                            print(f"{sender}: {msg['text']}")
-                    elif msg_choice == "2":
-                        # Send new message
-                        message = input("Enter your message: ")
-                        res_send = requests.post(f"{BASE_URL}/client/message/send", json={
-                            "client_id": current_client_id,
-                            "freelancer_id": thread['freelancer_id'],
-                            "text": message
-                        })
-                        print(res_send.json())
-                    elif msg_choice == "3":
-                        start_call("client", thread['freelancer_id'], "voice")
-                    elif msg_choice == "4":
-                        start_call("client", thread['freelancer_id'], "video")
+                print("❌ Error getting notifications:", str(e))
 
         elif choice == "8":
-            client_job_request_status_menu()
+            client_messages_menu()
 
         elif choice == "9":
-            client_ai_recommendations()
+            client_job_request_status_menu()
 
         elif choice == "10":
-            check_incoming_calls()
+            client_ai_recommendations()
 
         elif choice == "11":
-            break
+            check_incoming_calls()
 
-        elif choice == "17":
+        elif choice == "16":
             client_upload_verification()
 
-        elif choice == "18":
+        elif choice == "17":
             client_check_verification_status()
 
 # ---------- FREELANCER VERIFICATION ----------
@@ -2084,14 +2068,10 @@ def freelancer_flow():
 
         # 1️⃣ Create / Update Profile
         if choice == "1":
-            print("\nAllowed Categories (example):")
-            print("- Graphic Designer")
-            print("- Video Editor")
-            print("- Photographer")
-            print("- Singer")
-            print("- Dancer")
-            print("- Illustrator")
-            print("- Content Creator")
+            from categories import ALLOWED_FREELANCER_CATEGORIES
+            print("\nAllowed Categories:")
+            for cat in ALLOWED_FREELANCER_CATEGORIES:
+                print(f"- {cat}")
 
             try:
                 title = input("Title: ")
@@ -2108,6 +2088,10 @@ def freelancer_flow():
                 pincode = input("PIN Code (6 digits): ")
                 location = input("Location: ")
                 category = input("Category (choose from above): ")
+                from categories import is_valid_category
+                if not is_valid_category(category):
+                    print("Invalid category. Please choose from the allowed list.")
+                    continue
                 dob = get_valid_dob()
                 res = requests.post(f"{BASE_URL}/freelancer/profile", json={
                     "freelancer_id": current_freelancer_id,
@@ -2523,8 +2507,7 @@ def freelancer_flow():
         elif choice == "12":
             check_incoming_calls()
 
-        # 13️⃣ Verification Status
-        elif choice == "13":
+        elif choice == "17":
             freelancer_verification_status()
 
         # 14️⃣ Upload Verification Documents

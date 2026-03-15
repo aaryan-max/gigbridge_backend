@@ -1,13 +1,16 @@
 import os
 import json
 try:
-    import google.genai as genai
-except ImportError:
     import google.generativeai as genai
+except ImportError:
+    genai = None
 
-genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
-
-model = genai.GenerativeModel("gemini-1.5-flash")
+# Configure Gemini if available
+if genai:
+    genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
+    model = genai.GenerativeModel("gemini-1.5-flash")
+else:
+    model = None
 
 SYSTEM_PROMPT = """
 You are a query parser for a freelancer marketplace.
@@ -47,6 +50,11 @@ def parse_query(user_query: str) -> dict:
               Returns empty dict if parsing fails
     """
     try:
+        # Check if model is available
+        if not model:
+            print("Gemini model not available")
+            return {}
+            
         # Check if API key is available
         api_key = os.getenv("GEMINI_API_KEY")
         if not api_key:

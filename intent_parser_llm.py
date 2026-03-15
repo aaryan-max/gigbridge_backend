@@ -8,16 +8,19 @@ import json
 import re
 from typing import Dict, Optional, List
 try:
-    import google.genai as genai
-except ImportError:
     import google.generativeai as genai
+except ImportError:
+    genai = None
 
 # Import existing category validation
 from categories import get_all_categories, is_valid_category
 
-# Configure Gemini
-genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
-model = genai.GenerativeModel("gemini-1.5-flash")
+# Configure Gemini if available
+if genai:
+    genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
+    model = genai.GenerativeModel("gemini-1.5-flash")
+else:
+    model = None
 
 # Get valid categories from existing codebase
 VALID_CATEGORIES = get_all_categories()
@@ -125,6 +128,11 @@ class LLMIntentParser:
             return None
             
         try:
+            # Check if model is available
+            if not self.model:
+                print("Gemini model not available")
+                return None
+                
             # Check if API key is available
             api_key = os.getenv("GEMINI_API_KEY")
             if not api_key:

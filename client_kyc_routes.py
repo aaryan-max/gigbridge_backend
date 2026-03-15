@@ -1,10 +1,10 @@
 from flask import Blueprint, request, jsonify
-import sqlite3
 import os
 import time
 import secrets
 from werkzeug.utils import secure_filename
 from database import client_db, update_client_kyc, get_client_kyc
+from postgres_config import get_dict_cursor
 
 client_kyc_bp = Blueprint("client_kyc", __name__)
 
@@ -54,7 +54,7 @@ def client_kyc_upload():
     # Verify client exists
     conn = client_db()
     try:
-        cur = conn.cursor()
+        cur = get_dict_cursor(conn)
         cur.execute("SELECT id FROM client WHERE id=%s", (client_id_int,))
         r = cur.fetchone()
         if not r:

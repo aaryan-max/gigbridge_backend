@@ -2,6 +2,7 @@ flask
 requests
 werkzeug
 rapidfuzz
+razorpay
 numpy
 faiss-cpu
 sentence-transformers
