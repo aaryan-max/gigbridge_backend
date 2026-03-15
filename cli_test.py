@@ -909,95 +909,197 @@ def view_freelancer_details(fid):
 
 # ---------- CLIENT: HIRE ----------
 def hire_freelancer(fid):
-    job_title = input("Job Title: ")
-    budget = input("Proposed Budget: ")
-    note = input("Note (optional): ")
+    print(f"\n--- Hiring Freelancer ID: {fid} ---")
     
-    # Collect date/time slot information
-    print("\n--- Event Date & Time ---")
-    while True:
-        event_date = input("Enter Event Date (YYYY-MM-DD): ").strip()
-        start_time = input("Enter Start Time (HH:MM): ").strip()
-        end_time = input("Enter End Time (HH:MM): ").strip()
+    # Quick hire options
+    print("Hire Options:")
+    print("1. Quick Hire (Simple Contract)")
+    print("2. Custom Hire (Advanced Options)")
+    print("0. Cancel")
+    
+    hire_choice = input("Choose option (1-2): ").strip()
+    if hire_choice == "0":
+        print("❌ Hire cancelled")
+        return
+    elif hire_choice == "1":
+        # Quick hire - simplified process
+        job_title = input("Job Title: ")
+        budget = input("Proposed Budget: ")
+        note = input("Note (optional): ")
         
-        # Validate using booking service
-        try:
-            from booking_service import validate_hire_request_slot, format_time_slot_display
-            is_valid, error_msg = validate_hire_request_slot(
-                fid, event_date, start_time, end_time
-            )
-            if is_valid:
-                print(f"\nSelected Event Slot:")
-                print(format_time_slot_display(event_date, start_time, end_time))
+        # Event venue collection for quick hire
+        print("\n--- Event Venue ---")
+        print("1. Use my saved profile address")
+        print("2. Enter custom event venue")
+        venue_choice = input("Choose venue option (1-2): ").strip()
+        
+        if venue_choice == "1":
+            venue_source = "profile"
+            event_address = ""
+            event_city = ""
+            event_pincode = ""
+            event_landmark = ""
+        elif venue_choice == "2":
+            venue_source = "custom"
+            event_address = input("Event Address: ")
+            event_city = input("Event City: ")
+            event_pincode = input("Event Pincode: ")
+            event_landmark = input("Event Landmark (optional): ")
+        else:
+            print("❌ Invalid venue choice")
+            return
+        
+        # Default to FIXED contract for quick hire
+        hire_data = {
+            "client_id": current_client_id,
+            "freelancer_id": fid,
+            "job_title": job_title,
+            "proposed_budget": budget,
+            "note": note,
+            "contract_type": "FIXED",
+            "venue_source": venue_source,
+            "event_address": event_address,
+            "event_city": event_city,
+            "event_pincode": event_pincode,
+            "event_landmark": event_landmark
+        }
+        
+        print(f"\n--- Quick Hire Summary ---")
+        print(f"Freelancer ID: {fid}")
+        print(f"Job Title: {job_title}")
+        print(f"Budget: {budget}")
+        print(f"Contract Type: FIXED (Milestone Based)")
+        print(f"Venue: {event_address if venue_source == 'custom' else 'Saved Profile Address'}")
+        if venue_source == "custom":
+            print(f"Event City: {event_city}")
+            print(f"Event Pincode: {event_pincode}")
+        
+    elif hire_choice == "2":
+        # Custom hire - full options
+        job_title = input("Job Title: ")
+        budget = input("Proposed Budget: ")
+        note = input("Note (optional): ")
+        
+        # Collect date/time slot information
+        print("\n--- Event Date & Time ---")
+        while True:
+            event_date = input("Enter Event Date (YYYY-MM-DD): ").strip()
+            start_time = input("Enter Start Time (HH:MM): ").strip()
+            end_time = input("Enter End Time (HH:MM): ").strip()
+            
+            # Validate using booking service
+            try:
+                from booking_service import validate_hire_request_slot, format_time_slot_display
+                is_valid, error_msg = validate_hire_request_slot(
+                    fid, event_date, start_time, end_time
+                )
+                if is_valid:
+                    print(f"\nSelected Event Slot:")
+                    print(format_time_slot_display(event_date, start_time, end_time))
+                    break
+                else:
+                    print(f"❌ {error_msg}")
+                    print("Please try again.\n")
+            except ImportError:
+                print("⚠️  Booking validation not available, proceeding without validation")
                 break
-            else:
-                print(f"❌ {error_msg}")
-                print("Please try again.\n")
-        except ImportError:
-            print("⚠️  Booking validation not available, proceeding without validation")
-            break
-    
-    # Contract type selection
-    print("\n--- Contract Type ---")
-    print("1. FIXED (Milestone Based)")
-    print("2. HOURLY (Weekly Billing with Overtime)")
-    print("3. EVENT (Performance-Based with Overtime Clause)")
-    
-    while True:
-        contract_choice = input("Choose contract type (1-3): ")
-        if contract_choice in ["1", "2", "3"]:
-            break
-        print("❌ Invalid choice. Please enter 1, 2, or 3")
-    
-    contract_types = {"1": "FIXED", "2": "HOURLY", "3": "EVENT"}
-    contract_type = contract_types[contract_choice]
-    
-    # Prepare hire request data
-    hire_data = {
-        "client_id": current_client_id,
-        "freelancer_id": fid,
-        "job_title": job_title,
-        "proposed_budget": budget,
-        "note": note,
-        "contract_type": contract_type,
-        "event_date": event_date,
-        "start_time": start_time,
-        "end_time": end_time
-    }
-    
-    # Add contract-specific fields
-    if contract_type == "HOURLY":
-        hourly_rate = input("Hourly Rate: ")
-        weekly_limit = input("Weekly Hours Limit: ")
-        max_daily_hours = input("Max Daily Hours (default 8): ") or "8"
         
-        hire_data.update({
-            "contract_hourly_rate": float(hourly_rate),
-            "weekly_limit": float(weekly_limit),
-            "max_daily_hours": float(max_daily_hours)
-        })
+        # Event venue collection for custom hire
+        print("\n--- Event Venue ---")
+        print("1. Use my saved profile address")
+        print("2. Enter custom event venue")
+        venue_choice = input("Choose venue option (1-2): ").strip()
         
-    elif contract_type == "EVENT":
-        event_base_fee = input("Event Base Fee: ")
-        event_included_hours = input("Included Hours: ")
-        event_overtime_rate = input("Overtime Rate per Hour: ")
-        advance_paid = input("Advance Paid (0 if none): ") or "0"
+        if venue_choice == "1":
+            venue_source = "profile"
+            event_address = ""
+            event_city = ""
+            event_pincode = ""
+            event_landmark = ""
+        elif venue_choice == "2":
+            venue_source = "custom"
+            event_address = input("Event Address: ")
+            event_city = input("Event City: ")
+            event_pincode = input("Event Pincode: ")
+            event_landmark = input("Event Landmark (optional): ")
+        else:
+            print("❌ Invalid venue choice")
+            return
         
-        hire_data.update({
-            "event_base_fee": float(event_base_fee),
-            "event_included_hours": float(event_included_hours),
-            "event_overtime_rate": float(event_overtime_rate),
-            "advance_paid": float(advance_paid)
-        })
+        # Contract type selection
+        print("\n--- Contract Type ---")
+        print("1. FIXED (Milestone Based)")
+        print("2. HOURLY (Weekly Billing with Overtime)")
+        print("3. EVENT (Performance-Based with Overtime Clause)")
+        
+        while True:
+            contract_choice = input("Choose contract type (1-3): ")
+            if contract_choice in ["1", "2", "3"]:
+                break
+            print("❌ Invalid choice. Please enter 1, 2, or 3")
+        
+        contract_types = {"1": "FIXED", "2": "HOURLY", "3": "EVENT"}
+        contract_type = contract_types[contract_choice]
+        
+        # Prepare hire request data
+        hire_data = {
+            "client_id": current_client_id,
+            "freelancer_id": fid,
+            "job_title": job_title,
+            "proposed_budget": budget,
+            "note": note,
+            "contract_type": contract_type,
+            "event_date": event_date,
+            "start_time": start_time,
+            "end_time": end_time,
+            "venue_source": venue_source,
+            "event_address": event_address,
+            "event_city": event_city,
+            "event_pincode": event_pincode,
+            "event_landmark": event_landmark
+        }
+        
+        # Add contract-specific fields
+        if contract_type == "HOURLY":
+            hourly_rate = input("Hourly Rate: ")
+            weekly_limit = input("Weekly Hours Limit: ")
+            max_daily_hours = input("Max Daily Hours (default 8): ") or "8"
+            
+            hire_data.update({
+                "contract_hourly_rate": float(hourly_rate),
+                "weekly_limit": float(weekly_limit),
+                "max_daily_hours": float(max_daily_hours)
+            })
+            
+        elif contract_type == "EVENT":
+            event_base_fee = input("Event Base Fee: ")
+            event_included_hours = input("Included Hours: ")
+            event_overtime_rate = input("Overtime Rate per Hour: ")
+            advance_paid = input("Advance Paid (0 if none): ") or "0"
+            
+            hire_data.update({
+                "event_base_fee": float(event_base_fee),
+                "event_included_hours": float(event_included_hours),
+                "event_overtime_rate": float(event_overtime_rate),
+                "advance_paid": float(advance_paid)
+            })
 
-    # Confirmation step
-    print(f"\n--- Confirm Hire Request ---")
-    print(f"Freelancer ID: {fid}")
-    print(f"Job Title: {job_title}")
-    print(f"Budget: {budget}")
-    print(f"Event Date: {event_date}")
-    print(f"Time Slot: {start_time} - {end_time}")
-    print(f"Contract Type: {contract_type}")
+        # Confirmation step
+        print(f"\n--- Custom Hire Summary ---")
+        print(f"Freelancer ID: {fid}")
+        print(f"Job Title: {job_title}")
+        print(f"Budget: {budget}")
+        print(f"Event Date: {event_date}")
+        print(f"Time Slot: {start_time} - {end_time}")
+        print(f"Contract Type: {contract_type}")
+        print(f"Venue: {event_address if venue_source == 'custom' else 'Saved Profile Address'}")
+        if venue_source == "custom":
+            print(f"Event City: {event_city}")
+            print(f"Event Pincode: {event_pincode}")
+        
+    else:
+        print("❌ Invalid choice")
+        return
     
     confirm = input("\nConfirm Hire Request? (y/n): ").strip().lower()
     if confirm != 'y':
@@ -1012,8 +1114,23 @@ def hire_freelancer(fid):
         print(f"Freelancer ID: {fid}")
         print(f"Job Title: {job_title}")
         print(f"Budget: {budget}")
-        print(f"Event Date: {event_date}")
-        print(f"Time Slot: {start_time} - {end_time}")
+        
+        # Show venue information
+        venue_info = result.get("venue", {})
+        print(f"\n--- Event Venue ---")
+        print(f"Venue: {venue_info.get('event_address', 'Not specified')}")
+        if venue_info.get('event_city'):
+            print(f"City: {venue_info.get('event_city')}")
+        if venue_info.get('event_pincode'):
+            print(f"Pincode: {venue_info.get('event_pincode')}")
+        print(f"Source: {venue_info.get('venue_source', 'custom')}")
+        
+        # Show location compatibility check
+        location_check = result.get("location_check", {})
+        print(f"\n--- Location Compatibility ---")
+        print(f"Status: {'✅ Compatible' if location_check.get('location_ok') else '⚠️  May be far'}")
+        print(f"Note: {location_check.get('location_note', 'No location check performed')}")
+        
         print(f"Status: PENDING")
         print(f"Request ID: {result.get('request_id')}")
     else:
@@ -1256,13 +1373,27 @@ def client_flow():
                 print("\n--- Freelancer ---")
                 print("ID:", f["freelancer_id"])
                 print("Name:", f["name"])
-                print("Category:", f["category"])
-                print("Title:", f["title"])
-                print("Budget:", f["budget_range"])
-                print("Rating:", f["rating"])
-                print("Status:", f["availability_status"])
+                print("Category:", f.get("category", "Not specified"))
+                print("Title:", f.get("title", "Not specified"))
+                print("Budget Range:", f.get("budget_range", "Not specified"))
+                print("Rating:", f.get("rating", 0))
+                print("Status:", f.get("availability_status", "UNKNOWN"))
+                
+                # Additional hiring-relevant information
+                if f.get("experience"):
+                    print("Experience:", f["experience"], "years")
+                if f.get("skills"):
+                    print("Skills:", f["skills"])
+                if f.get("bio"):
+                    print("Bio:", f["bio"][:100] + "..." if len(f["bio"]) > 100 else f["bio"])
+                if f.get("subscription_plan"):
+                    print("Plan:", f["subscription_plan"])
+                if f.get("distance") and f["distance"] != 999999.0:
+                    print("Distance:", f"{f['distance']:.1f} km")
+                
                 print(f"Showing {current_index + 1} of {len(freelancers)}")
 
+                print("\n--- Actions ---")
                 print("1. View Details")
                 print("2. Message")
                 print("3. Hire")
@@ -1308,10 +1439,11 @@ def client_flow():
 
             params = {
                 "category": category,
-                "budget": budget,
-                "client_id": current_client_id
+                "budget": budget
             }
-            if specialization:
+            if current_client_id:
+                params["client_id"] = current_client_id
+            if specialization and specialization.strip() and specialization.lower() not in ["no", "none", ""]:
                 params["q"] = specialization
 
             res = requests.get(f"{BASE_URL}/freelancers/search", params=params)
@@ -1332,13 +1464,27 @@ def client_flow():
                 print("\n--- Freelancer ---")
                 print("ID:", f["freelancer_id"])
                 print("Name:", f["name"])
-                print("Category:", f["category"])
-                print("Title:", f["title"])
-                print("Budget:", f["budget_range"])
-                print("Rating:", f["rating"])
-                print("Status:", f["availability_status"])
+                print("Category:", f.get("category", "Not specified"))
+                print("Title:", f.get("title", "Not specified"))
+                print("Budget Range:", f.get("budget_range", "Not specified"))
+                print("Rating:", f.get("rating", 0))
+                print("Status:", f.get("availability_status", "UNKNOWN"))
+                
+                # Additional hiring-relevant information
+                if f.get("experience"):
+                    print("Experience:", f["experience"], "years")
+                if f.get("skills"):
+                    print("Skills:", f["skills"])
+                if f.get("bio"):
+                    print("Bio:", f["bio"][:100] + "..." if len(f["bio"]) > 100 else f["bio"])
+                if f.get("subscription_plan"):
+                    print("Plan:", f["subscription_plan"])
+                if f.get("distance") and f["distance"] != 999999.0:
+                    print("Distance:", f"{f['distance']:.1f} km")
+                
                 print(f"Showing {current_index + 1} of {len(freelancers)}")
 
+                print("\n--- Actions ---")
                 print("1. View Details")
                 print("2. Message")
                 print("3. Hire")

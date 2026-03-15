@@ -440,6 +440,13 @@ def create_tables():
     _try_add_column(cur, "hire_request", "completion_note TEXT")
     _try_add_column(cur, "hire_request", "completion_proof TEXT")
     _try_add_column(cur, "hire_request", "completed_at INTEGER")
+    
+    # Event venue fields for job-specific location
+    _try_add_column(cur, "hire_request", "event_address TEXT")
+    _try_add_column(cur, "hire_request", "event_city TEXT")
+    _try_add_column(cur, "hire_request", "event_pincode TEXT")
+    _try_add_column(cur, "hire_request", "event_landmark TEXT")
+    _try_add_column(cur, "hire_request", "venue_source TEXT DEFAULT 'custom'")
 
     # ==========================
     # PAYMENT RECORDS (Razorpay hire & subscription)

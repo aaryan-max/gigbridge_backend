@@ -25,6 +25,7 @@ from ai_chat import register_chat_routes
 from ai_chat_routes import register_ai_chat_routes
 
 from database import create_tables, rebuild_freelancer_search_index
+from venue_helper import prepare_venue_data, validate_venue_data, check_venue_freelancer_compatibility
 from settings import (
     FEATURE_HIDE_UNVERIFIED_FROM_SEARCH,
     FEATURE_BLOCK_DISABLED_USERS,
@@ -1103,7 +1104,7 @@ def freelancer_login():
 @app.route("/client/profile", methods=["POST"])
 def client_profile():
     d = get_json()
-    missing = require_fields(d, ["client_id", "phone", "location", "bio", "dob"])
+    missing = require_fields(d, ["client_id", "name", "phone", "location", "bio", "dob"])
     if missing:
         return jsonify({"success": False, "msg": "Missing fields"}), 400
     
@@ -1132,7 +1133,7 @@ def client_profile():
     conn = client_db()
     cur = get_dict_cursor(conn)
     cur.execute("""
-        INSERT INTO client_profile (client_id, phone, location, bio, pincode, latitude, longitude, dob)
+        INSERT INTO client_profile (client_id, name, phone, location, bio, pincode, latitude, longitude, dob)
         VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
         ON CONFLICT(client_id) DO UPDATE SET
         phone=excluded.phone,
@@ -1141,8 +1142,9 @@ def client_profile():
         pincode=excluded.pincode,
         latitude=excluded.latitude,
         longitude=excluded.longitude,
-        dob=excluded.dob
-    """, (d["client_id"], d["phone"], d["location"], d["bio"], pincode, lat, lon, d["dob"]))
+        dob=excluded.dob,
+        name=excluded.name
+    """, (d["client_id"], d["name"], d["phone"], d["location"], d["bio"], pincode, lat, lon, d["dob"]))
     conn.commit()
     conn.close()
 
@@ -1867,6 +1869,33 @@ def client_hire():
     start_time = d.get("start_time", "").strip()
     end_time = d.get("end_time", "").strip()
     
+    # Process venue data
+    venue_choice = d.get("venue_source", "custom")  # Default to custom for backward compatibility
+    custom_venue_data = {
+        "event_address": d.get("event_address", "").strip(),
+        "event_city": d.get("event_city", "").strip(),
+        "event_pincode": d.get("event_pincode", "").strip(),
+        "event_landmark": d.get("event_landmark", "").strip()
+    } if venue_choice == "custom" else None
+    
+    # Prepare venue data
+    venue_data, venue_error = prepare_venue_data(venue_choice, client_id, custom_venue_data)
+    if venue_error:
+        return jsonify({"success": False, "msg": venue_error}), 400
+    
+    # Validate venue data only for EVENT contracts
+    if contract_type == "EVENT":
+        is_valid, validation_error = validate_venue_data(venue_data)
+        if not is_valid:
+            return jsonify({"success": False, "msg": validation_error}), 400
+    
+    # Check location compatibility
+    location_ok, location_note = check_venue_freelancer_compatibility(
+        freelancer_id, 
+        venue_data.get("event_pincode"), 
+        venue_data.get("event_city")
+    )
+    
     # Validate date/time slot if provided
     if event_date or start_time or end_time:
         if not all([event_date, start_time, end_time]):
@@ -1915,27 +1944,29 @@ def client_hire():
     if contract_type == "FIXED":
         # Keep existing budget logic unchanged
         cur.execute("""
-            INSERT INTO hire_request (client_id, freelancer_id, job_title, proposed_budget, note, status, contract_type, created_at, event_date, start_time, end_time)
-            VALUES (%s, %s, %s, %s, %s, 'PENDING', %s, %s, %s, %s, %s)
+            INSERT INTO hire_request (client_id, freelancer_id, job_title, proposed_budget, note, status, contract_type, created_at, event_date, start_time, end_time, event_address, event_city, event_pincode, event_landmark, venue_source)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             RETURNING id
-        """, (client_id, freelancer_id, job_title, proposed_budget, note, contract_type, now_ts(), event_date, start_time, end_time))
+        """, (client_id, freelancer_id, job_title, proposed_budget, note, 'PENDING', contract_type, now_ts(), event_date, start_time, end_time, 
+               venue_data.get("event_address"), venue_data.get("event_city"), venue_data.get("event_pincode"), 
+               venue_data.get("event_landmark"), venue_data.get("venue_source")))
     elif contract_type == "HOURLY":
-        # Require hourly rate fields
-        if "contract_hourly_rate" not in d or "weekly_limit" not in d:
-            return jsonify({"success": False, "msg": "HOURLY contracts require contract_hourly_rate and weekly_limit"}), 400
+        # Require hourly rate field only
+        if "contract_hourly_rate" not in d:
+            return jsonify({"success": False, "msg": "HOURLY contracts require contract_hourly_rate"}), 400
         
         hourly_rate = float(d.get("contract_hourly_rate", 0))
-        weekly_limit = float(d.get("weekly_limit", 0))
-        max_daily_hours = float(d.get("max_daily_hours", 8))
         
-        if hourly_rate <= 0 or weekly_limit <= 0:
-            return jsonify({"success": False, "msg": "HOURLY contracts require positive rates and limits"}), 400
+        if hourly_rate <= 0:
+            return jsonify({"success": False, "msg": "HOURLY contracts require positive hourly rate"}), 400
         
         cur.execute("""
-            INSERT INTO hire_request (client_id, freelancer_id, job_title, proposed_budget, note, status, contract_type, contract_hourly_rate, contract_overtime_rate, weekly_limit, max_daily_hours, created_at, event_date, start_time, end_time)
-            VALUES (%s, %s, %s, %s, %s, 'PENDING', %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            INSERT INTO hire_request (client_id, freelancer_id, job_title, proposed_budget, note, status, contract_type, contract_hourly_rate, contract_overtime_rate, created_at, event_date, start_time, end_time, event_address, event_city, event_pincode, event_landmark, venue_source)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             RETURNING id
-        """, (client_id, freelancer_id, job_title, proposed_budget, note, contract_type, hourly_rate, hourly_rate * 1.5, weekly_limit, max_daily_hours, now_ts(), event_date, start_time, end_time))
+        """, (client_id, freelancer_id, job_title, proposed_budget, note, 'PENDING', contract_type, hourly_rate, hourly_rate * 1.5, now_ts(), event_date, start_time, end_time,
+               venue_data.get("event_address"), venue_data.get("event_city"), venue_data.get("event_pincode"), 
+               venue_data.get("event_landmark"), venue_data.get("venue_source")))
     elif contract_type == "EVENT":
         # Require event fields
         required_event_fields = ["event_base_fee", "event_included_hours", "event_overtime_rate"]
@@ -1952,10 +1983,12 @@ def client_hire():
             return jsonify({"success": False, "msg": "EVENT contracts require non-negative values"}), 400
         
         cur.execute("""
-            INSERT INTO hire_request (client_id, freelancer_id, job_title, proposed_budget, note, status, contract_type, event_base_fee, event_included_hours, event_overtime_rate, advance_paid, created_at, event_date, start_time, end_time)
-            VALUES (%s, %s, %s, %s, %s, 'PENDING', %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            INSERT INTO hire_request (client_id, freelancer_id, job_title, proposed_budget, note, status, contract_type, event_base_fee, event_included_hours, event_overtime_rate, advance_paid, created_at, event_date, start_time, end_time, event_address, event_city, event_pincode, event_landmark, venue_source)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             RETURNING id
-        """, (client_id, freelancer_id, job_title, proposed_budget, note, contract_type, event_base_fee, event_included_hours, event_overtime_rate, advance_paid, now_ts(), event_date, start_time, end_time))
+        """, (client_id, freelancer_id, job_title, proposed_budget, note, 'PENDING', contract_type, event_base_fee, event_included_hours, event_overtime_rate, advance_paid, now_ts(), event_date, start_time, end_time,
+               venue_data.get("event_address"), venue_data.get("event_city"), venue_data.get("event_pincode"), 
+               venue_data.get("event_landmark"), venue_data.get("venue_source")))
     else:
         return jsonify({"success": False, "msg": "Invalid contract type"}), 400
     req_row = cur.fetchone()
@@ -1975,7 +2008,24 @@ def client_hire():
     conn.commit()
     conn.close()
 
-    return jsonify({"success": True, "request_id": req_id})
+    # Prepare response with venue and location info
+    response_data = {
+        "success": True, 
+        "request_id": req_id,
+        "venue": {
+            "event_address": venue_data.get("event_address"),
+            "event_city": venue_data.get("event_city"),
+            "event_pincode": venue_data.get("event_pincode"),
+            "event_landmark": venue_data.get("event_landmark"),
+            "venue_source": venue_data.get("venue_source")
+        },
+        "location_check": {
+            "location_ok": location_ok,
+            "location_note": location_note
+        }
+    }
+
+    return jsonify(response_data)
 
 @app.route("/freelancer/hire/inbox", methods=["GET"])
 def freelancer_hire_inbox():
@@ -3985,9 +4035,10 @@ def freelancer_subscription_status():
 @app.route("/client/projects/create", methods=["POST"])
 def client_projects_create():
     d = get_json()
-    missing = require_fields(d, ["client_id", "title", "description", "category", "skills", "budget_type", "budget_min", "budget_max"])
+    missing = require_fields(d, ["client_id", "title", "description", "category", "skills", "budget_type"])
     if missing:
         return jsonify({"success": False, "msg": "Missing fields"}), 400
+    
     try:
         client_id = int(d["client_id"])
         title = str(d["title"]).strip()
@@ -3995,10 +4046,22 @@ def client_projects_create():
         category = str(d["category"]).strip()
         skills = str(d["skills"]).strip()
         budget_type = str(d["budget_type"]).strip().upper()
-        if budget_type not in ("FIXED", "HOURLY", "EVENT"):
+        
+        # Validate budget type - only FIXED or HOURLY allowed
+        if budget_type not in ("FIXED", "HOURLY"):
+            return jsonify({"success": False, "msg": "Invalid budget_type. Use FIXED or HOURLY"}), 400
+        
+        # Get single budget value based on type
+        if budget_type == "FIXED":
+            budget_value = float(d.get("budget", 0))
+        elif budget_type == "HOURLY":
+            budget_value = float(d.get("hourly_rate", 0))
+        else:
             return jsonify({"success": False, "msg": "Invalid budget_type"}), 400
-        budget_min = float(d["budget_min"])
-        budget_max = float(d["budget_max"])
+        
+        if budget_value <= 0:
+            return jsonify({"success": False, "msg": "Budget must be greater than 0"}), 400
+    
     except Exception:
         return jsonify({"success": False, "msg": "Invalid payload"}), 400
     
@@ -4009,18 +4072,20 @@ def client_projects_create():
         cur.execute("""
             INSERT INTO project_post (client_id, title, description, category, skills, budget_type, budget_min, budget_max, status, created_at)
             VALUES (%s, %s, %s, %s, %s, %s, %s, %s, 'OPEN', %s) RETURNING id
-        """, (client_id, title, description, category, skills, budget_type, budget_min, budget_max, now_ts()))
-        
+        """, (client_id, title, description, category, skills, budget_type, budget_value, budget_value, now_ts()))
+
         proj_row = cur.fetchone()
         project_id = proj_row["id"] if isinstance(proj_row, dict) else proj_row[0]
         conn.commit()
-        
+
         # Enhanced response with status and next actions
         return jsonify({
             "success": True,
             "msg": "Project posted successfully",
             "project_id": project_id,
             "status": "pending",
+            "budget_type": budget_type,
+            "budget_value": budget_value,
             "next_actions": [
                 "view_profile",
                 "edit_profile"
