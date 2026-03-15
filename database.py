@@ -60,6 +60,7 @@ def create_tables():
     _try_add_column(cur, "client_profile", "latitude REAL")
     _try_add_column(cur, "client_profile", "longitude REAL")
     _try_add_column(cur, "client_profile", "dob TEXT")
+    _try_add_column(cur, "client_profile", "name TEXT")
 
     cur.execute("""
     CREATE TABLE IF NOT EXISTS client_otp (
@@ -447,6 +448,21 @@ def create_tables():
     _try_add_column(cur, "hire_request", "event_pincode TEXT")
     _try_add_column(cur, "hire_request", "event_landmark TEXT")
     _try_add_column(cur, "hire_request", "venue_source TEXT DEFAULT 'custom'")
+
+    # ==========================
+    # CALLS TABLE (Voice/Video Calls)
+    # ==========================
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS calls (
+            call_id SERIAL PRIMARY KEY,
+            caller_id INTEGER,
+            receiver_id INTEGER,
+            call_type VARCHAR(10),
+            room_name TEXT,
+            status VARCHAR(20) DEFAULT 'ringing',
+            created_at INTEGER DEFAULT EXTRACT(EPOCH FROM NOW())::INTEGER
+        )
+    """)
 
     # ==========================
     # PAYMENT RECORDS (Razorpay hire & subscription)

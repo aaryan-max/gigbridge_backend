@@ -32,6 +32,7 @@ from settings import (
     FEATURE_ENFORCE_VERIFIED_FOR_HIRE_MESSAGE,
 )
 from categories import is_valid_category
+from call_service import start_call, update_call_status, get_incoming_calls
 
 
 # ============================================================
@@ -1134,7 +1135,7 @@ def client_profile():
     cur = get_dict_cursor(conn)
     cur.execute("""
         INSERT INTO client_profile (client_id, name, phone, location, bio, pincode, latitude, longitude, dob)
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
         ON CONFLICT(client_id) DO UPDATE SET
         phone=excluded.phone,
         location=excluded.location,
@@ -3376,137 +3377,9 @@ def recommend_freelancers():
     return jsonify(top_recommendations)
 
 # ============================================================
-# ===== NEW: CALL FEATURE =====
 # ============================================================
-
-@app.route("/call/start", methods=["POST"])
-def start_call():
-    """NEW CODE: Start a voice or video call"""
-    d = get_json()
-    missing = require_fields(d, ["caller_role", "caller_id", "receiver_role", "receiver_id", "call_type"])
-    if missing:
-        return jsonify({"success": False, "msg": "Missing fields"}), 400
-    
-    caller_role = str(d["caller_role"]).strip()
-    caller_id = int(d["caller_id"])
-    receiver_role = str(d["receiver_role"]).strip()
-    receiver_id = int(d["receiver_id"])
-    call_type = str(d["call_type"]).strip()  # "voice" or "video"
-    
-    # Generate unique room name
-    room_name = "gigbridge_" + str(int(time.time()))
-    room_url = "https://meet.jit.si/" + room_name
-    
-    # Insert call session
-    conn = freelancer_db()
-    cur = get_dict_cursor(conn)
-    cur.execute("""
-        INSERT INTO call_session (caller_role, caller_id, receiver_role, receiver_id, call_type, room_name, status, created_at)
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
-        RETURNING id
-    """, (caller_role, caller_id, receiver_role, receiver_id, call_type, room_name, "PENDING", now_ts()))
-    
-    call_id = cur.fetchone()["id"]
-    conn.commit()
-    conn.close()
-    
-    return jsonify({
-        "success": True,
-        "call_id": call_id,
-        "room_url": room_url,
-        "room_name": room_name
-    })
-
-@app.route("/call/incoming", methods=["GET", "POST"])
-def get_incoming_calls():
-    """NEW CODE: Get incoming calls for a user"""
-    # Support both GET and POST methods
-    if request.method == "GET":
-        receiver_role = request.args.get("receiver_role")
-        receiver_id = request.args.get("receiver_id")
-    else:  # POST
-        data = request.get_json() or {}
-        receiver_role = data.get("receiver_role")
-        receiver_id = data.get("receiver_id")
-    
-    if not receiver_role or not receiver_id:
-        return jsonify({"success": False, "msg": "Missing parameters"}), 400
-    
-    try:
-        receiver_id = int(receiver_id)
-    except ValueError:
-        return jsonify({"success": False, "msg": "Invalid user ID"}), 400
-    
-    conn = freelancer_db()
-    cur = conn.cursor(cursor_factory=RealDictCursor)
-    
-    cur.execute("""
-        SELECT id, caller_role, caller_id, call_type, room_name, status, created_at
-        FROM call_session
-        WHERE receiver_role = %s AND receiver_id = %s AND status = 'PENDING'
-        ORDER BY created_at DESC
-    """, (receiver_role, receiver_id))
-    
-    rows = cur.fetchall()
-    conn.close()
-    
-    calls = []
-    for row in rows:
-        calls.append({
-            "call_id": row["id"],
-            "caller_role": row["caller_role"],
-            "caller_id": row["caller_id"],
-            "call_type": row["call_type"],
-            "room_name": row["room_name"],
-            "status": row["status"],
-            "created_at": row["created_at"]
-        })
-    
-    return jsonify({"success": True, "calls": calls})
-
-@app.route("/call/respond", methods=["POST"])
-def respond_to_call():
-    """NEW CODE: Accept or reject a call"""
-    d = get_json()
-    missing = require_fields(d, ["call_id", "action"])
-    if missing:
-        return jsonify({"success": False, "msg": "Missing fields"}), 400
-    
-    call_id = int(d["call_id"])
-    action = str(d["action"]).strip()  # "accept" or "reject"
-    
-    if action not in ["accept", "reject"]:
-        return jsonify({"success": False, "msg": "Invalid action"}), 400
-    
-    conn = freelancer_db()
-    cur = get_dict_cursor(conn)
-    
-    # Update call status
-    status = "ACCEPTED" if action == "accept" else "REJECTED"
-    cur.execute("UPDATE call_session SET status = %s WHERE id = %s", (status, call_id))
-    
-    conn.commit()
-    conn.close()
-    
-    return jsonify({"success": True, "status": status})
-
-@app.route("/call/end", methods=["POST"])
-def end_call():
-    """NEW CODE: End a call"""
-    d = get_json()
-    missing = require_fields(d, ["call_id"])
-    if missing:
-        return jsonify({"success": False, "msg": "Missing fields"}), 400
-    
-    call_id = int(d["call_id"])
-    
-    conn = freelancer_db()
-    cur = get_dict_cursor(conn)
-    cur.execute("UPDATE call_session SET status = 'ENDED' WHERE id = %s", (call_id,))
-    conn.commit()
-    conn.close()
-    
-    return jsonify({"success": True})
+# CALL ROUTES (Voice/Video Calls) - UPDATED VERSION
+# ============================================================
 
 # ============================================================
 # RUN
@@ -4701,5 +4574,110 @@ def freelancer_profile_stats(freelancer_id):
         return jsonify({"success": False, "msg": str(e)}), 500
 
 
+# ============================================================
+# CALL ROUTES (Voice/Video Calls)
+# ============================================================
+
+@app.route("/call/start", methods=["POST"])
+def call_start():
+    """Start a voice or video call"""
+    d = get_json()
+    print(f"DEBUG: Received data: {d}")
+    missing = require_fields(d, ["caller_id", "receiver_id", "call_type"])
+    if missing:
+        print(f"DEBUG: Missing fields: {missing}")
+        return jsonify({"success": False, "msg": "Missing fields"}), 400
+    
+    try:
+        caller_id = int(d["caller_id"])
+        receiver_id = int(d["receiver_id"])
+        call_type = str(d["call_type"]).lower()
+        
+        if call_type not in ["voice", "video"]:
+            return jsonify({"success": False, "msg": "Invalid call type"}), 400
+        
+        result, error = start_call(caller_id, receiver_id, call_type)
+        if error:
+            return jsonify({"success": False, "msg": error}), 400
+        
+        return jsonify({
+            "success": True,
+            "call_id": result["call_id"],
+            "meeting_url": result["meeting_url"]
+        })
+        
+    except Exception as e:
+        return jsonify({"success": False, "msg": str(e)}), 500
+
+@app.route("/call/accept", methods=["POST"])
+def call_accept():
+    """Accept an incoming call"""
+    d = get_json()
+    missing = require_fields(d, ["call_id"])
+    if missing:
+        return jsonify({"success": False, "msg": "Missing call_id"}), 400
+    
+    try:
+        call_id = int(d["call_id"])
+        success, error = update_call_status(call_id, "accepted")
+        if error:
+            return jsonify({"success": False, "msg": error}), 400
+        
+        # Get call details to return meeting URL
+        conn = freelancer_db()
+        cur = get_dict_cursor(conn)
+        cur.execute("SELECT room_name FROM calls WHERE call_id = %s", (call_id,))
+        result = cur.fetchone()
+        conn.close()
+        
+        meeting_url = f"https://meet.jit.si/{result['room_name']}" if result else None
+        
+        return jsonify({
+            "success": True, 
+            "msg": "Call accepted",
+            "meeting_url": meeting_url
+        })
+        
+    except Exception as e:
+        return jsonify({"success": False, "msg": str(e)}), 500
+
+@app.route("/call/reject", methods=["POST"])
+def call_reject():
+    """Reject an incoming call"""
+    d = get_json()
+    missing = require_fields(d, ["call_id"])
+    if missing:
+        return jsonify({"success": False, "msg": "Missing call_id"}), 400
+    
+    try:
+        call_id = int(d["call_id"])
+        success, error = update_call_status(call_id, "rejected")
+        if error:
+            return jsonify({"success": False, "msg": error}), 400
+        
+        return jsonify({"success": True, "msg": "Call rejected"})
+        
+    except Exception as e:
+        return jsonify({"success": False, "msg": str(e)}), 500
+
+@app.route("/call/incoming", methods=["GET"])
+def call_incoming():
+    """Get incoming calls for a user"""
+    user_id = request.args.get("user_id")
+    if not user_id:
+        return jsonify({"success": False, "msg": "Missing user_id"}), 400
+    
+    try:
+        user_id = int(user_id)
+        calls = get_incoming_calls(user_id)
+        
+        return jsonify({
+            "success": True,
+            "calls": calls
+        })
+        
+    except Exception as e:
+        return jsonify({"success": False, "msg": str(e)}), 500
+
 if __name__ == "__main__":
-    app.run(debug=True)
+    app.run(debug=True, host="0.0.0.0", port=5000)

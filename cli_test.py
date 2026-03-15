@@ -53,9 +53,7 @@ def start_call(caller_role, receiver_id, call_type):
             receiver_role = "client"
         
         res = requests.post(f"{BASE_URL}/call/start", json={
-            "caller_role": caller_role,
             "caller_id": caller_id,
-            "receiver_role": receiver_role,
             "receiver_id": receiver_id,
             "call_type": call_type
         })
@@ -63,11 +61,11 @@ def start_call(caller_role, receiver_id, call_type):
         result = res.json()
         if result.get("success"):
             print(f"✅ {call_type.title()} call started!")
-            print(f"📞 Room: {result['room_name']}")
+            print(f"📞 Meeting URL: {result['meeting_url']}")
             print("🌐 Opening browser in 3 seconds...")
             
             time.sleep(3)
-            webbrowser.open(result["room_url"])
+            webbrowser.open(result["meeting_url"])
         else:
             print("❌ Failed to start call:", result.get("msg"))
     except Exception as e:
@@ -78,10 +76,8 @@ def check_incoming_calls():
     try:
         # Determine current user role and ID
         if current_client_id:
-            role = "client"
             user_id = current_client_id
         else:
-            role = "freelancer"
             user_id = current_freelancer_id
         
         # Safe guard for user_id
@@ -91,10 +87,7 @@ def check_incoming_calls():
         
         res = requests.get(
             f"{BASE_URL}/call/incoming",
-            params={
-                "receiver_role": role,
-                "receiver_id": user_id
-            }
+            params={"user_id": user_id}
         )
         
         data = res.json()
@@ -102,43 +95,56 @@ def check_incoming_calls():
             print("\n--- INCOMING CALLS ---")
             for call in data["calls"]:
                 call_type = call["call_type"].title()
-                print(f"📞 {call_type} call from {call['caller_role']} ID {call['caller_id']}")
-                print(f"   Room: {call['room_name']}")
-                print("1. Accept")
-                print("2. Reject")
-                print("3. Skip this call")
-                print("4. Back to Dashboard")
+                caller_name = call.get("caller_name", "Unknown")
+                print(f"📞 {call_type} call from {caller_name}")
+                print(f"   Call ID: {call['call_id']}")
+                print(f"   Meeting URL: {call['meeting_url']}")
+                print()
+                print("1. Accept Call")
+                print("2. Reject Call")
+                print("3. Message Instead")
+                print("4. Back")
                 
                 action = input("Choose: ")
                 if action == "1":
-                    respond_res = requests.post(f"{BASE_URL}/call/respond", json={
-                        "call_id": call["call_id"],
-                        "action": "accept"
+                    # Accept call
+                    accept_res = requests.post(f"{BASE_URL}/call/accept", json={
+                        "call_id": call["call_id"]
                     })
-                    if respond_res.json().get("success"):
+                    if accept_res.json().get("success"):
                         print("✅ Call accepted!")
-                        print("🌐 Opening browser...")
-                        time.sleep(2)
-                        webbrowser.open(f"https://meet.jit.si/{call['room_name']}")
+                        print("🌐 Opening meeting in browser...")
+                        import webbrowser
+                        # Use meeting URL from accept response or fall back to call data
+                        accept_data = accept_res.json()
+                        meeting_url = accept_data.get("meeting_url") or call.get("meeting_url")
+                        if meeting_url:
+                            webbrowser.open(meeting_url)
+                    else:
+                        print("❌ Failed to accept call")
                 elif action == "2":
-                    requests.post(f"{BASE_URL}/call/respond", json={
-                        "call_id": call["call_id"],
-                        "action": "reject"
+                    # Reject call
+                    reject_res = requests.post(f"{BASE_URL}/call/reject", json={
+                        "call_id": call["call_id"]
                     })
-                    print("❌ Call rejected")
+                    if reject_res.json().get("success"):
+                        print("✅ Call rejected")
+                    else:
+                        print("❌ Failed to reject call")
                 elif action == "3":
-                    print("⏭️ Call skipped")
-                    continue
+                    print("📱 Opening chat...")
+                    # Would open chat functionality here
                 elif action == "4":
-                    print("🔙 Returning to dashboard...")
-                    return
-                else:
-                    print("❌ Invalid choice, skipping call")
                     continue
+                else:
+                    print("❌ Invalid choice")
         else:
-            print("📭 No incoming calls")
+            print("✅ No incoming calls")
+            
     except Exception as e:
-        print("❌ Error checking calls:", str(e))
+        print("❌ Error checking incoming calls:", str(e))
+
+# ---------- MAIN CLI ENTRY POINT ----------
 
 # ---------- VALIDATORS ----------
 def valid_email(email):
@@ -1320,21 +1326,31 @@ def client_flow():
         print("15. Accept Applicant")
         print("16. Upload Verification Documents")
         print("17. Check Verification Status")
-        print("18. Logout")
-        print("19. Exit")
+        print("18. Contact Freelancer")
+        print("19. Logout")
+        print("20. Exit")
 
         choice = input("Choose: ")
         
-        if choice == "19":
+        if choice == "20":
             print("👋 Exiting GigBridge CLI")
             return
         
-        if choice == "18":
+        if choice == "19":
             current_client_id = None
             print("✅ Logged out successfully")
             return
         
         if choice == "1":
+            # Get username
+            while True:
+                name = input("Username: ").strip()
+                if not name:
+                    print("❌ Username is required")
+                    continue
+                break
+            
+            # Get phone
             while True:
                 phone = input("Phone (10 digits): ")
                 if valid_phone(phone):
@@ -1347,6 +1363,7 @@ def client_flow():
 
             res = requests.post(f"{BASE_URL}/client/profile", json={
                 "client_id": current_client_id,
+                "name": name,
                 "phone": phone,
                 "location": input("Location: "),
                 "bio": input("Bio: "),
@@ -1585,15 +1602,29 @@ def client_flow():
             description = input("Description: ").strip()
             category = input("Category: ").strip()
             skills = input("Skills: ").strip()
-            print("Budget Type: 1) FIXED  2) HOURLY  3) EVENT")
+            print("Budget Type: 1) FIXED 2) HOURLY")
             bt_choice = input("Choose: ").strip()
-            budget_type = "FIXED" if bt_choice == "1" else "HOURLY" if bt_choice == "2" else "EVENT"
-            try:
-                budget_min = float(input("Budget Min: "))
-                budget_max = float(input("Budget Max: "))
-            except Exception:
-                print("❌ Invalid budget values")
+            budget_type = "FIXED" if bt_choice == "1" else "HOURLY" if bt_choice == "2" else None
+            if not budget_type:
+                print("❌ Invalid budget type choice")
                 continue
+            
+            try:
+                if budget_type == "FIXED":
+                    budget_value = float(input("Fixed Budget: "))
+                elif budget_type == "HOURLY":
+                    budget_value = float(input("Hourly Rate: "))
+                else:
+                    print("❌ Invalid budget type")
+                    continue
+                    
+                if budget_value <= 0:
+                    print("❌ Budget must be greater than 0")
+                    continue
+            except Exception:
+                print("❌ Invalid budget value")
+                continue
+                
             res = requests.post(f"{BASE_URL}/client/projects/create", json={
                 "client_id": current_client_id,
                 "title": title,
@@ -1601,8 +1632,8 @@ def client_flow():
                 "category": category,
                 "skills": skills,
                 "budget_type": budget_type,
-                "budget_min": budget_min,
-                "budget_max": budget_max
+                "budget": budget_value if budget_type == "FIXED" else None,
+                "hourly_rate": budget_value if budget_type == "HOURLY" else None
             })
             print(res.json())
 
@@ -1702,6 +1733,9 @@ def client_flow():
         elif choice == "17":
             client_check_verification_status()
 
+        elif choice == "18":
+            contact_freelancer()
+
 # ---------- FREELANCER VERIFICATION ----------
 def freelancer_verification_status():
     """Show verification status for freelancer"""
@@ -1745,6 +1779,208 @@ def freelancer_verification_status():
         
     except Exception as e:
         print("❌ Error checking verification status:", str(e))
+
+def contact_freelancer():
+    """Contact a freelancer via voice/video call or message"""
+    if not current_client_id:
+        print("❌ Please login as client first")
+        return
+    
+    print("\n--- CONTACT MENU ---")
+    print("1. Voice Call")
+    print("2. Video Call")
+    print("3. Send Message")
+    print("4. Back to Dashboard")
+    
+    choice = input("Choose: ")
+    
+    if choice == "1":
+        start_call_flow("voice")
+    elif choice == "2":
+        start_call_flow("video")
+    elif choice == "3":
+        # Get freelancer list for messaging
+        res = requests.get(f"{BASE_URL}/freelancers/all")
+        data = res.json()
+        if data.get("success"):
+            print("\n--- Select Freelancer to Message ---")
+            for f in data.get("freelancers", []):
+                print(f"{f['freelancer_id']}. {f['name']} - {f.get('category', 'N/A')}")
+            
+            try:
+                fid = input("Enter Freelancer ID: ")
+                if fid.isdigit():
+                    open_chat_with_freelancer(int(fid))
+                else:
+                    print("❌ Invalid Freelancer ID")
+            except Exception as e:
+                print("❌ Error opening chat:", str(e))
+        else:
+            print("❌ Error fetching freelancers:", data.get("msg"))
+    elif choice == "4":
+        return
+    else:
+        print("❌ Invalid choice")
+
+def start_call_flow(call_type):
+    """Start a voice or video call"""
+    if not current_client_id:
+        print("❌ Please login as client first")
+        return
+    
+    print(f"DEBUG: current_client_id = {current_client_id}")
+    
+    # Get freelancer list
+    res = requests.get(f"{BASE_URL}/freelancers/all")
+    data = res.json()
+    if not data.get("success"):
+        print("❌ Error fetching freelancers:", data.get("msg"))
+        return
+    
+    print(f"\n--- Select Freelancer for {call_type.title()} Call ---")
+    for f in data.get("freelancers", []):
+        print(f"{f['freelancer_id']}. {f['name']} - {f.get('category', 'N/A')}")
+    
+    try:
+        fid = input("Enter Freelancer ID: ")
+        if not fid.isdigit():
+            print("❌ Invalid Freelancer ID")
+            return
+        
+        freelancer_id = int(fid)
+        
+        # Start the call
+        call_data = {
+            "caller_id": current_client_id,
+            "receiver_id": freelancer_id,
+            "call_type": call_type
+        }
+        print(f"DEBUG: Sending call data: {call_data}")
+        res = requests.post(f"{BASE_URL}/call/start", json=call_data)
+        
+        result = res.json()
+        if result.get("success"):
+            print(f"✅ {call_type.title()} call started!")
+            print(f"Meeting URL: {result['meeting_url']}")
+            print("🌐 Opening in browser...")
+            
+            # Open in browser
+            import webbrowser
+            webbrowser.open(result['meeting_url'])
+        else:
+            print(f"❌ Failed to start call: {result.get('msg')}")
+    
+    except Exception as e:
+        print("❌ Error starting call:", str(e))
+
+def contact_client():
+    """Contact a client via voice/video call or message"""
+    if not current_freelancer_id:
+        print("❌ Please login as freelancer first")
+        return
+    
+    print("\n--- CONTACT MENU ---")
+    print("1. Voice Call")
+    print("2. Video Call")
+    print("3. Send Message")
+    print("4. Back to Dashboard")
+    
+    choice = input("Choose: ")
+    
+    if choice == "1":
+        start_call_to_client("voice")
+    elif choice == "2":
+        start_call_to_client("video")
+    elif choice == "3":
+        # Get client list for messaging
+        res = requests.get(f"{BASE_URL}/freelancer/saved-clients", params={
+            "freelancer_id": current_freelancer_id
+        })
+        data = res.json()
+        if isinstance(data, list):
+            clients = data
+        else:
+            clients = data.get("clients", [])
+        
+        if clients:
+            print("\n--- Select Client to Message ---")
+            for c in clients:
+                print(f"{c['client_id']}. {c['name']}")
+            
+            try:
+                cid = input("Enter Client ID: ")
+                if cid.isdigit():
+                    open_chat_with_client(int(cid))
+                else:
+                    print("❌ Invalid Client ID")
+            except Exception as e:
+                print("❌ Error opening chat:", str(e))
+        else:
+            print("❌ No saved clients found")
+    elif choice == "4":
+        return
+    else:
+        print("❌ Invalid choice")
+
+def start_call_to_client(call_type):
+    """Start a voice or video call to a client"""
+    if not current_freelancer_id:
+        print("❌ Please login as freelancer first")
+        return
+    
+    # Get client list
+    res = requests.get(f"{BASE_URL}/freelancer/saved-clients", params={
+        "freelancer_id": current_freelancer_id
+    })
+    data = res.json()
+    if isinstance(data, list):
+        clients = data
+    else:
+        clients = data.get("clients", [])
+    
+    if not clients:
+        print("❌ No saved clients found")
+        return
+    
+    print(f"\n--- Select Client for {call_type.title()} Call ---")
+    for c in clients:
+        print(f"{c['client_id']}. {c['name']}")
+    
+    try:
+        cid = input("Enter Client ID: ")
+        if not cid.isdigit():
+            print("❌ Invalid Client ID")
+            return
+        
+        client_id = int(cid)
+        
+        # Start the call
+        res = requests.post(f"{BASE_URL}/call/start", json={
+            "caller_id": current_freelancer_id,
+            "receiver_id": client_id,
+            "call_type": call_type
+        })
+        
+        result = res.json()
+        if result.get("success"):
+            print(f"✅ {call_type.title()} call started!")
+            print(f"Meeting URL: {result['meeting_url']}")
+            print("🌐 Opening in browser...")
+            
+            # Open in browser
+            import webbrowser
+            webbrowser.open(result['meeting_url'])
+        else:
+            print(f"❌ Failed to start call: {result.get('msg')}")
+    
+    except Exception as e:
+        print("❌ Error starting call:", str(e))
+
+def open_chat_with_client(client_id):
+    """Open chat with a client"""
+    print(f"Opening chat with client {client_id}...")
+    # Implementation would be similar to existing chat functionality
+    print("📱 Chat feature would be implemented here")
 
 
 def freelancer_upload_verification():
@@ -2196,18 +2432,19 @@ def freelancer_flow():
         print("15. Subscription Plans 💎")
         print("16. My Subscription")
         print("17. Update Availability Status")
-        print("18. Exit")
-        print("19. Logout")
-        print("20. Browse Projects")
-        print("21. Apply to Project")
+        print("18. Contact Client")
+        print("19. Exit")
+        print("20. Logout")
+        print("21. Browse Projects")
+        print("22. Apply to Project")
 
         choice = input("Choose: ")
 
-        if choice == "18":
+        if choice == "19":
             print("👋 Exiting GigBridge CLI")
             return
         
-        if choice == "19":
+        if choice == "20":
             current_freelancer_id = None
             print("✅ Logged out successfully")
             return
@@ -2688,6 +2925,9 @@ def freelancer_flow():
             else:
                 print("❌ Invalid choice")
                 continue
+
+        elif choice == "18":
+            contact_client()
             
             try:
                 res = requests.post(f"{BASE_URL}/freelancer/update-availability", json={
