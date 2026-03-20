@@ -2606,6 +2606,9 @@ def freelancer_hire_inbox():
             inc_hours = r.get("event_included_hours")
             e_overtime = r.get("event_overtime_rate")
             advance = r.get("advance_paid")
+            final_amount = r.get("final_agreed_amount")
+            counter_note = r.get("counter_note")
+            negotiation_status = r.get("negotiation_status")
         else:
             cid = int(r[1])
             rid = r[0]
@@ -2622,6 +2625,9 @@ def freelancer_hire_inbox():
             inc_hours = r[12]
             e_overtime = r[13]
             advance = r[14]
+            final_amount = r[15] if len(r) > 15 else None
+            counter_note = r[16] if len(r) > 16 else None
+            negotiation_status = r[17] if len(r) > 17 else None
 
         client_cur.execute("SELECT name, email FROM client WHERE id=%s", (cid,))
         c = client_cur.fetchone()
@@ -2654,6 +2660,9 @@ def freelancer_hire_inbox():
             "event_included_hours": inc_hours,
             "event_overtime_rate": e_overtime,
             "advance_paid": advance,
+            "final_agreed_amount": final_amount,
+            "counter_note": counter_note,
+            "negotiation_status": negotiation_status,
         })
 
     client_conn.close()
@@ -2883,12 +2892,18 @@ def client_job_requests():
                     "proposed_budget": r.get("proposed_budget"),
                     "note": r.get("note") or "",
                     "status": r.get("status"),
-                    "created_at": r.get("created_at")
+                    "created_at": r.get("created_at"),
+                    "final_agreed_amount": r.get("final_agreed_amount"),
+                    "counter_note": r.get("counter_note"),
+                    "negotiation_status": r.get("negotiation_status")
                 })
             else:
                 out.append({
                     "request_id": r[0], "freelancer_id": r[1], "freelancer_name": r[2], "freelancer_email": r[3],
-                    "job_title": r[4] or "", "proposed_budget": r[5], "note": r[6] or "", "status": r[7], "created_at": r[8]
+                    "job_title": r[4] or "", "proposed_budget": r[5], "note": r[6] or "", "status": r[7], "created_at": r[8],
+                    "final_agreed_amount": r[9] if len(r) > 9 else None,
+                    "counter_note": r[10] if len(r) > 10 else None,
+                    "negotiation_status": r[11] if len(r) > 11 else None
                 })
 
         return jsonify({"success": True, "requests": out})
@@ -5125,9 +5140,9 @@ def freelancer_projects_feed():
         if not freelancer_profile:
             return jsonify({"success": True, "projects": []})
         
-        freelancer_category = freelancer_profile.get("category", "").lower().strip()
-        freelancer_location = freelancer_profile.get("location", "").lower().strip()
-        freelancer_pincode = freelancer_profile.get("pincode", "").strip()
+        freelancer_category = (freelancer_profile.get("category") or "").lower().strip()
+        freelancer_location = (freelancer_profile.get("location") or "").lower().strip()
+        freelancer_pincode = (freelancer_profile.get("pincode") or "").strip()
         
         # Filter projects based on freelancer category and location/pincode
         cur.execute("""
@@ -5140,9 +5155,9 @@ def freelancer_projects_feed():
         
         feed = []
         for r in rows:
-            project_category = r.get("category", "").lower().strip()
-            project_location = r.get("location", "").lower().strip()
-            project_pincode = r.get("pincode", "").strip()
+            project_category = (r.get("category") or "").lower().strip()
+            project_location = (r.get("location") or "").lower().strip()
+            project_pincode = (r.get("pincode") or "").strip()
             
             # Filter by category (must match)
             if freelancer_category and project_category and freelancer_category != project_category:

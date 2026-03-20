@@ -1319,7 +1319,7 @@ def client_messages_menu():
 
 # ---------- CLIENT: JOB REQUEST STATUS ----------
 def client_job_request_status_menu():
-    """Show job request status - Simplified display only."""
+    """Show job request status with actionable options for COUNTERED requests."""
     if not current_client_id:
         print("❌ Please login as client first")
         return
@@ -1343,6 +1343,10 @@ def client_job_request_status_menu():
         print("📭 No job requests found")
         return
 
+    # Group requests by status for better display
+    countered_requests = []
+    other_requests = []
+    
     for idx, r in enumerate(items, 1):
         if isinstance(r, dict):
             title = (r.get("job_title") or "Untitled").strip()
@@ -1351,19 +1355,281 @@ def client_job_request_status_menu():
             fname = r.get("freelancer_name") or "Freelancer"
             fid = r.get("freelancer_id")
             rid = r.get("request_id")
+            
+            # Add counteroffer details if available
+            counter_amount = r.get("final_agreed_amount")
+            counter_note = r.get("counter_note")
+            negotiation_status = r.get("negotiation_status")
+            
+            request_data = {
+                "idx": idx,
+                "request_id": rid,
+                "freelancer_name": fname,
+                "freelancer_id": fid,
+                "job_title": title,
+                "proposed_budget": budget,
+                "status": status,
+                "counter_amount": counter_amount,
+                "counter_note": counter_note,
+                "negotiation_status": negotiation_status
+            }
+            
+            if status == "COUNTERED":
+                countered_requests.append(request_data)
+            else:
+                other_requests.append(request_data)
         else:
-            title = str(r)
-            budget = "N/A"
-            status = "N/A"
-            fname = "N/A"
-            fid = "N/A"
-            rid = "N/A"
+            # Handle non-dict items (legacy format)
+            other_requests.append({
+                "idx": idx,
+                "request_id": str(r),
+                "freelancer_name": "N/A",
+                "freelancer_id": "N/A",
+                "job_title": str(r),
+                "proposed_budget": "N/A",
+                "status": "N/A",
+                "counter_amount": None,
+                "counter_note": None,
+                "negotiation_status": None
+            })
 
-        print(f"\n{idx}. Request ID: {rid}")
-        print(f"   Freelancer: {fname} (ID: {fid})")
-        print(f"   Job Title: {title}")
-        print(f"   Budget: ₹{budget}")
-        print(f"   Status: {status}")
+    # Show COUNTERED requests first with conditional action options
+    actionable_countered = []
+    waiting_countered = []
+    
+    for r in countered_requests:
+        # Check who made the latest offer
+        if r['negotiation_status'] == "FREELANCER":
+            # Client needs to respond
+            actionable_countered.append(r)
+        else:
+            # Client made the last offer, waiting for freelancer
+            waiting_countered.append(r)
+    
+    # Show actionable countered requests
+    if actionable_countered:
+        print("\n🔄 COUNTEROFFER REQUESTS (Action Required):")
+        print("=" * 60)
+        for r in actionable_countered:
+            print(f"\n{r['idx']}. Request ID: {r['request_id']}")
+            print(f"   Freelancer: {r['freelancer_name']} (ID: {r['freelancer_id']})")
+            print(f"   Job Title: {r['job_title']}")
+            print(f"   Original Budget: ₹{r['proposed_budget']}")
+            print(f"   Status: {r['status']} 🔄")
+            
+            # Show counteroffer details
+            if r['counter_amount']:
+                print(f"   💰 Counteroffer Amount: ₹{r['counter_amount']}")
+            if r['counter_note']:
+                print(f"   📝 Counteroffer Note: {r['counter_note']}")
+            if r['negotiation_status']:
+                print(f"   🤝 Offered By: {r['negotiation_status']}")
+            
+            print(f"\n   📋 Available Actions:")
+            print(f"      • Accept Counteroffer")
+            print(f"      • Reject Counteroffer") 
+            print(f"      • Counteroffer Again")
+            print(f"      • Message Freelancer")
+    
+    # Show waiting countered requests
+    if waiting_countered:
+        print("\n⏳ COUNTEROFFER REQUESTS (Waiting for Freelancer):")
+        print("=" * 65)
+        for r in waiting_countered:
+            print(f"\n{r['idx']}. Request ID: {r['request_id']}")
+            print(f"   Freelancer: {r['freelancer_name']} (ID: {r['freelancer_id']})")
+            print(f"   Job Title: {r['job_title']}")
+            print(f"   Original Budget: ₹{r['proposed_budget']}")
+            print(f"   Status: {r['status']} ⏳")
+            
+            # Show counteroffer details
+            if r['counter_amount']:
+                print(f"   💰 Your Latest Offer: ₹{r['counter_amount']}")
+            if r['counter_note']:
+                print(f"   📝 Your Note: {r['counter_note']}")
+            if r['negotiation_status']:
+                print(f"   🤝 Offered By: {r['negotiation_status']} (You)")
+            
+            print(f"\n   📝 Waiting for freelancer response...")
+            print(f"   📋 Available Actions:")
+            print(f"      • Message Freelancer")
+
+    # Show other requests (display only)
+    if other_requests:
+        print(f"\n📋 OTHER REQUESTS:")
+        print("=" * 40)
+        for r in other_requests:
+            print(f"\n{r['idx']}. Request ID: {r['request_id']}")
+            print(f"   Freelancer: {r['freelancer_name']} (ID: {r['freelancer_id']})")
+            print(f"   Job Title: {r['job_title']}")
+            
+            # Show final agreed amount if request was accepted and has final amount
+            if r['status'] == "ACCEPTED" and r.get('final_agreed_amount') is not None:
+                print(f"   Final Agreed Amount: ₹{r['final_agreed_amount']}")
+            else:
+                print(f"   Budget: ₹{r['proposed_budget']}")
+            
+            print(f"   Status: {r['status']}")
+
+    # Action selection loop for actionable countered requests only
+    while actionable_countered:
+        print(f"\n🎯 Select a COUNTERED request to act on (or 0 to exit):")
+        for r in actionable_countered:
+            print(f"   {r['idx']}: {r['freelancer_name']} - {r['job_title']}")
+        
+        try:
+            choice = input("Enter choice: ").strip()
+            if choice == "0":
+                break
+                
+            choice_idx = int(choice)
+            selected_request = next((r for r in actionable_countered if r['idx'] == choice_idx), None)
+            
+            if not selected_request:
+                print("❌ Invalid choice")
+                continue
+            
+            # Show action menu for selected request
+            handle_countered_request_actions(selected_request)
+            break
+            
+        except ValueError:
+            print("❌ Please enter a valid number")
+    
+    print("\n✅ Job request status review completed")
+
+def handle_countered_request_actions(request):
+    """Handle client actions on a countered request"""
+    print(f"\n🔄 COUNTEROFFER ACTIONS")
+    print("=" * 40)
+    print(f"Request ID: {request['request_id']}")
+    print(f"Freelancer: {request['freelancer_name']}")
+    print(f"Job: {request['job_title']}")
+    print(f"Original Budget: ₹{request['proposed_budget']}")
+    
+    if request['counter_amount']:
+        print(f"Counteroffer Amount: ₹{request['counter_amount']}")
+    if request['counter_note']:
+        print(f"Counteroffer Note: {request['counter_note']}")
+    
+    print(f"\n🎯 Choose Action:")
+    print("1. Accept Counteroffer")
+    print("2. Reject Counteroffer") 
+    print("3. Counteroffer Again")
+    print("4. Message Freelancer")
+    print("0. Back to Request List")
+    
+    while True:
+        choice = input("Enter choice: ").strip()
+        
+        if choice == "0":
+            break
+        elif choice == "1":
+            # Accept counteroffer
+            accept_counteroffer(request)
+            break
+        elif choice == "2":
+            # Reject counteroffer
+            reject_counteroffer(request)
+            break
+        elif choice == "3":
+            # Counteroffer again
+            counteroffer_again(request)
+            break
+        elif choice == "4":
+            # Message freelancer
+            open_chat_with_freelancer(request['freelancer_id'])
+            break
+        else:
+            print("❌ Invalid choice, please try again")
+
+def accept_counteroffer(request):
+    """Accept the freelancer's counteroffer"""
+    print(f"\n✅ Accepting counteroffer...")
+    
+    try:
+        res = requests.post(f"{BASE_URL}/client/hire/counter", json={
+            "client_id": current_client_id,
+            "request_id": request['request_id'],
+            "action": "ACCEPT"
+        })
+        
+        result = res.json()
+        if result.get("success"):
+            print(f"✅ Counteroffer accepted successfully!")
+            print(f"   Final agreed amount: ₹{request['counter_amount']}")
+            print(f"   Request status: ACCEPTED")
+            print(f"   🎉 You can now proceed with the hire!")
+        else:
+            print(f"❌ Failed to accept counteroffer: {result.get('msg')}")
+            
+    except Exception as e:
+        print(f"❌ Error accepting counteroffer: {str(e)}")
+
+def reject_counteroffer(request):
+    """Reject the freelancer's counteroffer"""
+    print(f"\n❌ Rejecting counteroffer...")
+    
+    try:
+        res = requests.post(f"{BASE_URL}/client/hire/counter", json={
+            "client_id": current_client_id,
+            "request_id": request['request_id'],
+            "action": "REJECT"
+        })
+        
+        result = res.json()
+        if result.get("success"):
+            print(f"✅ Counteroffer rejected successfully!")
+            print(f"   Request status: REJECTED")
+            print(f"   💡 You can search for other freelancers")
+        else:
+            print(f"❌ Failed to reject counteroffer: {result.get('msg')}")
+            
+    except Exception as e:
+        print(f"❌ Error rejecting counteroffer: {str(e)}")
+
+def counteroffer_again(request):
+    """Send a new counteroffer to the freelancer"""
+    print(f"\n💰 Send New Counteroffer")
+    print("=" * 30)
+    
+    try:
+        # Get new counter amount
+        while True:
+            amount_input = input(f"New counter amount (current: ₹{request['counter_amount']}): ").strip()
+            try:
+                new_amount = float(amount_input)
+                if new_amount <= 0:
+                    print("❌ Amount must be greater than 0")
+                    continue
+                break
+            except ValueError:
+                print("❌ Please enter a valid number")
+        
+        # Get counter note
+        note = input("Counteroffer note (optional): ").strip()
+        
+        # Send counteroffer
+        res = requests.post(f"{BASE_URL}/client/hire/counter", json={
+            "client_id": current_client_id,
+            "request_id": request['request_id'],
+            "action": "COUNTER",
+            "counter_offer_amount": new_amount,
+            "counter_offer_note": note
+        })
+        
+        result = res.json()
+        if result.get("success"):
+            print(f"✅ New counteroffer sent successfully!")
+            print(f"   Your offer: ₹{new_amount}")
+            if note:
+                print(f"   Note: {note}")
+            print(f"   📝 Waiting for freelancer response...")
+        else:
+            print(f"❌ Failed to send counteroffer: {result.get('msg')}")
+            
+    except Exception as e:
+        print(f"❌ Error sending counteroffer: {str(e)}")
 
 # ---------- CLIENT: AI RECOMMENDATIONS ----------
 def client_ai_recommendations():
@@ -3512,7 +3778,146 @@ def freelancer_flow():
                         print("Latest Offer: ₹", r.get("final_agreed_amount"))
                     if r.get("counter_note"):
                         print("Counter Note:", r.get("counter_note"))
-                    print("Offered By:", r.get("negotiation_status", "Unknown"))
+                    
+                    negotiation_status = r.get("negotiation_status", "Unknown")
+                    offered_by = negotiation_status
+                    
+                    if offered_by == "FREELANCER":
+                        print("Offered By: FREELANCER (You)")
+                        print("📝 Waiting for client response...")
+                        print("\nActions:")
+                        print("4. Message Client")
+                        print("5. Save Client")
+                        print("6. Next")
+                        print("0. Back")
+                        
+                        a = input("Choose: ")
+                        if a == "4":
+                            open_chat_with_client(r["client_id"])
+                        elif a == "5":
+                            rr = requests.post(f"{BASE_URL}/freelancer/save-client", json={
+                                "freelancer_id": current_freelancer_id,
+                                "client_id": r["client_id"]
+                            })
+                            try:
+                                print(rr.json())
+                            except Exception:
+                                print("❌ Failed to save client")
+                        elif a == "0":
+                            break
+                            
+                    elif offered_by == "CLIENT":
+                        print("Offered By: CLIENT")
+                        print("🎯 Action required from you!")
+                        print("\nActions:")
+                        print("1. Accept Counteroffer")
+                        print("2. Reject Counteroffer")
+                        print("3. Counteroffer Again")
+                        print("4. Message Client")
+                        print("5. Save Client")
+                        print("6. Next")
+                        print("0. Back")
+                        
+                        a = input("Choose: ")
+                        
+                        if a == "1":
+                            # Accept client's counteroffer
+                            rr = requests.post(f"{BASE_URL}/freelancer/hire/respond", json={
+                                "freelancer_id": current_freelancer_id,
+                                "request_id": r["request_id"],
+                                "action": "ACCEPT"
+                            })
+                            result = rr.json()
+                            if result.get("success"):
+                                print(f"✅ Counteroffer accepted!")
+                                print(f"   Final agreed amount: ₹{r.get('final_agreed_amount')}")
+                                print(f"   Request status: ACCEPTED")
+                                print(f"   🎉 You can now proceed with the job!")
+                            else:
+                                print(f"❌ Failed to accept counteroffer: {result.get('msg')}")
+                        elif a == "2":
+                            # Reject client's counteroffer
+                            rr = requests.post(f"{BASE_URL}/freelancer/hire/respond", json={
+                                "freelancer_id": current_freelancer_id,
+                                "request_id": r["request_id"],
+                                "action": "REJECT"
+                            })
+                            result = rr.json()
+                            if result.get("success"):
+                                print(f"✅ Counteroffer rejected!")
+                                print(f"   Request status: REJECTED")
+                                print(f"   💡 You can wait for other opportunities")
+                            else:
+                                print(f"❌ Failed to reject counteroffer: {result.get('msg')}")
+                        elif a == "3":
+                            # Counteroffer again
+                            print(f"\n💰 Send New Counteroffer")
+                            print(f"Current client offer: ₹{r.get('final_agreed_amount')}")
+                            
+                            counter_amount = input("Your Counter Offer Amount: ₹").strip()
+                            counter_note = input("Counter Offer Note (optional): ").strip()
+                            
+                            try:
+                                counter_amount = float(counter_amount)
+                                if counter_amount <= 0:
+                                    print("❌ Counter offer amount must be greater than 0")
+                                    continue
+                            except ValueError:
+                                print("❌ Please enter a valid number")
+                                continue
+                            
+                            rr = requests.post(f"{BASE_URL}/freelancer/hire/respond", json={
+                                "freelancer_id": current_freelancer_id,
+                                "request_id": r["request_id"],
+                                "action": "COUNTER",
+                                "counter_offer_amount": counter_amount,
+                                "counter_offer_note": counter_note
+                            })
+                            result = rr.json()
+                            if result.get("success"):
+                                print(f"✅ New counteroffer sent!")
+                                print(f"   Your offer: ₹{counter_amount}")
+                                if counter_note:
+                                    print(f"   Note: {counter_note}")
+                                print(f"   📝 Waiting for client response...")
+                            else:
+                                print(f"❌ Failed to send counteroffer: {result.get('msg')}")
+                        elif a == "4":
+                            open_chat_with_client(r["client_id"])
+                        elif a == "5":
+                            rr = requests.post(f"{BASE_URL}/freelancer/save-client", json={
+                                "freelancer_id": current_freelancer_id,
+                                "client_id": r["client_id"]
+                            })
+                            try:
+                                print(rr.json())
+                            except Exception:
+                                print("❌ Failed to save client")
+                        elif a == "0":
+                            break
+                    else:
+                        print("Offered By: Unknown")
+                        print("⚠️  Negotiation status unclear")
+                        print("\nActions:")
+                        print("4. Message Client")
+                        print("5. Save Client")
+                        print("6. Next")
+                        print("0. Back")
+                        
+                        a = input("Choose: ")
+                        if a == "4":
+                            open_chat_with_client(r["client_id"])
+                        elif a == "5":
+                            rr = requests.post(f"{BASE_URL}/freelancer/save-client", json={
+                                "freelancer_id": current_freelancer_id,
+                                "client_id": r["client_id"]
+                            })
+                            try:
+                                print(rr.json())
+                            except Exception:
+                                print("❌ Failed to save client")
+                        elif a == "0":
+                            break
 
                 if r.get("status") == "PENDING":
                     print("1. Accept")
@@ -3979,45 +4384,76 @@ def freelancer_flow():
                 })
                 data = res.json()
                 if data.get("success"):
+                    projects = data.get("projects", [])
+                    if not projects:
+                        print("\n❌ No relevant projects found for your category/location")
+                        continue
+                    
                     print("\n--- RELEVANT OPEN PROJECTS ---")
-                    for p in data.get("projects", []):
-                        print(f"{p['project_id']}. Category: {p['category']}")
-                        print(f"   Location: {p['location']} | Pincode: {p['pincode']}")
-                        print(f"   Description: {p['description']}")
-                        print()
+                    for i, p in enumerate(projects, 1):
+                        print(f"\n📋 Project {i}")
+                        print(f"   Category: {p.get('category', 'N/A').title()}")
+                        print(f"   📍 Location: {p.get('location', 'N/A')} | Pincode: {p.get('pincode', 'N/A')}")
+                        print(f"   📝 Description: {p.get('description', 'N/A')}")
+                        
+                        # Ask if freelancer wants to apply to this specific project
+                        apply_choice = input(f"\nDo you want to apply to this project? (y/n): ").strip().lower()
+                        
+                        if apply_choice == 'y':
+                            print(f"\n--- APPLY TO PROJECT {i} ---")
+                            
+                            proposal = input("Your Proposal/Message: ").strip()
+                            bid_amount = input("Your Bid Amount: ₹").strip()
+                            
+                            if not proposal or not bid_amount:
+                                print("❌ Proposal and bid amount are required")
+                                continue
+                                
+                            try:
+                                bid_amount = float(bid_amount)
+                            except ValueError:
+                                print("❌ Invalid bid amount")
+                                continue
+                                
+                            # Submit application
+                            payload = {
+                                "freelancer_id": current_freelancer_id,
+                                "project_id": p["project_id"],
+                                "proposal": proposal,
+                                "bid_amount": bid_amount
+                            }
+                            
+                            app_res = requests.post(f"{BASE_URL}/freelancer/projects/apply", json=payload)
+                            app_result = app_res.json()
+                            if app_result.get("success"):
+                                print("✅ Applied successfully!")
+                            else:
+                                print(f"❌ Failed to apply: {app_result.get('msg')}")
+                            
+                            # Ask if they want to continue browsing
+                            continue_choice = input("\nContinue browsing other projects? (y/n): ").strip().lower()
+                            if continue_choice != 'y':
+                                break
+                        elif apply_choice == 'n':
+                            print("   Skipping this project...")
+                            continue
+                        else:
+                            print("   Please enter 'y' or 'n'")
+                            continue
+                    
+                    if i == len(projects):  # Finished all projects
+                        print("\n📋 No more relevant projects available.")
                 else:
                     print("❌", data.get("msg"))
             except Exception as e:
                 print("❌ Error:", str(e))
 
         elif choice == str(apply_option):
-            # Apply to Project
-            pid = input("Project ID: ").strip()
-            proposal = input("Proposal/Message: ").strip()
-            bid_amount = input("Your Bid Amount: ").strip()
-            
-            if not pid or not proposal or not bid_amount:
-                print("❌ Project ID, proposal, and bid amount are required")
-                continue
-                
-            try:
-                bid_amount = float(bid_amount)
-            except ValueError:
-                print("❌ Invalid bid amount")
-                continue
-                
-            payload = {
-                "freelancer_id": current_freelancer_id,
-                "project_id": pid,
-                "proposal": proposal,
-                "bid_amount": bid_amount
-            }
-            res = requests.post(f"{BASE_URL}/freelancer/projects/apply", json=payload)
-            result = res.json()
-            if result.get("success"):
-                print("✅ Application submitted successfully!")
-            else:
-                print("❌ Failed to apply:", result.get("msg"))
+            # Apply to Project (Legacy - Use Browse Projects instead)
+            print("\n⚠️  This option is deprecated.")
+            print("💡 Please use 'Browse Projects' to view and apply to relevant projects.")
+            print("   It shows projects matched to your category and allows direct application.")
+            continue
 
         # ---------- MAIN MENU ----------
 # ---------- MAIN MENU ----------
