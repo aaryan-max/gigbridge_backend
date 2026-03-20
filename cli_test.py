@@ -6,8 +6,27 @@ import uuid
 
 BASE_URL = "http://127.0.0.1:5000"
 
+try:
+    from categories import (
+        get_pricing_type_for_category,
+        PRICING_TYPE_HOURLY,
+        PRICING_TYPE_PER_PERSON,
+        PRICING_TYPE_PACKAGE,
+        PRICING_TYPE_PROJECT,
+    )
+except Exception:
+    # Fallback if categories module is not available for some reason;
+    # in that case CLI will behave like the legacy version and tests
+    # for pricing-type-specific behavior may be limited.
+    get_pricing_type_for_category = None
+    PRICING_TYPE_HOURLY = "hourly"
+    PRICING_TYPE_PER_PERSON = "per_person"
+    PRICING_TYPE_PACKAGE = "package"
+    PRICING_TYPE_PROJECT = "project"
+
 current_client_id = None
 current_freelancer_id = None
+selected_package = None
 
 def check_server_connection():
     """Check if Flask server is running"""
@@ -843,6 +862,28 @@ def view_freelancer_details(fid):
     print("Max Budget:", data.get("max_budget", "N/A"))
     print("Rating:", data.get("rating", "N/A"))
     print("Bio:", data.get("bio", "N/A"))
+
+    pricing_type = data.get("pricing_type")
+    if pricing_type == "package":
+        print("\n--- PACKAGES ---")
+        try:
+            packages_resp = requests.get(f"{BASE_URL}/freelancer/{fid}/packages")
+            if packages_resp.status_code == 200:
+                packages_data = packages_resp.json()
+                packages = packages_data.get('packages', [])
+                
+                if packages:
+                    for i, pkg in enumerate(packages, 1):
+                        print(f"\n📦 Package {i}")
+                        print(f"   Name: {pkg['package_name']}")
+                        print(f"   Services: {pkg['services_included']}")
+                        print(f"   Price: ₹{pkg['starting_price']}")
+                else:
+                    print("📦 No packages configured yet")
+            else:
+                print("📦 Unable to load packages")
+        except Exception as e:
+            print("📦 Error loading packages")
     
     # Display completed projects count if available
     if data.get("projects_completed") is not None:
@@ -859,6 +900,99 @@ def view_freelancer_details(fid):
             print("Availability: 🔴 On Leave")
         else:
             print("Availability:", status)
+
+    # Display pricing preferences
+    print("\n--- PRICING PREFERENCES ---")
+    supports_fixed = data.get("supports_fixed", True)
+    supports_hourly = data.get("supports_hourly", True)
+    
+    pricing_models = []
+    if supports_fixed:
+        pricing_models.append("Fixed")
+    if supports_hourly:
+        pricing_models.append("Hourly")
+    
+    print("Pricing Models:", " + ".join(pricing_models) if pricing_models else "Not set")
+    
+    if supports_fixed and data.get("fixed_price"):
+        print(f"Fixed Price: ₹{data['fixed_price']}")
+    
+    if supports_hourly:
+        if data.get("hourly_rate"):
+            print(f"Hourly Rate: ₹{data['hourly_rate']}/hour")
+        if data.get("overtime_rate_per_hour"):
+            print(f"Overtime Rate: ₹{data['overtime_rate_per_hour']}/hour")
+
+# ---------- PACKAGE SELECTION ----------
+def select_freelancer_package(fid):
+    """Handle package selection for a freelancer"""
+    global selected_package
+    
+    try:
+        # Fetch freelancer details to check if package-based
+        freelancer_res = requests.get(f"{BASE_URL}/freelancers/{fid}")
+        freelancer_data = freelancer_res.json()
+        
+        if not freelancer_data.get("success"):
+            print("❌ Error fetching freelancer details:", freelancer_data.get("msg"))
+            return False
+        
+        category = freelancer_data.get("category")
+        pricing_type = None
+        if get_pricing_type_for_category and category and category.strip():
+            try:
+                pricing_type = get_pricing_type_for_category(category)
+            except Exception:
+                pricing_type = None
+        else:
+            pricing_type = None
+        
+        if pricing_type != PRICING_TYPE_PACKAGE:
+            print("❌ This freelancer is not package-based")
+            return False
+        
+        # Fetch packages
+        packages_resp = requests.get(f"{BASE_URL}/freelancer/{fid}/packages")
+        if packages_resp.status_code != 200:
+            print("❌ Failed to fetch packages")
+            return False
+        
+        packages_data = packages_resp.json()
+        packages = packages_data.get('packages', [])
+        
+        if not packages:
+            print("❌ No packages available for this freelancer")
+            return False
+        
+        print("\n## 📦 Available Packages")
+        print("=" * 40)
+        
+        for i, pkg in enumerate(packages, 1):
+            print(f"\n[{i}] {pkg['package_name']}")
+            print(f"💰 Price: ₹{pkg['starting_price']}")
+            print(f"🧾 Services: {pkg['services_included']}")
+        
+        print("=" * 40)
+        
+        # Package selection
+        while True:
+            try:
+                choice = input(f"\nChoose package (1-{len(packages)}): ").strip()
+                choice_idx = int(choice) - 1
+                if 0 <= choice_idx < len(packages):
+                    selected_package = packages[choice_idx]
+                    print(f"\n✅ You selected: {selected_package['package_name']}")
+                    print(f"💰 Price: ₹{selected_package['starting_price']}")
+                    print("\nReturning to freelancer menu...")
+                    return True
+                else:
+                    print(f"❌ Invalid choice, select between 1 and {len(packages)}")
+            except ValueError:
+                print("❌ Please enter a valid number")
+                
+    except Exception as e:
+        print(f"❌ Error selecting package: {str(e)}")
+        return False
     
     # Display profile image if available
     if data.get("profile_image"):
@@ -917,100 +1051,35 @@ def view_freelancer_details(fid):
 def hire_freelancer(fid):
     print(f"\n--- Hiring Freelancer ID: {fid} ---")
     
-    # Quick hire options
-    print("Hire Options:")
-    print("1. Quick Hire (Simple Contract)")
-    print("2. Custom Hire (Advanced Options)")
-    print("0. Cancel")
-    
-    hire_choice = input("Choose option (1-2): ").strip()
-    if hire_choice == "0":
-        print("❌ Hire cancelled")
-        return
-    elif hire_choice == "1":
-        # Quick hire - simplified process
-        job_title = input("Job Title: ")
-        budget = input("Proposed Budget: ")
-        note = input("Note (optional): ")
-        
-        # Event venue collection for quick hire
-        print("\n--- Event Venue ---")
-        print("1. Use my saved profile address")
-        print("2. Enter custom event venue")
-        venue_choice = input("Choose venue option (1-2): ").strip()
-        
-        if venue_choice == "1":
-            venue_source = "profile"
-            event_address = ""
-            event_city = ""
-            event_pincode = ""
-            event_landmark = ""
-        elif venue_choice == "2":
-            venue_source = "custom"
-            event_address = input("Event Address: ")
-            event_city = input("Event City: ")
-            event_pincode = input("Event Pincode: ")
-            event_landmark = input("Event Landmark (optional): ")
-        else:
-            print("❌ Invalid venue choice")
+    try:
+        # STEP 1: GET PRICING TYPE FROM PROFILE
+        profile_resp = requests.get(f"{BASE_URL}/freelancer/profile/{fid}")
+        profile_data = profile_resp.json()
+        if not profile_data.get("success"):
+            print("❌ Error fetching freelancer profile:", profile_data.get("msg"))
             return
         
-        # Default to FIXED contract for quick hire
-        hire_data = {
-            "client_id": current_client_id,
-            "freelancer_id": fid,
-            "job_title": job_title,
-            "proposed_budget": budget,
-            "note": note,
-            "contract_type": "FIXED",
-            "venue_source": venue_source,
-            "event_address": event_address,
-            "event_city": event_city,
-            "event_pincode": event_pincode,
-            "event_landmark": event_landmark
-        }
+        freelancer_profile = profile_data  # Data is directly in root
+        pricing_type = freelancer_profile.get("pricing_type")
         
-        print(f"\n--- Quick Hire Summary ---")
-        print(f"Freelancer ID: {fid}")
-        print(f"Job Title: {job_title}")
-        print(f"Budget: {budget}")
-        print(f"Contract Type: FIXED (Milestone Based)")
-        print(f"Venue: {event_address if venue_source == 'custom' else 'Saved Profile Address'}")
-        if venue_source == "custom":
-            print(f"Event City: {event_city}")
-            print(f"Event Pincode: {event_pincode}")
+        if not pricing_type:
+            print("❌ Freelancer pricing type not found")
+            return
         
-    elif hire_choice == "2":
-        # Custom hire - full options
-        job_title = input("Job Title: ")
-        budget = input("Proposed Budget: ")
-        note = input("Note (optional): ")
+        print(f"\n--- {pricing_type.upper()} PRICING ---")
         
-        # Collect date/time slot information
-        print("\n--- Event Date & Time ---")
+        # STEP 2: COLLECT COMMON FIELDS WITH VALIDATION
         while True:
-            event_date = input("Enter Event Date (YYYY-MM-DD): ").strip()
-            start_time = input("Enter Start Time (HH:MM): ").strip()
-            end_time = input("Enter End Time (HH:MM): ").strip()
-            
-            # Validate using booking service
+            event_date = input("Event Date (YYYY-MM-DD): ").strip()
+            # Validate date format
             try:
-                from booking_service import validate_hire_request_slot, format_time_slot_display
-                is_valid, error_msg = validate_hire_request_slot(
-                    fid, event_date, start_time, end_time
-                )
-                if is_valid:
-                    print(f"\nSelected Event Slot:")
-                    print(format_time_slot_display(event_date, start_time, end_time))
-                    break
-                else:
-                    print(f"❌ {error_msg}")
-                    print("Please try again.\n")
-            except ImportError:
-                print("⚠️  Booking validation not available, proceeding without validation")
+                from datetime import datetime
+                datetime.strptime(event_date, "%Y-%m-%d")
                 break
+            except ValueError:
+                print("❌ Invalid date format. Please use YYYY-MM-DD (e.g., 2024-12-25)")
         
-        # Event venue collection for custom hire
+        # Event venue collection
         print("\n--- Event Venue ---")
         print("1. Use my saved profile address")
         print("2. Enter custom event venue")
@@ -1025,123 +1094,180 @@ def hire_freelancer(fid):
         elif venue_choice == "2":
             venue_source = "custom"
             event_address = input("Event Address: ")
-            event_city = input("Event City: ")
+            event_city = ""
             event_pincode = input("Event Pincode: ")
-            event_landmark = input("Event Landmark (optional): ")
+            event_landmark = ""
         else:
             print("❌ Invalid venue choice")
             return
         
-        # Contract type selection
-        print("\n--- Contract Type ---")
-        print("1. FIXED (Milestone Based)")
-        print("2. HOURLY (Weekly Billing with Overtime)")
-        print("3. EVENT (Performance-Based with Overtime Clause)")
+        work_description = input("Work Description: ")
+        additional_requirements = input("Additional Requirements (optional): ").strip()
         
-        while True:
-            contract_choice = input("Choose contract type (1-3): ")
-            if contract_choice in ["1", "2", "3"]:
-                break
-            print("❌ Invalid choice. Please enter 1, 2, or 3")
+        # STEP 3: APPLY PRICING-TYPE-SPECIFIC LOGIC
+        total_amount = 0
+        total_display = ""
         
-        contract_types = {"1": "FIXED", "2": "HOURLY", "3": "EVENT"}
-        contract_type = contract_types[contract_choice]
+        if pricing_type == PRICING_TYPE_HOURLY:
+            # HOURLY PRICING
+            start_time = input("Start Time (HH:MM): ").strip()
+            end_time = input("End Time (HH:MM): ").strip()
+            
+            # Calculate hours
+            from datetime import datetime, timedelta
+            try:
+                start_dt = datetime.strptime(f"{event_date} {start_time}", "%Y-%m-%d %H:%M")
+                end_dt = datetime.strptime(f"{event_date} {end_time}", "%Y-%m-%d %H:%M")
+                if end_dt <= start_dt:
+                    end_dt += timedelta(days=1)  # Handle overnight events
+                
+                number_of_hours = (end_dt - start_dt).total_seconds() / 3600
+                hourly_rate = freelancer_profile.get("hourly_rate") or freelancer_profile.get("pricing", {}).get("hourly_rate", 0)
+                
+                if hourly_rate <= 0:
+                    print("⚠️ This freelancer has not set hourly pricing. Please choose another freelancer.")
+                    return
+                
+                total_amount = hourly_rate * number_of_hours
+                total_display = f"Computed Total: ₹{total_amount} (₹{hourly_rate}/hour × {number_of_hours:.1f} hours)"
+                
+            except Exception as e:
+                print(f"❌ Error calculating hours: {e}")
+                return
         
-        # Prepare hire request data
+        elif pricing_type == PRICING_TYPE_PER_PERSON:
+            # PER_PERSON PRICING
+            while True:
+                try:
+                    number_of_persons = int(input("Number of Persons: "))
+                    if number_of_persons > 0:
+                        break
+                    print("❌ Number of persons must be greater than 0")
+                except ValueError:
+                    print("❌ Please enter a valid integer")
+            
+            per_person_rate = freelancer_profile.get("per_person_rate") or freelancer_profile.get("pricing", {}).get("per_person_rate", 0)
+            if per_person_rate <= 0:
+                print("⚠️ This freelancer has not set per person pricing. Please choose another freelancer.")
+                return
+            
+            total_amount = per_person_rate * number_of_persons
+            total_display = f"Computed Total: ₹{total_amount} (₹{per_person_rate} × {number_of_persons} persons)"
+        
+        elif pricing_type == PRICING_TYPE_PACKAGE:
+            # PACKAGE PRICING
+            global selected_package
+            
+            if not selected_package or not selected_package.get('package_id'):
+                print("❌ Please select package first")
+                print("Use 'Select Package 📦' option from the freelancer menu")
+                return
+            
+            # Verify package belongs to this freelancer
+            try:
+                packages_resp = requests.get(f"{BASE_URL}/freelancer/{fid}/packages")
+                if packages_resp.status_code == 200:
+                    packages_data = packages_resp.json()
+                    packages = packages_data.get('packages', [])
+                    
+                    package_found = False
+                    for pkg in packages:
+                        if pkg['package_id'] == selected_package['package_id']:
+                            total_amount = selected_package['starting_price']
+                            total_display = f"Selected Package: {selected_package['package_name']} — ₹{total_amount}"
+                            package_found = True
+                            break
+                    
+                    if not package_found:
+                        print("❌ Selected package not found for this freelancer")
+                        return
+            except:
+                print("❌ Error verifying package")
+                return
+        
+        elif pricing_type == PRICING_TYPE_PROJECT:
+            # PROJECT PRICING
+            while True:
+                proposed_budget = input("Proposed Budget: ")
+                try:
+                    total_amount = float(proposed_budget)
+                    if total_amount > 0:
+                        break
+                    print("❌ Budget must be greater than 0")
+                except ValueError:
+                    print("❌ Invalid budget amount. Please enter a number")
+            
+            total_display = f"Proposed Budget: ₹{total_amount}"
+        
+        else:
+            print("❌ Unknown pricing type")
+            return
+        
+        # STEP 4: DISPLAY TOTAL AND CONFIRM
+        print(f"\n--- HIRE SUMMARY ---")
+        print(f"Freelancer ID: {fid}")
+        print(f"Event Date: {event_date}")
+        print(f"Work Description: {work_description}")
+        if additional_requirements:
+            print(f"Additional Requirements: {additional_requirements}")
+        print(f"Venue: {event_address if venue_source == 'custom' else 'Saved Profile Address'}")
+        print(f"Pricing Type: {pricing_type.upper()}")
+        print(f"{total_display}")
+        
+        confirm = input("\nConfirm Hire Request? (y/n): ").strip().lower()
+        if confirm != 'y':
+            print("❌ Hire request cancelled")
+            return
+        
+        # STEP 5: SEND REQUEST WITH BACKEND COMPATIBILITY
         hire_data = {
             "client_id": current_client_id,
             "freelancer_id": fid,
-            "job_title": job_title,
-            "proposed_budget": budget,
-            "note": note,
-            "contract_type": contract_type,
+            "pricing_type": pricing_type,
+            "total_amount": total_amount,
             "event_date": event_date,
-            "start_time": start_time,
-            "end_time": end_time,
+            "work_description": work_description,
+            "additional_requirements": additional_requirements,
             "venue_source": venue_source,
             "event_address": event_address,
             "event_city": event_city,
             "event_pincode": event_pincode,
-            "event_landmark": event_landmark
+            "event_landmark": event_landmark,
+            "contract_type": "FIXED"  # Default for backend compatibility
         }
         
-        # Add contract-specific fields
-        if contract_type == "HOURLY":
-            hourly_rate = input("Hourly Rate: ")
-            weekly_limit = input("Weekly Hours Limit: ")
-            max_daily_hours = input("Max Daily Hours (default 8): ") or "8"
-            
-            hire_data.update({
-                "contract_hourly_rate": float(hourly_rate),
-                "weekly_limit": float(weekly_limit),
-                "max_daily_hours": float(max_daily_hours)
-            })
-            
-        elif contract_type == "EVENT":
-            event_base_fee = input("Event Base Fee: ")
-            event_included_hours = input("Included Hours: ")
-            event_overtime_rate = input("Overtime Rate per Hour: ")
-            advance_paid = input("Advance Paid (0 if none): ") or "0"
-            
-            hire_data.update({
-                "event_base_fee": float(event_base_fee),
-                "event_included_hours": float(event_included_hours),
-                "event_overtime_rate": float(event_overtime_rate),
-                "advance_paid": float(advance_paid)
-            })
-
-        # Confirmation step
-        print(f"\n--- Custom Hire Summary ---")
-        print(f"Freelancer ID: {fid}")
-        print(f"Job Title: {job_title}")
-        print(f"Budget: {budget}")
-        print(f"Event Date: {event_date}")
-        print(f"Time Slot: {start_time} - {end_time}")
-        print(f"Contract Type: {contract_type}")
-        print(f"Venue: {event_address if venue_source == 'custom' else 'Saved Profile Address'}")
-        if venue_source == "custom":
-            print(f"Event City: {event_city}")
-            print(f"Event Pincode: {event_pincode}")
+        # Add fallback for backend compatibility
+        if pricing_type != PRICING_TYPE_PROJECT:
+            hire_data["proposed_budget"] = total_amount  # Fallback for older backend
         
-    else:
-        print("❌ Invalid choice")
+        # Add pricing-type-specific fields
+        if pricing_type == PRICING_TYPE_HOURLY:
+            hire_data["start_time"] = start_time
+            hire_data["end_time"] = end_time
+            hire_data["hourly_rate"] = freelancer_profile.get("hourly_rate") or freelancer_profile.get("pricing", {}).get("hourly_rate")
+            hire_data["contract_type"] = "HOURLY"
+        elif pricing_type == PRICING_TYPE_PER_PERSON:
+            hire_data["number_of_persons"] = number_of_persons
+            hire_data["per_person_rate"] = per_person_rate
+        elif pricing_type == PRICING_TYPE_PACKAGE:
+            hire_data["selected_package_id"] = selected_package['package_id']
+        elif pricing_type == PRICING_TYPE_PROJECT:
+            hire_data["proposed_budget"] = proposed_budget
+            hire_data["guest_count"] = locals().get('guest_count')  # Will be None if not set
+        
+        res = requests.post(f"{BASE_URL}/client/hire", json=hire_data)
+        result = res.json()
+        
+        if result.get("success"):
+            print("\n✅ Hire request sent successfully!")
+            print(f"Request ID: {result.get('request_id')}")
+            print(f"Status: Pending approval")
+        else:
+            print(f"\n❌ Failed to send hire request: {result.get('msg', 'Unknown error')}")
+            
+    except Exception as e:
+        print(f"❌ Error in hire process: {str(e)}")
         return
-    
-    confirm = input("\nConfirm Hire Request? (y/n): ").strip().lower()
-    if confirm != 'y':
-        print("❌ Hire request cancelled")
-        return
-
-    res = requests.post(f"{BASE_URL}/client/hire", json=hire_data)
-    result = res.json()
-    
-    if result.get("success"):
-        print("\n✅ Hire request sent successfully!")
-        print(f"Freelancer ID: {fid}")
-        print(f"Job Title: {job_title}")
-        print(f"Budget: {budget}")
-        
-        # Show venue information
-        venue_info = result.get("venue", {})
-        print(f"\n--- Event Venue ---")
-        print(f"Venue: {venue_info.get('event_address', 'Not specified')}")
-        if venue_info.get('event_city'):
-            print(f"City: {venue_info.get('event_city')}")
-        if venue_info.get('event_pincode'):
-            print(f"Pincode: {venue_info.get('event_pincode')}")
-        print(f"Source: {venue_info.get('venue_source', 'custom')}")
-        
-        # Show location compatibility check
-        location_check = result.get("location_check", {})
-        print(f"\n--- Location Compatibility ---")
-        print(f"Status: {'✅ Compatible' if location_check.get('location_ok') else '⚠️  May be far'}")
-        print(f"Note: {location_check.get('location_note', 'No location check performed')}")
-        
-        print(f"Status: PENDING")
-        print(f"Request ID: {result.get('request_id')}")
-    else:
-        print(f"\n❌ Failed to send hire request: {result.get('msg', 'Unknown error')}")
-
 # ---------- CLIENT: MESSAGES (THREADS) ----------
 def client_messages_menu():
     """Show freelancers you have chatted with and open a chat."""
@@ -1177,10 +1303,17 @@ def client_messages_menu():
         return
 
     sel = int(sel)
-    for num, fid, _name in mapping:
-        if num == sel:
-            open_chat_with_freelancer(fid)
-            return
+    for item in mapping:
+        if isinstance(item, (list, tuple)) and len(item) >= 3:
+            num, fid, _name = item[0], item[1], item[2]
+            if num == sel:
+                open_chat_with_freelancer(fid)
+                return
+        elif isinstance(item, (list, tuple)) and len(item) >= 2:
+            num, fid = item[0], item[1]
+            if num == sel:
+                open_chat_with_freelancer(fid)
+                return
 
     print("❌ Invalid selection")
 
@@ -1196,21 +1329,35 @@ def client_job_request_status_menu():
             "client_id": current_client_id
         })
         data = res.json()
+        
+        # Normalize response to handle both list and dict formats
+        if isinstance(data, list):
+            items = data
+        else:
+            items = data.get("data") or data.get("requests") or data.get("results") or []
     except Exception:
-        data = []
+        items = []
 
     print("\n--- JOB REQUEST STATUS ---")
-    if not data:
+    if not items:
         print("📭 No job requests found")
         return
 
-    for idx, r in enumerate(data, 1):
-        title = (r.get("job_title") or "Untitled").strip()
-        budget = r.get("proposed_budget")
-        status = r.get("status")
-        fname = r.get("freelancer_name") or "Freelancer"
-        fid = r.get("freelancer_id")
-        rid = r.get("request_id")
+    for idx, r in enumerate(items, 1):
+        if isinstance(r, dict):
+            title = (r.get("job_title") or "Untitled").strip()
+            budget = r.get("proposed_budget")
+            status = r.get("status")
+            fname = r.get("freelancer_name") or "Freelancer"
+            fid = r.get("freelancer_id")
+            rid = r.get("request_id")
+        else:
+            title = str(r)
+            budget = "N/A"
+            status = "N/A"
+            fname = "N/A"
+            fid = "N/A"
+            rid = "N/A"
 
         print(f"\n{idx}. Request ID: {rid}")
         print(f"   Freelancer: {fname} (ID: {fid})")
@@ -1297,10 +1444,9 @@ def show_platform_stats():
     except Exception as e:
         print("❌ Error fetching platform stats:", str(e))
 
-
 # ---------- CLIENT FLOW ----------
 def client_flow():
-    global current_client_id
+    global current_client_id, selected_package
 
     if not current_client_id:
         login_or_signup("client")
@@ -1407,6 +1553,95 @@ def client_flow():
                     print("Plan:", f["subscription_plan"])
                 if f.get("distance") and f["distance"] != 999999.0:
                     print("Distance:", f"{f['distance']:.1f} km")
+
+                freelancer_pricing_type = None
+                category = f.get("category")
+                if get_pricing_type_for_category is not None and category and category.strip():
+                    try:
+                        freelancer_pricing_type = get_pricing_type_for_category(category)
+                    except Exception:
+                        freelancer_pricing_type = None
+                else:
+                    freelancer_pricing_type = None
+                
+                # Show selected package if applicable
+                if selected_package and selected_package.get('package_id'):
+                    # Check if this package belongs to current freelancer
+                    try:
+                        packages_resp = requests.get(f"{BASE_URL}/freelancer/{f['freelancer_id']}/packages")
+                        if packages_resp.status_code == 200:
+                            packages_data = packages_resp.json()
+                            packages = packages_data.get('packages', [])
+                            
+                            # Find if selected package belongs to this freelancer
+                            for pkg in packages:
+                                if pkg['package_id'] == selected_package['package_id']:
+                                    print(f"\n📦 Selected Package: {selected_package['package_name']} (₹{selected_package['starting_price']})")
+                                    break
+                    except:
+                        pass  # Don't break the flow if package check fails
+                
+                # For package-based categories, show package selection if no package selected yet
+                elif freelancer_pricing_type == PRICING_TYPE_PACKAGE:
+                    print(f"\n🔍 Package-based service detected!")
+                    print("Please select a package before proceeding:")
+                    
+                    # Fetch packages for this freelancer
+                    try:
+                        packages_resp = requests.get(f"{BASE_URL}/freelancer/{f['freelancer_id']}/packages")
+                        if packages_resp.status_code == 200:
+                            packages_data = packages_resp.json()
+                            packages = packages_data.get('packages', [])
+                            
+                            if not packages:
+                                print("❌ No packages available for this freelancer")
+                                print("Skipping to next freelancer...")
+                                current_index += 1
+                                continue
+                            
+                            print("\n## 📦 Available Packages")
+                            print("=" * 40)
+                            
+                            for i, pkg in enumerate(packages, 1):
+                                print(f"\n[{i}] {pkg['package_name']}")
+                                print(f"💰 Price: ₹{pkg['starting_price']}")
+                                print(f"🧾 Services: {pkg['services_included']}")
+                            
+                            print("=" * 40)
+                            
+                            # Package selection
+                            while True:
+                                try:
+                                    choice = input(f"\nChoose package (1-{len(packages)}): ").strip()
+                                    choice_idx = int(choice) - 1
+                                    if 0 <= choice_idx < len(packages):
+                                        selected_package = packages[choice_idx]
+                                        print(f"\n✅ Package selected: {selected_package['package_name']}")
+                                        print(f"💰 Price: ₹{selected_package['starting_price']}")
+                                        break
+                                    else:
+                                        print(f"❌ Invalid choice, select between 1 and {len(packages)}")
+                                except ValueError:
+                                    print("❌ Please enter a valid number")
+                                    
+                            # After selection, show the selected package info
+                            print(f"\n📦 Selected Package: {selected_package['package_name']} (₹{selected_package['starting_price']})")
+                            
+                        else:
+                            print("❌ Failed to fetch packages")
+                    except Exception as e:
+                        print(f"❌ Error fetching packages: {str(e)}")
+                
+                # Determine pricing type for this specific freelancer (for menu display)
+                freelancer_pricing_type = None
+                category = f.get("category")
+                if get_pricing_type_for_category is not None and category and category.strip():
+                    try:
+                        freelancer_pricing_type = get_pricing_type_for_category(category)
+                    except Exception:
+                        freelancer_pricing_type = None
+                else:
+                    freelancer_pricing_type = None
                 
                 print(f"Showing {current_index + 1} of {len(freelancers)}")
 
@@ -1415,8 +1650,14 @@ def client_flow():
                 print("2. Message")
                 print("3. Hire")
                 print("4. Save Freelancer")
-                print("5. Next")
-                print("6. Previous")
+                # Show package options ONLY for package-based freelancers
+                if freelancer_pricing_type == PRICING_TYPE_PACKAGE:
+                    if selected_package:
+                        print("5. Switch Package 🔄")
+                    else:
+                        print("5. Select Package 📦")
+                print("6. Next")
+                print("7. Previous")
                 print("0. Back to Dashboard")
 
                 action = input("Choose: ")
@@ -1433,10 +1674,12 @@ def client_flow():
                     })
                     print(res.json())
                 elif action == "5":
+                    select_freelancer_package(f["freelancer_id"])
+                elif action == "6":
                     current_index += 1
                     if current_index >= len(freelancers):
                         current_index = 0  # Wrap around to beginning
-                elif action == "6":
+                elif action == "7":
                     current_index -= 1
                     if current_index < 0:
                         current_index = len(freelancers) - 1  # Wrap around to end
@@ -1444,95 +1687,229 @@ def client_flow():
                     break
 
         elif choice == "3":
+            pricing_type = None
             category = input("Category (e.g., Dancer, Singer, Photographer): ").strip()
             specialization = input("Specialization : ").strip()
-            budget_in = input("Max Budget: ").strip()
-
-            try:
-                budget = float(budget_in)
-            except Exception:
-                print("❌ Invalid budget")
+            
+            # Validate category and derive pricing type
+            if not category:
+                print("❌ Category is required")
                 continue
-
+            
+            try:
+                pricing_type = get_pricing_type_for_category(category)
+                print(f"\n✅ Category: {category}")
+                print(f"💰 Pricing type: {pricing_type}")
+            except Exception:
+                print(f"❌ Invalid category: {category}")
+                print("Valid categories: DJ, Singer, Anchor, Band / Live Music, Dancer, Magician / Entertainer,")
+                print("                Makeup Artist, Mehendi Artist, Photographer, Videographer, Choreographer,")
+                print("                Artist, Decorator, Wedding Planner, Event Organizer")
+                continue
+            
+            # safety check
+            if not pricing_type:
+                print("❌ Pricing type not found")
+                continue
+            
+            # Ask for budget based on pricing type
+            if pricing_type != PRICING_TYPE_PACKAGE:
+                budget_prompt = ""
+                if pricing_type == PRICING_TYPE_HOURLY:
+                    budget_prompt = "Enter maximum hourly rate: "
+                elif pricing_type == PRICING_TYPE_PER_PERSON:
+                    budget_prompt = "Enter maximum per person rate: "
+                elif pricing_type == PRICING_TYPE_PROJECT:
+                    budget_prompt = "Enter maximum starting price: "
+                else:
+                    budget_prompt = "Enter maximum budget: "
+                
+                budget_in = input(budget_prompt).strip()
+                try:
+                    budget = float(budget_in)
+                    if budget <= 0:
+                        print("❌ Budget must be greater than 0")
+                        continue
+                except Exception:
+                    print("❌ Invalid budget")
+                    continue
+            else:
+                # For package type, set budget to 0 (not used)
+                budget = 0
+            
             params = {
                 "category": category,
+                "pricing_type": pricing_type.upper(),
                 "budget": budget
             }
+            
             if current_client_id:
                 params["client_id"] = current_client_id
             if specialization and specialization.strip() and specialization.lower() not in ["no", "none", ""]:
                 params["q"] = specialization
-
-            res = requests.get(f"{BASE_URL}/freelancers/search", params=params)
-
-            data = res.json()
-            if not data.get("success"):
-                print("❌ Error searching freelancers:", data.get("msg", "Unknown error"))
-                continue
-
-            freelancers = data.get("results", [])
-            if not freelancers:
-                print("❌ No freelancers found")
-                continue
-
-            current_index = 0
-            while current_index < len(freelancers):
-                f = freelancers[current_index]
-                print("\n--- Freelancer ---")
-                print("ID:", f["freelancer_id"])
-                print("Name:", f["name"])
-                print("Category:", f.get("category", "Not specified"))
-                print("Title:", f.get("title", "Not specified"))
-                print("Budget Range:", f.get("budget_range", "Not specified"))
-                print("Rating:", f.get("rating", 0))
-                print("Status:", f.get("availability_status", "UNKNOWN"))
+            
+            # Execute search
+            try:
+                res = requests.get(f"{BASE_URL}/freelancers/search", params=params)
+                data = res.json()
+                if not data.get("success"):
+                    print("❌ Error searching freelancers:", data.get("msg", "Unknown error"))
+                    continue
                 
-                # Additional hiring-relevant information
-                if f.get("experience"):
-                    print("Experience:", f["experience"], "years")
-                if f.get("skills"):
-                    print("Skills:", f["skills"])
-                if f.get("bio"):
-                    print("Bio:", f["bio"][:100] + "..." if len(f["bio"]) > 100 else f["bio"])
-                if f.get("subscription_plan"):
-                    print("Plan:", f["subscription_plan"])
-                if f.get("distance") and f["distance"] != 999999.0:
-                    print("Distance:", f"{f['distance']:.1f} km")
-                
-                print(f"Showing {current_index + 1} of {len(freelancers)}")
+                freelancers = data.get("results", [])
+                if not freelancers:
+                    print("❌ No freelancers found matching your criteria")
+                    continue
 
-                print("\n--- Actions ---")
-                print("1. View Details")
-                print("2. Message")
-                print("3. Hire")
-                print("4. Save Freelancer")
-                print("5. Next")
-                print("6. Previous")
-                print("0. Back to Dashboard")
+                current_index = 0
+                while current_index < len(freelancers):
+                    f = freelancers[current_index]
+                    print("\n--- Freelancer ---")
+                    print("ID:", f["freelancer_id"])
+                    print("Name:", f["name"])
+                    print("Category:", f.get("category", "Not specified"))
+                    print("Title:", f.get("title", "Not specified"))
+                    print("Budget Range:", f.get("budget_range", "Not specified"))
+                    print("Rating:", f.get("rating", 0))
+                    print("Status:", f.get("availability_status", "UNKNOWN"))
+                    
+                    # Additional hiring-relevant information
+                    if f.get("experience"):
+                        print("Experience:", f["experience"], "years")
+                    if f.get("skills"):
+                        print("Skills:", f["skills"])
+                    if f.get("bio"):
+                        print("Bio:", f["bio"][:100] + "..." if len(f["bio"]) > 100 else f["bio"])
+                    if f.get("subscription_plan"):
+                        print("Plan:", f["subscription_plan"])
+                    if f.get("distance") and f["distance"] != 999999.0:
+                        print("Distance:", f"{f['distance']:.1f} km")
+                    
+                    # Show selected package if applicable
+                    if selected_package and selected_package.get('package_id'):
+                        # Check if this package belongs to current freelancer
+                        try:
+                            packages_resp = requests.get(f"{BASE_URL}/freelancer/{f['freelancer_id']}/packages")
+                            if packages_resp.status_code == 200:
+                                packages_data = packages_resp.json()
+                                packages = packages_data.get('packages', [])
+                                
+                                # Find if selected package belongs to this freelancer
+                                for pkg in packages:
+                                    if pkg['package_id'] == selected_package['package_id']:
+                                        print(f"\n📦 Selected Package: {selected_package['package_name']} (₹{selected_package['starting_price']})")
+                                        break
+                        except:
+                            pass  # Don't break the flow if package check fails
+                    
+                    # For package-based categories, show package selection if no package selected yet
+                    elif pricing_type == PRICING_TYPE_PACKAGE:
+                        print(f"\n🔍 Package-based service detected!")
+                        print("Please select a package before proceeding:")
+                        
+                        # Fetch packages for this freelancer
+                        try:
+                            packages_resp = requests.get(f"{BASE_URL}/freelancer/{f['freelancer_id']}/packages")
+                            if packages_resp.status_code == 200:
+                                packages_data = packages_resp.json()
+                                packages = packages_data.get('packages', [])
+                                
+                                if not packages:
+                                    print("❌ No packages available for this freelancer")
+                                    print("Skipping to next freelancer...")
+                                    current_index += 1
+                                    continue
+                                
+                                print("\n## 📦 Available Packages")
+                                print("=" * 40)
+                                
+                                for i, pkg in enumerate(packages, 1):
+                                    print(f"\n[{i}] {pkg['package_name']}")
+                                    print(f"💰 Price: ₹{pkg['starting_price']}")
+                                    print(f"🧾 Services: {pkg['services_included']}")
+                                
+                                print("=" * 40)
+                                
+                                # Package selection
+                                while True:
+                                    try:
+                                        choice = input(f"\nChoose package (1-{len(packages)}): ").strip()
+                                        choice_idx = int(choice) - 1
+                                        if 0 <= choice_idx < len(packages):
+                                            selected_package = packages[choice_idx]
+                                            print(f"\n✅ Package selected: {selected_package['package_name']}")
+                                            print(f"💰 Price: ₹{selected_package['starting_price']}")
+                                            break
+                                        else:
+                                            print(f"❌ Invalid choice, select between 1 and {len(packages)}")
+                                    except ValueError:
+                                        print("❌ Please enter a valid number")
+                                        
+                                # After selection, show the selected package info
+                                print(f"\n📦 Selected Package: {selected_package['package_name']} (₹{selected_package['starting_price']})")
+                                
+                            else:
+                                print("❌ Failed to fetch packages")
+                        except Exception as e:
+                            print(f"❌ Error fetching packages: {str(e)}")
+                    
+                    # Determine pricing type for this specific freelancer (for menu display)
+                    freelancer_pricing_type = None
+                    category = f.get("category")
+                    if get_pricing_type_for_category is not None and category and category.strip():
+                        try:
+                            freelancer_pricing_type = get_pricing_type_for_category(category)
+                        except Exception:
+                            freelancer_pricing_type = None
+                    else:
+                        freelancer_pricing_type = None
+                    
+                    print(f"Showing {current_index + 1} of {len(freelancers)}")
 
-                action = input("Choose: ")
-                if action == "1":
-                    view_freelancer_details(f["freelancer_id"])
-                elif action == "2":
-                    open_chat_with_freelancer(f["freelancer_id"])
-                elif action == "3":
-                    hire_freelancer(f["freelancer_id"])
-                elif action == "4":
-                    res = requests.post(f"{BASE_URL}/client/save-freelancer", json={
-                        "client_id": current_client_id,
-                        "freelancer_id": f["freelancer_id"]
-                    })
-                    print(res.json())
-                elif action == "5":
-                    current_index += 1
-                    if current_index >= len(freelancers):
-                        current_index = 0  # Wrap around to beginning
-                elif action == "6":
-                    current_index -= 1
-                    if current_index < 0:
-                        current_index = len(freelancers) - 1  # Wrap around to end
-                elif action == "0":
-                    break
+                    print("\n--- Actions ---")
+                    print("1. View Details")
+                    print("2. Message")
+                    print("3. Hire")
+                    print("4. Save Freelancer")
+                    # Show package options ONLY for package-based freelancers
+                    if freelancer_pricing_type == PRICING_TYPE_PACKAGE:
+                        if selected_package:
+                            print("5. Switch Package 🔄")
+                        else:
+                            print("5. Select Package 📦")
+                    print("6. Next")
+                    print("7. Previous")
+                    print("0. Back to Dashboard")
+
+                    action = input("Choose: ")
+                    if action == "1":
+                        view_freelancer_details(f["freelancer_id"])
+                    elif action == "2":
+                        open_chat_with_freelancer(f["freelancer_id"])
+                    elif action == "3":
+                        hire_freelancer(f["freelancer_id"])
+                    elif action == "4":
+                        res = requests.post(f"{BASE_URL}/client/save-freelancer", json={
+                            "client_id": current_client_id,
+                            "freelancer_id": f["freelancer_id"]
+                        })
+                        print(res.json())
+                    elif action == "5":
+                        select_freelancer_package(f["freelancer_id"])
+                    elif action == "6":
+                        current_index += 1
+                        if current_index >= len(freelancers):
+                            current_index = 0  # Wrap around to beginning
+                    elif action == "7":
+                        current_index -= 1
+                        if current_index < 0:
+                            current_index = len(freelancers) - 1  # Wrap around to end
+                    elif action == "0":
+                        break
+                        
+            except Exception as e:
+                print("❌ Error during search:", str(e))
+                continue
 
         elif choice == "4":
             res = requests.get(f"{BASE_URL}/client/jobs", params={
@@ -1540,16 +1917,29 @@ def client_flow():
             })
             print("\n--- My Jobs ---")
             try:
-                jobs = res.json()
+                jobs_data = res.json()
+                
+                # Normalize response to handle both list and dict formats
+                if isinstance(jobs_data, list):
+                    jobs = jobs_data
+                else:
+                    jobs = jobs_data.get("data") or jobs_data.get("jobs") or jobs_data.get("results") or []
+                    
                 if not jobs:
                     print("❌ No jobs found")
                 else:
                     for i, j in enumerate(jobs, 1):
-                        print(f"{i}. {j['title']} | ₹{j['budget']} | {j['status']}")
-                        
-                        # Show rating option for PAID jobs
-                        if j.get('status') == 'PAID':
-                            print("   [R] Rate this freelancer")
+                        if isinstance(j, dict):
+                            title = j.get('title', 'Untitled')
+                            budget = j.get('budget', 'N/A')
+                            status = j.get('status', 'N/A')
+                            print(f"{i}. {title} | ₹{budget} | {status}")
+                            
+                            # Show rating option for PAID jobs
+                            if j.get('status') == 'PAID':
+                                print("   [R] Rate this freelancer")
+                        else:
+                            print(f"{i}. {str(j)}")
                     
                     # Allow user to select a job for rating
                     action = input("\nEnter job number to rate, or 0 to go back: ")
@@ -1558,7 +1948,7 @@ def client_flow():
                             job_idx = int(action) - 1 if action.isdigit() else None
                             if job_idx is not None and 0 <= job_idx < len(jobs):
                                 selected_job = jobs[job_idx]
-                                if selected_job.get('status') == 'PAID':
+                                if isinstance(selected_job, dict) and selected_job.get('status') == 'PAID':
                                     rate_freelancer_for_job(selected_job)
                                 else:
                                     print("❌ Can only rate PAID jobs")
@@ -1576,15 +1966,31 @@ def client_flow():
             })
             print("\n--- RATE FREELANCERS ---")
             try:
-                jobs = res.json()
-                paid_jobs = [job for job in jobs if job.get('status') == 'PAID']
+                jobs_data = res.json()
+                
+                # Normalize response to handle both list and dict formats
+                if isinstance(jobs_data, list):
+                    jobs = jobs_data
+                else:
+                    jobs = jobs_data.get("data") or jobs_data.get("jobs") or jobs_data.get("results") or []
+                
+                paid_jobs = []
+                for job in jobs:
+                    if isinstance(job, dict) and job.get('status') == 'PAID':
+                        paid_jobs.append(job)
                 
                 if not paid_jobs:
                     print("❌ No paid jobs available for rating")
                 else:
                     print("Jobs available for rating:")
                     for i, job in enumerate(paid_jobs, 1):
-                        print(f"{i}. {job['title']} | ₹{job['budget']} | {job['status']}")
+                        if isinstance(job, dict):
+                            title = job.get('title', 'Untitled')
+                            budget = job.get('budget', 'N/A')
+                            status = job.get('status', 'N/A')
+                            print(f"{i}. {title} | ₹{budget} | {status}")
+                        else:
+                            print(f"{i}. {str(job)}")
                     
                     action = input("\nEnter job number to rate, or 0 to go back: ")
                     if action.isdigit() and int(action) > 0:
@@ -1598,89 +2004,114 @@ def client_flow():
 
         elif choice == "12":
             # Post Project
-            title = input("Project Title: ").strip()
-            description = input("Description: ").strip()
+            print("\n--- POST PROJECT ---")
             category = input("Category: ").strip()
-            skills = input("Skills: ").strip()
-            print("Budget Type: 1) FIXED 2) HOURLY")
-            bt_choice = input("Choose: ").strip()
-            budget_type = "FIXED" if bt_choice == "1" else "HOURLY" if bt_choice == "2" else None
-            if not budget_type:
-                print("❌ Invalid budget type choice")
+            description = input("Description: ").strip()
+            location = input("Location: ").strip()
+            pincode = input("Pincode: ").strip()
+            
+            if not category or not description or not location or not pincode:
+                print("❌ All fields are required")
                 continue
             
             try:
-                if budget_type == "FIXED":
-                    budget_value = float(input("Fixed Budget: "))
-                elif budget_type == "HOURLY":
-                    budget_value = float(input("Hourly Rate: "))
+                res = requests.post(f"{BASE_URL}/client/projects/create", json={
+                    "client_id": current_client_id,
+                    "category": category,
+                    "description": description,
+                    "location": location,
+                    "pincode": pincode
+                })
+                result = res.json()
+                if result.get("success"):
+                    print(f"✅ Project posted successfully! Project ID: {result.get('project_id')}")
                 else:
-                    print("❌ Invalid budget type")
-                    continue
-                    
-                if budget_value <= 0:
-                    print("❌ Budget must be greater than 0")
-                    continue
-            except Exception:
-                print("❌ Invalid budget value")
-                continue
-                
-            res = requests.post(f"{BASE_URL}/client/projects/create", json={
-                "client_id": current_client_id,
-                "title": title,
-                "description": description,
-                "category": category,
-                "skills": skills,
-                "budget_type": budget_type,
-                "budget": budget_value if budget_type == "FIXED" else None,
-                "hourly_rate": budget_value if budget_type == "HOURLY" else None
-            })
-            print(res.json())
+                    print("❌ Failed to post project:", result.get("msg"))
+            except Exception as e:
+                print("❌ Error posting project:", str(e))
 
         elif choice == "13":
             # My Projects
-            res = requests.get(f"{BASE_URL}/client/projects", params={"client_id": current_client_id})
             try:
+                res = requests.get(f"{BASE_URL}/client/projects", params={
+                    "client_id": current_client_id
+                })
                 data = res.json()
                 if data.get("success"):
-                    print("\n--- My Projects ---")
-                    for p in data.get("projects", []):
-                        print(f"{p['project_id']}. {p['title']} [{p['status']}] {p['budget_type']} {p['budget_min']}-{p['budget_max']}")
+                    print("\n--- MY PROJECTS ---")
+                    projects = data.get("projects", [])
+                    if not projects:
+                        print("No projects found")
+                    else:
+                        for p in projects:
+                            print(f"{p['project_id']}. Category: {p['category']}")
+                            print(f"   Location: {p['location']} | Pincode: {p['pincode']}")
+                            print(f"   Description: {p['description']}")
+                            print(f"   Status: {p['status']}")
+                            print()
                 else:
-                    print("❌", data.get("msg"))
+                    print("❌ Error:", data.get("msg"))
             except Exception as e:
-                print("❌ Error:", str(e))
+                print("❌ Error fetching projects:", str(e))
 
         elif choice == "14":
             # View Applicants
-            pid = input("Project ID: ").strip()
-            res = requests.get(f"{BASE_URL}/client/projects/applicants", params={
-                "client_id": current_client_id,
-                "project_id": pid
-            })
+            project_id = input("Project ID: ").strip()
+            if not project_id:
+                print("❌ Project ID is required")
+                continue
+            
             try:
+                res = requests.get(f"{BASE_URL}/client/projects/applicants", params={
+                    "client_id": current_client_id,
+                    "project_id": project_id
+                })
                 data = res.json()
                 if data.get("success"):
-                    print("\n--- Applicants ---")
-                    for a in data.get("applicants", []):
-                        print(f"{a['application_id']}. Freelancer {a['freelancer_id']} | {a['status']}")
-                        print(f"   Proposal: {a['proposal_text']}")
-                        print(f"   Bid: {a.get('bid_amount')} Hourly: {a.get('hourly_rate')} Event: {a.get('event_base_fee')}")
+                    print("\n--- APPLICANTS ---")
+                    applicants = data.get("applicants", [])
+                    if not applicants:
+                        print("No applicants found")
+                    else:
+                        for a in applicants:
+                            print(f"Application ID: {a['application_id']}")
+                            print(f"Freelancer: {a['freelancer_name']} ({a['freelancer_id']})")
+                            print(f"Title: {a['freelancer_title']}")
+                            print(f"Skills: {a['freelancer_skills']}")
+                            print(f"Experience: {a['freelancer_experience']} years")
+                            print(f"Email: {a['freelancer_email']}")
+                            print(f"Proposal: {a['proposal']}")
+                            print(f"Bid Amount: ₹{a['bid_amount']}")
+                            print(f"Status: {a['status']}")
+                            print("-" * 40)
                 else:
-                    print("❌", data.get("msg"))
+                    print("❌ Error:", data.get("msg"))
             except Exception as e:
-                print("❌ Error:", str(e))
+                print("❌ Error fetching applicants:", str(e))
 
         elif choice == "15":
             # Accept Applicant
-            pid = input("Project ID: ").strip()
-            aid = input("Application ID: ").strip()
-            res = requests.post(f"{BASE_URL}/client/projects/accept_application", json={
-                "client_id": current_client_id,
-                "project_id": pid,
-                "application_id": aid
-            })
-            print(res.json())
+            project_id = input("Project ID: ").strip()
+            application_id = input("Application ID: ").strip()
+            
+            if not project_id or not application_id:
+                print("❌ Project ID and Application ID are required")
+                continue
+            
+            try:
+                res = requests.post(f"{BASE_URL}/client/projects/accept_application", json={
+                    "client_id": current_client_id,
+                    "project_id": int(project_id),
+                    "application_id": int(application_id)
+                })
+                result = res.json()
+                if result.get("success"):
+                    print("✅ Applicant accepted successfully!")
+                    print("A hire request has been created and other applicants have been rejected.")
+                else:
+                    print("❌ Failed to accept applicant:", result.get("msg"))
+            except Exception as e:
+                print("❌ Error accepting applicant:", str(e))
 
         elif choice == "6":
             res = requests.get(f"{BASE_URL}/client/saved-freelancers", params={
@@ -2400,6 +2831,281 @@ def show_freelancer_dashboard_header():
         print("\nPlan: BASIC")
         print("Job Applies Used: 0 / 10")
 
+# ---------- PACKAGE MANAGEMENT FUNCTIONS ----------
+def manage_packages_menu():
+    """Package management menu for package-based freelancers"""
+    if not current_freelancer_id:
+        print("❌ Please login first")
+        return
+    
+    # Check if freelancer is package-based
+    try:
+        profile_resp = requests.get(f"{BASE_URL}/freelancer/profile/{current_freelancer_id}")
+        if profile_resp.status_code != 200:
+            print("❌ Failed to fetch profile")
+            return
+        
+        profile_data = profile_resp.json()
+        pricing_type = profile_data.get('pricing_type')
+        
+        if pricing_type != 'package':
+            print("❌ Package management is only available for package-based freelancers")
+            print(f"Your current pricing type: {pricing_type}")
+            return
+            
+    except Exception as e:
+        print(f"❌ Error checking profile: {str(e)}")
+        return
+    
+    while True:
+        print("\n--- MANAGE PACKAGES 📦 ---")
+        print("1. Add Package")
+        print("2. View My Packages")
+        print("3. Update Package")
+        print("4. Delete Package")
+        print("5. Back")
+        
+        choice = input("Choose: ")
+        
+        if choice == "5":
+            print("🔙 Returning to dashboard...")
+            break
+        
+        # 1️⃣ Add Package
+        elif choice == "1":
+            add_package_flow()
+        
+        # 2️⃣ View My Packages
+        elif choice == "2":
+            view_packages_flow()
+        
+        # 3️⃣ Update Package
+        elif choice == "3":
+            update_package_flow()
+        
+        # 4️⃣ Delete Package
+        elif choice == "4":
+            delete_package_flow()
+        
+        else:
+            print("❌ Invalid choice")
+
+def add_package_flow():
+    """Add a new package"""
+    print("\n--- ADD PACKAGE ---")
+    
+    while True:
+        try:
+            package_name = input("Enter package name: ").strip()
+            if not package_name:
+                print("❌ Package name is required")
+                continue
+            
+            services_included = input("Enter services included: ").strip()
+            if not services_included:
+                print("❌ Services included is required")
+                continue
+            
+            package_price_input = input("Enter package price: ₹").strip()
+            try:
+                package_price = float(package_price_input)
+                if package_price <= 0:
+                    print("❌ Package price must be greater than 0")
+                    continue
+            except ValueError:
+                print("❌ Please enter a valid number")
+                continue
+            
+            # Create package
+            package_data = {
+                "freelancer_id": current_freelancer_id,
+                "package_name": package_name,
+                "price": package_price,
+                "services_included": services_included
+            }
+            
+            try:
+                response = requests.post(f"{BASE_URL}/freelancer/packages", json=package_data)
+                if response.status_code == 200:
+                    result = response.json()
+                    print(f"✅ Package '{package_name}' added successfully! (ID: {result.get('package_id')})")
+                    
+                    # Ask if user wants to add another package
+                    another = input("Do you want to add another package? (y/n): ").lower()
+                    if another != 'y':
+                        break
+                else:
+                    print(f"❌ Failed to add package: {response.text}")
+                    break
+            except Exception as e:
+                print(f"❌ Error adding package: {str(e)}")
+                break
+            
+        except KeyboardInterrupt:
+            print("\n❌ Package creation cancelled")
+            return
+
+def view_packages_flow():
+    """View all packages for the freelancer"""
+    print("\n--- MY PACKAGES ---")
+    
+    try:
+        response = requests.get(f"{BASE_URL}/freelancer/{current_freelancer_id}/packages")
+        if response.status_code == 200:
+            data = response.json()
+            packages = data.get('packages', [])
+            
+            if not packages:
+                print("📦 No packages found. Add your first package!")
+                return
+            
+            print(f"\nFound {len(packages)} package(s):")
+            print("=" * 80)
+            
+            for i, pkg in enumerate(packages, 1):
+                print(f"\n📦 Package {i}")
+                print(f"   ID: {pkg['package_id']}")
+                print(f"   Name: {pkg['package_name']}")
+                print(f"   Services: {pkg['services_included']}")
+                print(f"   Price: ₹{pkg['starting_price']}")
+                print("-" * 40)
+            
+        else:
+            print(f"❌ Failed to fetch packages: {response.text}")
+            
+    except Exception as e:
+        print(f"❌ Error viewing packages: {str(e)}")
+
+def update_package_flow():
+    """Update an existing package"""
+    print("\n--- UPDATE PACKAGE ---")
+    
+    # First show packages so user can choose
+    try:
+        response = requests.get(f"{BASE_URL}/freelancer/{current_freelancer_id}/packages")
+        if response.status_code != 200:
+            print("❌ Failed to fetch packages")
+            return
+        
+        data = response.json()
+        packages = data.get('packages', [])
+        
+        if not packages:
+            print("📦 No packages found. Add a package first!")
+            return
+        
+        print("\nSelect package to update:")
+        for i, pkg in enumerate(packages, 1):
+            print(f"{i}. {pkg['package_name']} (ID: {pkg['package_id']}) - ₹{pkg['starting_price']}")
+        
+        choice = input("Enter package number: ").strip()
+        try:
+            choice_idx = int(choice) - 1
+            if choice_idx < 0 or choice_idx >= len(packages):
+                print("❌ Invalid package number")
+                return
+            
+            selected_package = packages[choice_idx]
+            package_id = selected_package['package_id']
+            
+            print(f"\n--- UPDATE PACKAGE: {selected_package['package_name']} ---")
+            print("Leave blank to keep current value")
+            
+            # Get new values
+            new_name = input(f"Package name [{selected_package['package_name']}]: ").strip()
+            new_services = input(f"Services included [{selected_package['services_included']}]: ").strip()
+            new_price_input = input(f"Package price [₹{selected_package['starting_price']}]: ").strip()
+            
+            # Build update data
+            update_data = {}
+            if new_name:
+                update_data['package_name'] = new_name
+            if new_services:
+                update_data['services_included'] = new_services
+            if new_price_input:
+                try:
+                    new_price = float(new_price_input)
+                    if new_price <= 0:
+                        print("❌ Package price must be greater than 0")
+                        return
+                    update_data['price'] = new_price
+                except ValueError:
+                    print("❌ Please enter a valid number")
+                    return
+            
+            if not update_data:
+                print("ℹ️ No changes made")
+                return
+            
+            # Update package
+            try:
+                response = requests.put(f"{BASE_URL}/freelancer/packages/{package_id}", json=update_data)
+                if response.status_code == 200:
+                    print("✅ Package updated successfully!")
+                else:
+                    print(f"❌ Failed to update package: {response.text}")
+            except Exception as e:
+                print(f"❌ Error updating package: {str(e)}")
+                
+        except ValueError:
+            print("❌ Invalid selection")
+            
+    except Exception as e:
+        print(f"❌ Error in update flow: {str(e)}")
+
+def delete_package_flow():
+    """Delete an existing package"""
+    print("\n--- DELETE PACKAGE ---")
+    
+    # First show packages so user can choose
+    try:
+        response = requests.get(f"{BASE_URL}/freelancer/{current_freelancer_id}/packages")
+        if response.status_code != 200:
+            print("❌ Failed to fetch packages")
+            return
+        
+        data = response.json()
+        packages = data.get('packages', [])
+        
+        if not packages:
+            print("📦 No packages found.")
+            return
+        
+        print("\nSelect package to delete:")
+        for i, pkg in enumerate(packages, 1):
+            print(f"{i}. {pkg['package_name']} (ID: {pkg['package_id']}) - ₹{pkg['starting_price']}")
+        
+        choice = input("Enter package number: ").strip()
+        try:
+            choice_idx = int(choice) - 1
+            if choice_idx < 0 or choice_idx >= len(packages):
+                print("❌ Invalid package number")
+                return
+            
+            selected_package = packages[choice_idx]
+            package_id = selected_package['package_id']
+            
+            # Confirm deletion
+            confirm = input(f"Are you sure you want to delete '{selected_package['package_name']}'? (y/n): ").lower()
+            if confirm != 'y':
+                print("❌ Deletion cancelled")
+                return
+            
+            # Delete package
+            try:
+                response = requests.delete(f"{BASE_URL}/freelancer/packages/{package_id}")
+                if response.status_code == 200:
+                    print(f"✅ Package '{selected_package['package_name']}' deleted successfully!")
+                else:
+                    print(f"❌ Failed to delete package: {response.text}")
+            except Exception as e:
+                print(f"❌ Error deleting package: {str(e)}")
+                
+        except ValueError:
+            print("❌ Invalid selection")
+            
+    except Exception as e:
+        print(f"❌ Error in delete flow: {str(e)}")
 
 # ---------- FREELANCER FLOW ----------
 def freelancer_flow():
@@ -2414,44 +3120,113 @@ def freelancer_flow():
         # Show subscription info at top
         show_freelancer_dashboard_header()
         
+        # Get freelancer profile to determine pricing type
+        freelancer_pricing_type = None
+        try:
+            profile_resp = requests.get(f"{BASE_URL}/freelancer/profile/{current_freelancer_id}")
+            if profile_resp.status_code == 200:
+                profile_data = profile_resp.json()
+                if profile_data.get("success"):
+                    freelancer_info = profile_data  # Data is directly in root, not under "freelancer" key
+                    # Get pricing_type directly from database
+                    freelancer_pricing_type = freelancer_info.get("pricing_type")
+                    
+                    # Debug print to verify correct value
+                    print("DEBUG pricing_type:", freelancer_pricing_type)
+                    
+                    # Fallback to category-based detection if database pricing_type is None
+                    if not freelancer_pricing_type and get_pricing_type_for_category:
+                        category = freelancer_info.get("category")
+                        if category and category.strip():
+                            try:
+                                freelancer_pricing_type = get_pricing_type_for_category(category)
+                            except Exception:
+                                freelancer_pricing_type = None
+                        else:
+                            freelancer_pricing_type = None
+        except Exception as e:
+            print("DEBUG Error fetching profile:", str(e))
+            freelancer_pricing_type = None
+        
         print("\n--- FREELANCER DASHBOARD ---")
-        print("1. Create/Update Profile")
-        print("2. View My Profile")
-        print("3. View Hire Requests")
-        print("4. Manage Active Jobs")
-        print("5. Messages")
-        print("6. Earnings")
-        print("7. Saved Clients")
-        print("8. Account Settings")
-        print("9. Notifications")
-        print("10. Manage Portfolio")
-        print("11. Upload Profile Photo")
-        print("12. Check Incoming Calls 📞")
-        print("13. Verification Status 🏅")
-        print("14. Upload Verification Documents")
-        print("15. Subscription Plans 💎")
-        print("16. My Subscription")
-        print("17. Update Availability Status")
-        print("18. Contact Client")
-        print("19. Exit")
-        print("20. Logout")
-        print("21. Browse Projects")
-        print("22. Apply to Project")
+        
+        # Dynamic menu numbering
+        option_num = 1
+        
+        print(f"{option_num}. Create/Update Profile")
+        option_num += 1
+        print(f"{option_num}. View My Profile")
+        option_num += 1
+        print(f"{option_num}. View Hire Requests")
+        option_num += 1
+        print(f"{option_num}. Manage Active Jobs")
+        option_num += 1
+        print(f"{option_num}. Messages")
+        option_num += 1
+        print(f"{option_num}. Earnings")
+        option_num += 1
+        print(f"{option_num}. Saved Clients")
+        option_num += 1
+        print(f"{option_num}. Account Settings")
+        option_num += 1
+        print(f"{option_num}. Notifications")
+        option_num += 1
+        print(f"{option_num}. Manage Portfolio")
+        option_num += 1
+        print(f"{option_num}. Upload Profile Photo")
+        option_num += 1
+        print(f"{option_num}. Check Incoming Calls 📞")
+        option_num += 1
+        print(f"{option_num}. Verification Status 🏅")
+        option_num += 1
+        print(f"{option_num}. Upload Verification Documents")
+        option_num += 1
+        print(f"{option_num}. Subscription Plans 💎")
+        option_num += 1
+        print(f"{option_num}. My Subscription")
+        option_num += 1
+        print(f"{option_num}. Update Availability Status")
+        option_num += 1
+        print(f"{option_num}. Contact Client")
+        option_num += 1
+        
+        # Conditionally show Manage Packages only for package-based freelancers
+        if freelancer_pricing_type == PRICING_TYPE_PACKAGE:
+            print(f"{option_num}. Manage Packages 📦")
+            manage_package_option = option_num
+            option_num += 1
+        
+        exit_option = option_num
+        print(f"{exit_option}. Exit")
+        option_num += 1
+        logout_option = option_num
+        print(f"{logout_option}. Logout")
+        option_num += 1
+        browse_option = option_num
+        print(f"{browse_option}. Browse Projects")
+        option_num += 1
+        apply_option = option_num
+        print(f"{apply_option}. Apply to Project")
 
         choice = input("Choose: ")
 
-        if choice == "19":
+        if choice == str(exit_option):
             print("👋 Exiting GigBridge CLI")
             return
         
-        if choice == "20":
+        if choice == str(logout_option):
             current_freelancer_id = None
             print("✅ Logged out successfully")
             return
 
+        # Manage Packages (conditional)
+        if freelancer_pricing_type == PRICING_TYPE_PACKAGE and choice == str(manage_package_option):
+            manage_packages_menu()
+
+
         # 1️⃣ Create / Update Profile
         if choice == "1":
-            from categories import ALLOWED_FREELANCER_CATEGORIES
+            from categories import ALLOWED_FREELANCER_CATEGORIES, is_valid_category
             print("\nAllowed Categories:")
             for cat in ALLOWED_FREELANCER_CATEGORIES:
                 print(f"- {cat}")
@@ -2460,39 +3235,224 @@ def freelancer_flow():
                 title = input("Title: ")
                 skills = input("Skills: ")
                 
-                # Get experience in years and months
+                # Get experience in years only
                 print("\nExperience Details:")
-                years = int(input("Years (0-40): "))
-                months = int(input("Months (0-11): "))
-                
-                min_budget = float(input("Min Budget: "))
-                max_budget = float(input("Max Budget: "))
+                years = int(input("Years of experience: "))
+
                 bio = input("Bio: ")
                 pincode = input("PIN Code (6 digits): ")
                 location = input("Location: ")
                 category = input("Category (choose from above): ")
-                from categories import is_valid_category
+
                 if not is_valid_category(category):
                     print("Invalid category. Please choose from the allowed list.")
                     continue
+
                 dob = get_valid_dob()
-                res = requests.post(f"{BASE_URL}/freelancer/profile", json={
+
+                # Derive pricing_type from category (if helper available)
+                pricing_type = None
+                if get_pricing_type_for_category and category and category.strip():
+                    try:
+                        pricing_type = get_pricing_type_for_category(category)
+                    except Exception:
+                        pricing_type = None
+                else:
+                    pricing_type = None
+
+                # Initialize pricing fields
+                supports_fixed = True
+                supports_hourly = False
+                fixed_price = None
+                hourly_rate = None
+                overtime_rate_per_hour = None
+                per_person_rate = None
+                starting_price = None
+                work_description = None
+                services_included = None
+
+                # Pricing-type aware prompts
+                if pricing_type == PRICING_TYPE_HOURLY:
+                    print("\nDetected pricing type: HOURLY (category-based)")
+                    supports_fixed = False
+                    supports_hourly = True
+                    while True:
+                        try:
+                            hourly_rate = float(input("Hourly Rate (₹/hour): "))
+                            if hourly_rate > 0:
+                                break
+                            print("❌ Hourly rate must be greater than 0")
+                        except ValueError:
+                            print("❌ Please enter a valid number")
+                    overtime_choice = input("Set overtime rate? (y/n): ").lower()
+                    if overtime_choice == "y":
+                        while True:
+                            try:
+                                overtime_rate_per_hour = float(input("Overtime Rate (₹/hour): "))
+                                if overtime_rate_per_hour > 0:
+                                    break
+                                print("❌ Overtime rate must be greater than 0")
+                            except ValueError:
+                                print("❌ Please enter a valid number")
+                    # Hourly profiles do not require a fixed min/max budget
+                    min_budget = 0
+                    max_budget = 0
+                elif pricing_type == PRICING_TYPE_PER_PERSON:
+                    print("\nDetected pricing type: PER PERSON (category-based)")
+                    supports_fixed = True  # keep FIXED available for legacy flows
+                    supports_hourly = False
+                    while True:
+                        try:
+                            per_person_rate = float(input("Per Person Rate (₹/person): "))
+                            if per_person_rate > 0:
+                                break
+                            print("❌ Per person rate must be greater than 0")
+                        except ValueError:
+                            print("❌ Please enter a valid number")
+                    # For per-person pricing, ignore min/max budget values
+                    min_budget = 0
+                    max_budget = 0
+
+                elif pricing_type == PRICING_TYPE_PACKAGE:
+                    print("\nDetected pricing type: PACKAGE (category-based)")
+                    supports_fixed = True
+                    supports_hourly = False
+                    # For package pricing, no base price fields needed
+                    starting_price = None
+                    # For package pricing, ignore min/max budget values
+                    min_budget = 0
+                    max_budget = 0
+                    print("Note: Packages will be managed separately via package management endpoints.")
+
+                elif pricing_type == PRICING_TYPE_PROJECT:
+                    print("\nDetected pricing type: PROJECT (category-based)")
+                    supports_fixed = True
+                    supports_hourly = False
+                    while True:
+                        try:
+                            starting_price = float(input("Starting Project Price (₹): "))
+                            if starting_price > 0:
+                                break
+                            print("❌ Starting price must be greater than 0")
+                        except ValueError:
+                            print("❌ Please enter a valid number")
+                    work_description = input("Work Description: ").strip()
+                    services_included = input("Services Included (comma-separated, optional): ").strip()
+                    # For project pricing, ignore min/max budget values
+                    min_budget = 0
+                    max_budget = 0
+
+                else:
+                    # Legacy fallback: let user choose pricing models like before
+                    print("\n--- Pricing Model Setup (legacy) ---")
+                    print("Choose your pricing model(s):")
+                    print("1. Fixed only")
+                    print("2. Hourly only") 
+                    print("3. Both Fixed and Hourly")
+                    
+                    while True:
+                        pricing_choice = input("Choose (1-3): ")
+                        if pricing_choice in ["1", "2", "3"]:
+                            break
+                        print("❌ Invalid choice. Please enter 1, 2, or 3")
+                    
+                    supports_fixed = pricing_choice in ["1", "3"]
+                    supports_hourly = pricing_choice in ["2", "3"]
+
+                    if supports_fixed:
+                        while True:
+                            try:
+                                fixed_price = float(input("Fixed Price (₹): "))
+                                if fixed_price > 0:
+                                    break
+                                print("❌ Fixed price must be greater than 0")
+                            except ValueError:
+                                print("❌ Please enter a valid number")
+                    
+                    if supports_hourly:
+                        while True:
+                            try:
+                                hourly_rate = float(input("Hourly Rate (₹/hour): "))
+                                if hourly_rate > 0:
+                                    break
+                                print("❌ Hourly rate must be greater than 0")
+                            except ValueError:
+                                print("❌ Please enter a valid number")
+                        
+                        overtime_choice = input("Set overtime rate? (y/n): ").lower()
+                        if overtime_choice == 'y':
+                            while True:
+                                try:
+                                    overtime_rate_per_hour = float(input("Overtime Rate (₹/hour): "))
+                                    if overtime_rate_per_hour > 0:
+                                        break
+                                    print("❌ Overtime rate must be greater than 0")
+                                except ValueError:
+                                    print("❌ Please enter a valid number")
+                    
+                    # Only ask for budget if fixed pricing is enabled
+                    if supports_fixed:
+                        min_budget = float(input("Min Budget: "))
+                        max_budget = float(input("Max Budget: "))
+                    else:
+                        # For hourly-only, no budget range needed
+                        min_budget = 0
+                        max_budget = 0
+                
+                # Prepare profile data with pricing preferences
+                profile_data = {
                     "freelancer_id": current_freelancer_id,
                     "title": title,
                     "skills": skills,
-                    "years": years,
-                    "months": months,
+                    "experience_years": years,
                     "min_budget": min_budget,
                     "max_budget": max_budget,
                     "bio": bio,
                     "pincode": pincode,
                     "location": location,
                     "category": category,
-                    "dob": dob
-                })
-                print(res.json())
-            except Exception:
-                print("❌ Server error while updating profile")
+                    "dob": dob,
+                    "supports_fixed": supports_fixed,
+                    "supports_hourly": supports_hourly,
+                }
+                
+                if fixed_price is not None:
+                    profile_data["fixed_price"] = fixed_price
+                if hourly_rate is not None:
+                    profile_data["hourly_rate"] = hourly_rate
+                if overtime_rate_per_hour is not None:
+                    profile_data["overtime_rate_per_hour"] = overtime_rate_per_hour
+                if per_person_rate is not None:
+                    profile_data["per_person_rate"] = per_person_rate
+                if starting_price is not None:
+                    profile_data["starting_price"] = starting_price
+                if work_description:
+                    profile_data["work_description"] = work_description
+                if services_included:
+                    profile_data["services_included"] = services_included
+                
+                res = requests.post(f"{BASE_URL}/freelancer/profile", json=profile_data)
+                result = res.json()
+                if result.get("success"):
+                    print("✅ Profile updated successfully!")
+                    if pricing_type:
+                        print(f"Pricing Type (category-based): {pricing_type}")
+                    else:
+                        print(f"Pricing Models: {'Fixed' if supports_fixed else ''}{' + ' if supports_fixed and supports_hourly else ''}{'Hourly' if supports_hourly else ''}")
+                    if fixed_price:
+                        print(f"Fixed Price: ₹{fixed_price}")
+                    if hourly_rate:
+                        print(f"Hourly Rate: ₹{hourly_rate}/hour")
+                        if overtime_rate_per_hour:
+                            print(f"Overtime Rate: ₹{overtime_rate_per_hour}/hour")
+                    if per_person_rate:
+                        print(f"Per Person Rate: ₹{per_person_rate}/person")
+                    if starting_price:
+                        print(f"Starting Price: ₹{starting_price}")
+                else:
+                    print("❌ Error updating profile:", result.get("msg"))
+            except Exception as e:
+                print(f"❌ Error: {str(e)}")
 
         # 2️⃣ View My Profile
         elif choice == "2":
@@ -2504,7 +3464,13 @@ def freelancer_flow():
                 res = requests.get(f"{BASE_URL}/freelancer/hire/inbox", params={
                     "freelancer_id": current_freelancer_id
                 })
-                inbox = res.json()
+                inbox_data = res.json()
+                
+                # Normalize response to handle both list and dict formats
+                if isinstance(inbox_data, list):
+                    inbox = inbox_data
+                else:
+                    inbox = inbox_data.get("data") or inbox_data.get("requests") or inbox_data.get("results") or []
             except Exception:
                 inbox = []
 
@@ -2513,36 +3479,48 @@ def freelancer_flow():
                 continue
 
             for r in inbox:
+                if not isinstance(r, dict):
+                    print(f"\n--- HIRE REQUEST ---")
+                    print(f"Request: {str(r)}")
+                    continue
+                    
                 print("\n--- HIRE REQUEST ---")
-                print("Request ID:", r["request_id"])
-                print("Client:", r["client_name"], "|", r["client_email"])
+                print("Request ID:", r.get("request_id", "N/A"))
+                print("Client:", r.get("client_name", "N/A"), "|", r.get("client_email", "N/A"))
                 
                 # Display based on contract type
                 contract_type = r.get("contract_type", "FIXED")
                 print("Contract Type:", contract_type)
                 
                 if contract_type == "FIXED":
-                    print("Proposed Budget: ₹", r["proposed_budget"])
+                    print("Proposed Budget: ₹", r.get("proposed_budget", "N/A"))
                 elif contract_type == "HOURLY":
                     print("Hourly Rate: ₹", r.get("contract_hourly_rate", 0))
                     print("Overtime Rate: ₹", r.get("contract_overtime_rate", 0))
                     print("Weekly Limit:", r.get("weekly_limit", 0))
                     print("Max Daily Hours:", r.get("max_daily_hours", 8))
-                elif contract_type == "EVENT":
-                    print("Base Fee: ₹", r.get("event_base_fee", 0))
-                    print("Included Hours:", r.get("event_included_hours", 0))
-                    print("Overtime Rate: ₹", r.get("event_overtime_rate", 0))
+                else:
+                    print("Proposed Budget: ₹", r.get("proposed_budget", "N/A"))
                     print("Advance Paid: ₹", r.get("advance_paid", 0))
                 
-                print("Note:", r["note"])
-                print("Status:", r["status"])
+                print("Note:", r.get("note", "N/A"))
+                print("Status:", r.get("status", "N/A"))
+                
+                # Show negotiation details if countered
+                if r.get("status") == "COUNTERED":
+                    if r.get("final_agreed_amount"):
+                        print("Latest Offer: ₹", r.get("final_agreed_amount"))
+                    if r.get("counter_note"):
+                        print("Counter Note:", r.get("counter_note"))
+                    print("Offered By:", r.get("negotiation_status", "Unknown"))
 
-                if r["status"] == "PENDING":
+                if r.get("status") == "PENDING":
                     print("1. Accept")
                     print("2. Reject")
-                    print("3. Message Client")
-                    print("4. Save Client")
-                    print("5. Next")
+                    print("3. Counteroffer")
+                    print("4. Message Client")
+                    print("5. Save Client")
+                    print("6. Next")
                     print("0. Back")
                     a = input("Choose: ")
 
@@ -2558,6 +3536,28 @@ def freelancer_flow():
                             "freelancer_id": current_freelancer_id,
                             "request_id": r["request_id"],
                             "action": "REJECT"
+                        })
+                        print(rr.json())
+                    elif a == "3":
+                        # Counteroffer
+                        counter_amount = input("Counter Offer Amount: ₹").strip()
+                        counter_note = input("Counter Offer Note (optional): ").strip()
+                        
+                        try:
+                            counter_amount = float(counter_amount)
+                            if counter_amount <= 0:
+                                print("❌ Counter offer amount must be greater than 0")
+                                continue
+                        except ValueError:
+                            print("❌ Please enter a valid number")
+                            continue
+                        
+                        rr = requests.post(f"{BASE_URL}/freelancer/hire/respond", json={
+                            "freelancer_id": current_freelancer_id,
+                            "request_id": r["request_id"],
+                            "action": "COUNTER",
+                            "counter_offer_amount": counter_amount,
+                            "counter_offer_note": counter_note
                         })
                         print(rr.json())
                     elif a == "3":
@@ -2580,29 +3580,46 @@ def freelancer_flow():
                 res = requests.get(f"{BASE_URL}/freelancer/hire/inbox", params={
                     "freelancer_id": current_freelancer_id
                 })
-                inbox = res.json()
+                inbox_data = res.json()
+                
+                # Normalize response to handle both list and dict formats
+                if isinstance(inbox_data, list):
+                    inbox = inbox_data
+                else:
+                    inbox = inbox_data.get("data") or inbox_data.get("requests") or inbox_data.get("results") or []
             except Exception:
                 inbox = []
 
-            active = [r for r in inbox if r.get("status") == "ACCEPTED"]
+            active = []
+            for r in inbox:
+                if isinstance(r, dict) and r.get("status") == "ACCEPTED":
+                    active.append(r)
             print("\n--- ACTIVE JOBS ---")
             if not active:
                 print("📭 No active (accepted) jobs")
             else:
                 for i, j in enumerate(active, 1):
-                    title = j.get("note") or j.get("request_id")
-                    contract_type = j.get("contract_type", "FIXED")
-                    
-                    if contract_type == "FIXED":
-                        budget_info = f"Budget: ₹{j['proposed_budget']}"
-                    elif contract_type == "HOURLY":
-                        budget_info = f"Rate: ₹{j.get('contract_hourly_rate', 0)}/hr"
-                    elif contract_type == "EVENT":
-                        budget_info = f"Base: ₹{j.get('event_base_fee', 0)}"
+                    if isinstance(j, dict):
+                        title = j.get("note") or j.get("request_id", "Untitled")
+                        contract_type = j.get("contract_type", "FIXED")
+                        
+                        if contract_type == "FIXED":
+                            budget_info = f"Budget: ₹{j.get('proposed_budget', 'N/A')}"
+                        elif contract_type == "HOURLY":
+                            budget_info = f"Rate: ₹{j.get('contract_hourly_rate', 0)}/hr"
+                        else:
+                            budget_info = f"Budget: ₹{j.get('proposed_budget', 'N/A')}"
+                        
+                        client_name = j.get('client_name', 'N/A')
+                        status = j.get('status', 'N/A')
                     else:
-                        budget_info = f"Budget: ₹{j['proposed_budget']}"
+                        title = str(j)
+                        contract_type = "FIXED"
+                        budget_info = "N/A"
+                        client_name = "N/A"
+                        status = "N/A"
                     
-                    print(f"{i}. Client: {j['client_name']} | {budget_info} | {contract_type} | {j['status']}")
+                    print(f"{i}. Client: {client_name} | {budget_info} | {contract_type} | {status}")
 
         # 5️⃣ Messages
         elif choice == "5":
@@ -2617,7 +3634,11 @@ def freelancer_flow():
 
             clients = {}
             for r in inbox:
-                clients[r["client_id"]] = r["client_name"]
+                if isinstance(r, dict):
+                    client_id = r.get("client_id")
+                    client_name = r.get("client_name", "Unknown")
+                    if client_id:
+                        clients[client_id] = client_name
 
             if not clients:
                 print("📭 No clients to message yet")
@@ -2641,8 +3662,12 @@ def freelancer_flow():
                         history = res_history.json()
                         print("\n--- CHAT HISTORY ---")
                         for msg in history:
-                            sender = "You" if msg['sender_role'] == 'freelancer' else "Client"
-                            print(f"{sender}: {msg['text']}")
+                            if isinstance(msg, dict):
+                                sender = "You" if msg.get('sender_role') == 'freelancer' else "Client"
+                                text = msg.get('text', 'No text')
+                                print(f"{sender}: {text}")
+                            else:
+                                print(f"Message: {str(msg)}")
                     elif msg_choice == "2":
                         # Send new message
                         message = input("Enter your message: ")
@@ -2946,47 +3971,53 @@ def freelancer_flow():
                     print("❌ Failed to update availability:", result.get("msg"))
             except Exception as e:
                 print("❌ Error updating availability:", str(e))
-
-        elif choice == "20":
+        elif choice == str(browse_option):
             # Browse Projects
             try:
-                res = requests.get(f"{BASE_URL}/freelancer/projects/feed")
+                res = requests.get(f"{BASE_URL}/freelancer/projects/feed", params={
+                    "freelancer_id": current_freelancer_id
+                })
                 data = res.json()
                 if data.get("success"):
-                    print("\n--- OPEN PROJECTS ---")
+                    print("\n--- RELEVANT OPEN PROJECTS ---")
                     for p in data.get("projects", []):
-                        print(f"{p['project_id']}. {p['title']} [{p['budget_type']}] {p['budget_min']}-{p['budget_max']}")
-                        print(f"   {p['category']} | Skills: {p['skills']}")
-                        print(f"   {p['description']}")
+                        print(f"{p['project_id']}. Category: {p['category']}")
+                        print(f"   Location: {p['location']} | Pincode: {p['pincode']}")
+                        print(f"   Description: {p['description']}")
+                        print()
                 else:
                     print("❌", data.get("msg"))
             except Exception as e:
                 print("❌ Error:", str(e))
 
-        elif choice == "21":
+        elif choice == str(apply_option):
             # Apply to Project
             pid = input("Project ID: ").strip()
-            proposal = input("Proposal Text: ").strip()
-            print("Optional bid fields: leave blank if not applicable")
-            bid_amount = input("Bid Amount (FIXED): ").strip()
-            hourly_rate = input("Hourly Rate (HOURLY): ").strip()
-            event_base_fee = input("Event Base Fee (EVENT): ").strip()
+            proposal = input("Proposal/Message: ").strip()
+            bid_amount = input("Your Bid Amount: ").strip()
+            
+            if not pid or not proposal or not bid_amount:
+                print("❌ Project ID, proposal, and bid amount are required")
+                continue
+                
+            try:
+                bid_amount = float(bid_amount)
+            except ValueError:
+                print("❌ Invalid bid amount")
+                continue
+                
             payload = {
                 "freelancer_id": current_freelancer_id,
                 "project_id": pid,
-                "proposal_text": proposal
+                "proposal": proposal,
+                "bid_amount": bid_amount
             }
-            if bid_amount:
-                try: payload["bid_amount"] = float(bid_amount)
-                except: pass
-            if hourly_rate:
-                try: payload["hourly_rate"] = float(hourly_rate)
-                except: pass
-            if event_base_fee:
-                try: payload["event_base_fee"] = float(event_base_fee)
-                except: pass
             res = requests.post(f"{BASE_URL}/freelancer/projects/apply", json=payload)
-            print(res.json())
+            result = res.json()
+            if result.get("success"):
+                print("✅ Application submitted successfully!")
+            else:
+                print("❌ Failed to apply:", result.get("msg"))
 
         # ---------- MAIN MENU ----------
 # ---------- MAIN MENU ----------

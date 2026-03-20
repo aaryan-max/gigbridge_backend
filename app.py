@@ -16,13 +16,18 @@ import urllib.parse
 import shutil
 from email.message import EmailMessage
 from werkzeug.security import generate_password_hash, check_password_hash
+from werkzeug.utils import secure_filename
 from admin_db import ensure_admin_tables
 from admin_routes import admin_bp
 from kyc_routes import kyc_bp
 from client_kyc_routes import client_kyc_bp
 from payment_routes import payment_bp
-from ai_chat import register_chat_routes
-from ai_chat_routes import register_ai_chat_routes
+try:
+    # AI chat routes are optional; failure must not block server startup.
+    from ai_chat_routes import register_ai_chat_routes
+except Exception as _e:
+    register_ai_chat_routes = None
+    print(f"AI chat disabled: {type(_e).__name__}: {_e}")
 
 from database import create_tables, rebuild_freelancer_search_index
 from venue_helper import prepare_venue_data, validate_venue_data, check_venue_freelancer_compatibility
@@ -31,8 +36,16 @@ from settings import (
     FEATURE_BLOCK_DISABLED_USERS,
     FEATURE_ENFORCE_VERIFIED_FOR_HIRE_MESSAGE,
 )
-from categories import is_valid_category
+from categories import (
+    is_valid_category,
+    get_pricing_type_for_category,
+    PRICING_TYPE_HOURLY,
+    PRICING_TYPE_PER_PERSON,
+    PRICING_TYPE_PACKAGE,
+    PRICING_TYPE_PROJECT,
+)
 from call_service import start_call, update_call_status, get_incoming_calls
+
 
 
 # ============================================================
@@ -165,10 +178,7 @@ app.register_blueprint(client_kyc_bp)
 app.register_blueprint(payment_bp)
 
 # Register database chat routes
-register_chat_routes(app)
 
-# Register AI chat routes
-register_ai_chat_routes(app)
 
 # Try to load semantic index (optional; app still works without it)
 try:
@@ -785,7 +795,7 @@ def client_reset_password():
         
         # PostgreSQL placeholder syntax
         cur.execute("UPDATE client SET password=%s WHERE email=%s", 
-                   (generate_password_hash(new_password), email))
+                    (generate_password_hash(new_password), email))
         
         if cur.rowcount == 0:
             print("No client found with email:", email)
@@ -923,7 +933,7 @@ def freelancer_reset_password():
         
         # PostgreSQL placeholder syntax
         cur.execute("UPDATE freelancer SET password=%s WHERE email=%s", 
-                   (generate_password_hash(new_password), email))
+                    (generate_password_hash(new_password), email))
         
         if cur.rowcount == 0:
             print("No freelancer found with email:", email)
@@ -982,7 +992,7 @@ def client_signup():
     
     # Insert new client
     cur.execute("INSERT INTO client (name, email, password) VALUES (%s, %s, %s)", 
-               (name, email, generate_password_hash(password)))
+                (name, email, generate_password_hash(password)))
     client_id = cur.lastrowid
     conn.commit()
     conn.close()
@@ -1015,7 +1025,7 @@ def freelancer_signup():
     
     # Insert new freelancer
     cur.execute("INSERT INTO freelancer (name, email, password) VALUES (%s, %s, %s)", 
-               (name, email, generate_password_hash(password)))
+                (name, email, generate_password_hash(password)))
     freelancer_id = cur.lastrowid
     conn.commit()
     conn.close()
@@ -1164,21 +1174,105 @@ def client_profile():
 @app.route("/freelancer/profile", methods=["POST"])
 def freelancer_profile():
     d = get_json()
-    missing = require_fields(d, ["freelancer_id", "title", "skills", "years", "months", "min_budget", "max_budget", "bio", "category", "location", "dob"])
+    missing = require_fields(
+        d,
+        [
+            "freelancer_id",
+            "title",
+            "skills",
+            "experience_years",
+            "bio",
+            "category",
+            "location",
+            "dob",
+        ],
+    )
     if missing:
         return jsonify({"success": False, "msg": "Missing fields"}), 400
 
-    # Validate years and months
+    if not is_valid_category(d["category"]):
+        return jsonify({"success": False, "msg": "Invalid category"}), 400
+
+    # Derive pricing_type from category (central mapping)
     try:
-        years = int(d["years"])
-        months = int(d["months"])
+        pricing_type = get_pricing_type_for_category(d["category"])
+    except ValueError as e:
+        return jsonify({"success": False, "msg": str(e)}), 400
+
+    # Initialize pricing fields
+    fixed_price = d.get("fixed_price")
+    hourly_rate = d.get("hourly_rate")
+    overtime_rate_per_hour = d.get("overtime_rate_per_hour")
+    per_person_rate = d.get("per_person_rate")
+    starting_price = d.get("starting_price")
+    work_description = d.get("work_description")
+    services_included = d.get("services_included")
+
+    # Normalize numeric fields
+    if fixed_price is not None:
+        fixed_price = float(fixed_price)
+        if fixed_price <= 0:
+            return jsonify({"success": False, "msg": "Fixed price must be greater than 0"}), 400
+    if hourly_rate is not None:
+        hourly_rate = float(hourly_rate)
+        if hourly_rate <= 0:
+            return jsonify({"success": False, "msg": "Hourly rate must be greater than 0"}), 400
+    if overtime_rate_per_hour is not None:
+        overtime_rate_per_hour = float(overtime_rate_per_hour)
+        if overtime_rate_per_hour < 0:
+            return jsonify({"success": False, "msg": "Overtime rate cannot be negative"}), 400
+    if per_person_rate is not None:
+        per_person_rate = float(per_person_rate)
+    if starting_price is not None:
+        starting_price = float(starting_price)
+
+    # Validate pricing depending on pricing_type
+    searchable_price = None
+    if pricing_type == PRICING_TYPE_HOURLY:
+        if hourly_rate is None or hourly_rate <= 0:
+            return jsonify({"success": False, "msg": "Hourly categories require a positive hourly_rate"}), 400
+        searchable_price = hourly_rate
+        # For hourly pricing, ignore min/max budget values
+        min_budget = 0
+        max_budget = 0
+
+    elif pricing_type == PRICING_TYPE_PER_PERSON:
+        if per_person_rate is None or per_person_rate <= 0:
+            return jsonify({"success": False, "msg": "Per-person categories require a positive per_person_rate"}), 400
+        searchable_price = per_person_rate
+        # For per-person pricing, ignore min/max budget values
+        min_budget = 0
+        max_budget = 0
+
+    elif pricing_type == PRICING_TYPE_PACKAGE:
+        # For package categories, pricing is managed via separate packages
+        # No starting_price or other base pricing fields should be required
+        searchable_price = 0
+        # For package pricing, ignore all base pricing fields
+        min_budget = 0
+        max_budget = 0
+
+    elif pricing_type == PRICING_TYPE_PROJECT:
+        if starting_price is None or starting_price <= 0:
+            return jsonify({"success": False, "msg": "Project categories require a positive starting_price"}), 400
+        if not work_description:
+            return jsonify({"success": False, "msg": "Project categories require work_description"}), 400
+        searchable_price = starting_price
+        # For project pricing, ignore min/max budget values
+        min_budget = 0
+        max_budget = 0
+
+    # Validate experience_years
+    try:
+        experience_years = float(d["experience_years"])
+        if not experience_years.is_integer():
+            return jsonify({"success": False, "msg": "Experience must be a valid whole number of years."}), 400
+        experience_years = int(experience_years)
     except (ValueError, TypeError):
-        return jsonify({"success": False, "msg": "Years and months must be integers"}), 400
+        return jsonify({"success": False, "msg": "Experience must be a valid whole number of years."}), 400
     
-    if years < 0 or years > 40:
-        return jsonify({"success": False, "msg": "Years must be between 0 and 40"}), 400
-    if months < 0 or months > 11:
-        return jsonify({"success": False, "msg": "Months must be between 0 and 11"}), 400
+    if experience_years < 0:
+        return jsonify({"success": False, "msg": "Experience cannot be negative."}), 400
 
     # Validate DOB format and calculate age
     age = calculate_age(d["dob"])
@@ -1190,16 +1284,10 @@ def freelancer_profile():
     if not is_valid_age:
         return jsonify({"success": False, "msg": age_error_msg}), 400
     
-    # Calculate total experience in years
-    total_experience = years + (months / 12)
-    
-    # Validate experience against age (minimum working age is 18)
-    max_experience = age - 18
-    if total_experience > max_experience:
-        return jsonify({"success": False, "msg": "Experience exceeds logical age limit"}), 400
-
-    if not is_valid_category(d["category"]):
-        return jsonify({"success": False, "msg": "Invalid category"}), 400
+    # Validate experience against age (minimum working age is 16, so max experience = age - 16)
+    max_experience = age - 16
+    if experience_years > max_experience:
+        return jsonify({"success": False, "msg": "Experience cannot be greater than logically possible for the entered age."}), 400
 
     # Validate availability_status if provided
     availability_status = d.get("availability_status", "AVAILABLE")
@@ -1229,8 +1317,8 @@ def freelancer_profile():
     cur.execute(
         """
         INSERT INTO freelancer_profile
-        (freelancer_id, title, skills, experience, min_budget, max_budget, bio, category, location, pincode, latitude, longitude, dob, availability_status)
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        (freelancer_id, title, skills, experience, min_budget, max_budget, bio, category, location, pincode, latitude, longitude, dob, availability_status, supports_fixed, supports_hourly, fixed_price, hourly_rate, overtime_rate_per_hour, pricing_type, per_person_rate, starting_price, searchable_price, work_description, services_included)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         ON CONFLICT(freelancer_id) DO UPDATE SET
             title=excluded.title,
             skills=excluded.skills,
@@ -1244,15 +1332,26 @@ def freelancer_profile():
             latitude=excluded.latitude,
             longitude=excluded.longitude,
             dob=excluded.dob,
-            availability_status=excluded.availability_status
+            availability_status=excluded.availability_status,
+            supports_fixed=excluded.supports_fixed,
+            supports_hourly=excluded.supports_hourly,
+            fixed_price=excluded.fixed_price,
+            hourly_rate=excluded.hourly_rate,
+            overtime_rate_per_hour=excluded.overtime_rate_per_hour,
+            pricing_type=excluded.pricing_type,
+            per_person_rate=excluded.per_person_rate,
+            starting_price=excluded.starting_price,
+            searchable_price=excluded.searchable_price,
+            work_description=excluded.work_description,
+            services_included=excluded.services_included
         """,
         (
             freelancer_id,
             d["title"],
             d["skills"],
-            total_experience,  # Store as decimal
-            float(d["min_budget"]),
-            float(d["max_budget"]),
+            experience_years,
+            min_budget,
+            max_budget,
             d["bio"],
             d["category"],
             d["location"],
@@ -1261,10 +1360,33 @@ def freelancer_profile():
             lon,
             d["dob"],
             availability_status,
+            # Legacy flags remain for compatibility with existing flows;
+            # we infer reasonable defaults from pricing_type.
+            True if pricing_type in (PRICING_TYPE_PACKAGE, PRICING_TYPE_PROJECT, PRICING_TYPE_PER_PERSON) else d.get("supports_fixed", True),
+            True if pricing_type == PRICING_TYPE_HOURLY else d.get("supports_hourly", True),
+            fixed_price,
+            hourly_rate,
+            overtime_rate_per_hour,
+            pricing_type,
+            per_person_rate,
+            starting_price,
+            searchable_price,
+            work_description,
+            services_included,
         ),
     )
     conn.commit()
     conn.close()
+
+    # Add notification for freelancer profile update
+    from notification_helper import notify_freelancer
+    notify_freelancer(
+        freelancer_id=freelancer_id,
+        message="Profile updated successfully",
+        title="Profile Updated",
+        related_entity_type="profile",
+        related_entity_id=freelancer_id
+    )
 
     # Rebuild FTS index for better keyword search
     rebuild_freelancer_search_index(freelancer_id)
@@ -1331,6 +1453,13 @@ def freelancers_search():
     except (ValueError, TypeError):
         return jsonify({"success": False, "msg": "Invalid budget"}), 400
 
+    if category and not pricing_type:
+        try:
+            pricing_type = get_pricing_type_for_category(category).upper()
+        except ValueError:
+            return jsonify({"success": False, "msg": f"Invalid category: {category}"}), 400
+
+    print(f"DEBUG: FEATURE_HIDE_UNVERIFIED_FROM_SEARCH = {FEATURE_HIDE_UNVERIFIED_FROM_SEARCH}")
     client_id = request.args.get("client_id")
     client_lat = client_lon = None
 
@@ -1365,6 +1494,20 @@ def freelancers_search():
             tsvec = "to_tsvector('english', COALESCE(fs2.title,'') || ' ' || COALESCE(fs2.skills,'') || ' ' || COALESCE(fs2.bio,'') || ' ' || COALESCE(fs2.tags,'') || ' ' || COALESCE(fs2.portfolio_text,''))"
             tsq = "plainto_tsquery('english', %s)"
 
+            # Build pricing-aware WHERE conditions based on new pricing types
+            pricing_where = ""
+            if pricing_type == "HOURLY":
+                pricing_where = " AND fp.pricing_type = 'hourly' AND fp.searchable_price IS NOT NULL AND fp.searchable_price <= %s"
+            elif pricing_type == "PER_PERSON":
+                pricing_where = " AND fp.pricing_type = 'per_person' AND fp.searchable_price IS NOT NULL AND fp.searchable_price <= %s"
+            elif pricing_type == "PACKAGE":
+                pricing_where = " AND fp.pricing_type = 'package' AND fp.searchable_price IS NOT NULL AND fp.searchable_price <= %s"
+            elif pricing_type == "PROJECT":
+                pricing_where = " AND fp.pricing_type = 'project' AND fp.searchable_price IS NOT NULL AND fp.searchable_price <= %s"
+            else:
+                # Backward compatibility: use generic budget filtering if no pricing_type
+                pricing_where = " AND fp.min_budget <= %s AND fp.max_budget >= %s"
+            
             try:
                 sql = f"""
                     SELECT
@@ -1380,6 +1523,16 @@ def freelancers_search():
                         fp.latitude,
                         fp.longitude,
                         fp.availability_status,
+                        fp.supports_fixed,
+                        fp.supports_hourly,
+                        fp.fixed_price,
+                        fp.hourly_rate,
+                        fp.overtime_rate_per_hour,
+                        fp.pricing_type,
+                        fp.per_person_rate,
+                        fp.starting_price,
+                        fp.bio,
+                        fp.tags,
                         COALESCE(fs.plan_name, 'BASIC') as subscription_plan,
                         ts_rank({tsvec}, {tsq}) as rank
                     FROM freelancer_search fs2
@@ -1387,11 +1540,17 @@ def freelancers_search():
                     JOIN freelancer f ON f.id = fp.freelancer_id
                     LEFT JOIN freelancer_subscription fs ON fs.freelancer_id = fp.freelancer_id
                     WHERE {tsvec} @@ {tsq}
-                      AND fp.min_budget <= %s
-                      AND fp.max_budget >= %s{cond_verified}
+                        {cond_verified}
+                        {pricing_where}
                 """
-                cur.execute(sql, (q, q, budget, budget))
+                
+                # Build parameters based on pricing type
+                if pricing_type in ["HOURLY", "PER_PERSON", "PACKAGE", "PROJECT"]:
+                    cur.execute(sql, (q, q, budget))
+                else:
+                    cur.execute(sql, (q, q, budget, budget))
                 rows = cur.fetchall()
+
             except Exception:
                 rows = []
 
@@ -1400,6 +1559,21 @@ def freelancers_search():
             # ============================================
             if not rows:
                 cond_verified = " AND COALESCE(fp.is_verified,0)=1" if FEATURE_HIDE_UNVERIFIED_FROM_SEARCH else ""
+                
+                # Build pricing-aware WHERE conditions for fuzzy fallback
+                pricing_where = ""
+                if pricing_type == "HOURLY":
+                    pricing_where = " AND fp.pricing_type = 'hourly' AND fp.searchable_price IS NOT NULL AND fp.searchable_price <= %s"
+                elif pricing_type == "PER_PERSON":
+                    pricing_where = " AND fp.pricing_type = 'per_person' AND fp.searchable_price IS NOT NULL AND fp.searchable_price <= %s"
+                elif pricing_type == "PACKAGE":
+                    pricing_where = " AND fp.pricing_type = 'package' AND fp.searchable_price IS NOT NULL AND fp.searchable_price <= %s"
+                elif pricing_type == "PROJECT":
+                    pricing_where = " AND fp.pricing_type = 'project' AND fp.searchable_price IS NOT NULL AND fp.searchable_price <= %s"
+                else:
+                    # Backward compatibility: use generic budget filtering if no pricing_type
+                    pricing_where = " AND fp.min_budget <= %s AND fp.max_budget >= %s"
+                
                 cur.execute(
                     f"""
                     SELECT
@@ -1415,28 +1589,49 @@ def freelancers_search():
                         fp.latitude,
                         fp.longitude,
                         fp.availability_status,
+                        fp.supports_fixed,
+                        fp.supports_hourly,
+                        fp.fixed_price,
+                        fp.hourly_rate,
+                        fp.overtime_rate_per_hour,
+                        fp.pricing_type,
+                        fp.per_person_rate,
+                        fp.starting_price,
+                        fp.bio,
+                        fp.tags,
                         COALESCE(fs.plan_name, 'BASIC') as subscription_plan
                     FROM freelancer_profile fp
                     JOIN freelancer f
                         ON f.id = fp.freelancer_id
                     LEFT JOIN freelancer_subscription fs
                         ON fs.freelancer_id = fp.freelancer_id
-                    WHERE fp.min_budget <= %s
-                      AND fp.max_budget >= %s{cond_verified}
+                    WHERE fp.category ILIKE %s
+                      {cond_verified}
+                      {pricing_where}
                     """,
-                    (budget, budget),
+                    (f"%{category}%", budget) if pricing_type in ["HOURLY", "PER_PERSON", "PACKAGE", "PROJECT"] else (f"%{category}%", budget, budget),
                 )
 
                 candidates = cur.fetchall()
                 scored = []
 
                 for r in candidates:
-                    combined = f"{r.get('title') or ''} {r.get('skills') or ''} {r.get('category') or ''}".lower()
-                    score = fuzzy_score(q, combined)
-                    scored.append((score, r))
+                    # Calculate specialization relevance across multiple fields (same logic as main post-filtering)
+                    title_score = fuzzy_score(q, (r.get('title') or "").lower())
+                    skills_score = fuzzy_score(q, (r.get('skills') or "").lower())
+                    bio_score = fuzzy_score(q, (r.get('bio') or "").lower())
+                    tags_score = fuzzy_score(q, (r.get('tags') or "").lower())
+                    
+                    # Calculate weighted specialization score (0-100)
+                    spec_relevance_score = (title_score * 0.4 + skills_score * 0.4 + bio_score * 0.1 + tags_score * 0.1)
+                    
+                    print(f"DEBUG: Fuzzy fallback - Freelancer {r.get('freelancer_id')} spec scores - Title:{title_score:.1f} Skills:{skills_score:.1f} Bio:{bio_score:.1f} Tags:{tags_score:.1f} Combined:{spec_relevance_score:.1f}")
+                    
+                    scored.append((spec_relevance_score, r))
 
                 scored.sort(key=lambda x: x[0], reverse=True)
-                scored = [x for x in scored if x[0] >= 60]
+                # Remove hard threshold - keep all candidates, let specialization relevance affect ranking
+                # scored = [x for x in scored if x[0] >= 60]  # REMOVED: Hard threshold eliminated
 
                 # Add a fake 'rank' column - use dict with rank key for consistent formatting
                 rows = []
@@ -1458,6 +1653,21 @@ def freelancers_search():
                 if sem_ids:
                     placeholders = ",".join(["%s"] * len(sem_ids))
                     cond_verified = " AND COALESCE(fp.is_verified,0)=1" if FEATURE_HIDE_UNVERIFIED_FROM_SEARCH else ""
+                    
+                    # Build pricing-aware WHERE conditions for semantic search
+                    pricing_where = ""
+                    if pricing_type == "HOURLY":
+                        pricing_where = " AND fp.pricing_type = 'hourly' AND fp.searchable_price IS NOT NULL AND fp.searchable_price <= %s"
+                    elif pricing_type == "PER_PERSON":
+                        pricing_where = " AND fp.pricing_type = 'per_person' AND fp.searchable_price IS NOT NULL AND fp.searchable_price <= %s"
+                    elif pricing_type == "PACKAGE":
+                        pricing_where = " AND fp.pricing_type = 'package' AND fp.searchable_price IS NOT NULL AND fp.searchable_price <= %s"
+                    elif pricing_type == "PROJECT":
+                        pricing_where = " AND fp.pricing_type = 'project' AND fp.searchable_price IS NOT NULL AND fp.searchable_price <= %s"
+                    else:
+                        # Backward compatibility: use generic budget filtering if no pricing_type
+                        pricing_where = " AND fp.min_budget <= %s AND fp.max_budget >= %s"
+                    
                     cur.execute(
                         f"""
                         SELECT
@@ -1473,6 +1683,16 @@ def freelancers_search():
                             fp.latitude,
                             fp.longitude,
                             fp.availability_status,
+                            fp.supports_fixed,
+                            fp.supports_hourly,
+                            fp.fixed_price,
+                            fp.hourly_rate,
+                            fp.overtime_rate_per_hour,
+                            fp.pricing_type,
+                            fp.per_person_rate,
+                            fp.starting_price,
+                            fp.bio,
+                            fp.tags,
                             COALESCE(fs.plan_name, 'BASIC') as subscription_plan,
                             999999.0 as rank
                         FROM freelancer_profile fp
@@ -1480,10 +1700,10 @@ def freelancers_search():
                         LEFT JOIN freelancer_subscription fs
                             ON fs.freelancer_id = fp.freelancer_id
                         WHERE fp.freelancer_id IN ({placeholders})
-                          AND fp.min_budget <= %s
-                          AND fp.max_budget >= %s{cond_verified}
+                          {cond_verified}
+                          {pricing_where}
                         """,
-                        (*sem_ids, budget, budget),
+                        (*sem_ids, budget) if pricing_type in ["HOURLY", "PER_PERSON", "PACKAGE", "PROJECT"] else (*sem_ids, budget, budget),
                     )
                     rows = cur.fetchall()
 
@@ -1492,11 +1712,31 @@ def freelancers_search():
         # ============================================
         else:
             cond_verified = " AND COALESCE(fp.is_verified,0)=1" if FEATURE_HIDE_UNVERIFIED_FROM_SEARCH else ""
-            params = [budget, budget]
+            
+            # Build pricing-aware WHERE conditions for no specialization search
+            pricing_where = ""
+            if pricing_type == "HOURLY":
+                pricing_where = " AND fp.pricing_type = 'hourly' AND fp.searchable_price IS NOT NULL AND fp.searchable_price <= %s"
+                params = [budget]
+            elif pricing_type == "PER_PERSON":
+                pricing_where = " AND fp.pricing_type = 'per_person' AND fp.searchable_price IS NOT NULL AND fp.searchable_price <= %s"
+                params = [budget]
+            elif pricing_type == "PACKAGE":
+                pricing_where = " AND fp.pricing_type = 'package' AND fp.searchable_price IS NOT NULL AND fp.searchable_price <= %s"
+                params = [budget]
+            elif pricing_type == "PROJECT":
+                pricing_where = " AND fp.pricing_type = 'project' AND fp.searchable_price IS NOT NULL AND fp.searchable_price <= %s"
+                params = [budget]
+            else:
+                # Backward compatibility: use generic budget filtering if no pricing_type
+                pricing_where = " AND fp.min_budget <= %s AND fp.max_budget >= %s"
+                params = [budget, budget]
+            
             extra_where = ""
             if category:
                 extra_where += " AND fp.category ILIKE %s"
                 params.append(f"%{category}%")
+            
             cur.execute(
                 f"""
                 SELECT
@@ -1512,6 +1752,16 @@ def freelancers_search():
                     fp.latitude,
                     fp.longitude,
                     fp.availability_status,
+                    fp.supports_fixed,
+                    fp.supports_hourly,
+                    fp.fixed_price,
+                    fp.hourly_rate,
+                    fp.overtime_rate_per_hour,
+                    fp.pricing_type,
+                    fp.per_person_rate,
+                    fp.starting_price,
+                    fp.bio,
+                    fp.tags,
                     COALESCE(fs.plan_name, 'BASIC') as subscription_plan,
                     999999.0 as rank
                 FROM freelancer_profile fp
@@ -1519,8 +1769,7 @@ def freelancers_search():
                     ON f.id = fp.freelancer_id
                 LEFT JOIN freelancer_subscription fs
                     ON fs.freelancer_id = fp.freelancer_id
-                WHERE fp.min_budget <= %s
-                  AND fp.max_budget >= %s{cond_verified}{extra_where}
+                WHERE 1=1{cond_verified}{pricing_where}{extra_where}
                 """,
                 tuple(params),
             )
@@ -1559,11 +1808,22 @@ def freelancers_search():
             if fuzzy_score(category, cat_db) < 70:
                 continue
 
+        # Calculate specialization relevance score instead of hard filtering
+        spec_relevance_score = 0.0
         spec = (q or "").strip().lower()
         if spec:
-             spec_db = (str(_get("skills", _get(3, ""))) or "").strip().lower()
-             if fuzzy_score(spec, spec_db) < 70:
-               continue
+            # Check specialization relevance across multiple fields
+            title_score = fuzzy_score(spec, (str(_get("title", _get(2, ""))) or "").lower())
+            skills_score = fuzzy_score(spec, (str(_get("skills", _get(3, ""))) or "").lower())
+            bio_score = fuzzy_score(spec, (str(_get("bio", "")) or "").lower())
+            tags_score = fuzzy_score(spec, (str(_get("tags", "")) or "").lower())
+            
+            # Calculate weighted specialization score (0-100)
+            # Title and skills get higher weight
+            spec_relevance_score = (title_score * 0.4 + skills_score * 0.4 + bio_score * 0.1 + tags_score * 0.1)
+            
+            # Debug: Log specialization scores for analysis
+            print(f"DEBUG: Freelancer {_get('freelancer_id', _get(0))} spec scores - Title:{title_score:.1f} Skills:{skills_score:.1f} Bio:{bio_score:.1f} Tags:{tags_score:.1f} Combined:{spec_relevance_score:.1f}")
 
         f_lat = _get("latitude", _get(9))
         f_lon = _get("longitude", _get(10))
@@ -1588,14 +1848,98 @@ def freelancers_search():
         if subscription_plan == "PREMIUM":
             rank_boost = 1
         
-        # Adjust rank with boost
+        # Adjust rank with boost and specialization relevance
         base_rank = _get("rank", _get(13, 999999))
-        adjusted_rank = (float(base_rank) if base_rank is not None else 999999) - (rank_boost * 100)  # Lower rank number = higher position
+        
+        # Convert specialization relevance to rank boost (higher relevance = lower rank number)
+        # Scale: 100 relevance = 200 rank boost, 0 relevance = 0 boost
+        spec_rank_boost = spec_relevance_score * 2.0
+        
+        adjusted_rank = (float(base_rank) if base_rank is not None else 999999) - (rank_boost * 100) - spec_rank_boost
         
         # Add badge
         badge = None
         if subscription_plan == "PREMIUM":
             badge = "🟣 PREMIUM"
+        
+        # Add pricing-type-specific information
+        pricing_info = {}
+        pricing_type = _get("pricing_type")
+        
+        if pricing_type == "hourly":
+            hourly_rate = _get("hourly_rate", _get(15))
+            if hourly_rate and hourly_rate > 0:
+                pricing_info = {
+                    "type": "hourly",
+                    "hourly_rate": hourly_rate,
+                    "display": f"₹{hourly_rate}/hour"
+                }
+        elif pricing_type == "per_person":
+            per_person_rate = _get("per_person_rate")
+            if per_person_rate and per_person_rate > 0:
+                pricing_info = {
+                    "type": "per_person", 
+                    "per_person_rate": per_person_rate,
+                    "display": f"₹{per_person_rate}/person"
+                }
+        elif pricing_type == "package":
+            freelancer_id = _get("freelancer_id", _get(0))
+            
+            # Fetch packages for this freelancer
+            packages = []
+            try:
+                pkg_conn = freelancer_db()
+                pkg_cur = pkg_conn.cursor(cursor_factory=RealDictCursor)
+                pkg_cur.execute("""
+                    SELECT id, package_name, price, description
+                    FROM freelancer_package
+                    WHERE freelancer_id = %s
+                    ORDER BY price ASC
+                """, (freelancer_id,))
+                pkg_results = pkg_cur.fetchall()
+                pkg_conn.close()
+                
+                for pkg in pkg_results:
+                    packages.append({
+                        "package_id": pkg["id"],
+                        "package_name": pkg["package_name"],
+                        "services_included": pkg["description"] or "",
+                        "package_price": pkg["price"]
+                    })
+            except Exception:
+                pass  # Ignore package fetch errors
+            
+            if packages:
+                pricing_info = {
+                    "type": "package",
+                    "packages": packages,
+                    "display": f"{len(packages)} packages starting at ₹{packages[0]['package_price']}"
+                }
+            else:
+                pricing_info = {
+                    "type": "package",
+                    "packages": [],
+                    "display": "No packages configured"
+                }
+        elif pricing_type == "project":
+            starting_price = _get("starting_price", _get(17))
+            if starting_price and starting_price > 0:
+                pricing_info = {
+                    "type": "project",
+                    "starting_price": starting_price,
+                    "display": f"Project from ₹{starting_price}"
+                }
+        else:
+            # Legacy fallback - show min/max budget for old records
+            min_budget = _get("min_budget", _get(5))
+            max_budget = _get("max_budget", _get(6))
+            if min_budget or max_budget:
+                pricing_info = {
+                    "type": "range",
+                    "min_budget": min_budget,
+                    "max_budget": max_budget,
+                    "display": f"₹{min_budget} - ₹{max_budget}"
+                }
         
         enriched.append({
             "freelancer_id": _get("freelancer_id", _get(0)),
@@ -1603,16 +1947,21 @@ def freelancers_search():
             "title": _get("title", _get(2)),
             "skills": _get("skills", _get(3)),
             "experience": _get("experience", _get(4)),
-            "budget_range": f"{_get('min_budget', _get(5))} - {_get('max_budget', _get(6))}",
+            "pricing": pricing_info,
             "rating": _get("rating", _get(7)),
             "category": _get("category", _get(8)),
             "distance": round(dist, 2),
             "rank": adjusted_rank,
             "badge": badge,
             "subscription_plan": subscription_plan,
-            "availability_status": _get("availability_status", _get(11))
+            "availability_status": _get("availability_status", _get(11)),
+            # Add pricing information for legacy compatibility
+            "supports_fixed": _get("supports_fixed", _get(12)),
+            "supports_hourly": _get("supports_hourly", _get(13)),
+            "fixed_price": _get("fixed_price", _get(14)),
+            "hourly_rate": _get("hourly_rate", _get(15)),
+            "overtime_rate_per_hour": _get("overtime_rate_per_hour", _get(16))
         })
-        
     # ============================================
     # GRID PRIORITY SYSTEM
     # ============================================
@@ -1670,6 +2019,7 @@ def freelancers_search():
         "success": True,
         "results": enriched
     })
+
 # NEW: VIEW ALL FREELANCERS (even if client didn’t search)
 # ============================================================
 
@@ -1745,6 +2095,12 @@ def freelancer_details(freelancer_id: int):
         "latitude": profile_data.get("latitude"),
         "longitude": profile_data.get("longitude"),
         "tags": profile_data.get("tags"),
+        "supports_fixed": profile_data.get("supports_fixed", True),
+        "supports_hourly": profile_data.get("supports_hourly", True),
+        "fixed_price": profile_data.get("fixed_price"),
+        "hourly_rate": profile_data.get("hourly_rate"),
+        "overtime_rate_per_hour": profile_data.get("overtime_rate_per_hour"),
+        "pricing_type": profile_data.get("pricing_type"),
     })
 
 @app.route("/freelancers/filter", methods=["GET"])
@@ -1855,13 +2211,13 @@ def message_history():
 @app.route("/client/hire", methods=["POST"])
 def client_hire():
     d = get_json()
-    missing = require_fields(d, ["client_id", "freelancer_id", "proposed_budget", "contract_type"])
+    missing = require_fields(d, ["client_id", "freelancer_id", "contract_type"])
     if missing:
         return jsonify({"success": False, "msg": "Missing fields"}), 400
 
     client_id = int(d["client_id"])
     freelancer_id = int(d["freelancer_id"])
-    proposed_budget = float(d["proposed_budget"])
+    proposed_budget = float(d.get("proposed_budget", 0) or 0)
     contract_type = str(d["contract_type"]).upper()
     note = str(d.get("note", "")).strip()
     
@@ -1884,11 +2240,10 @@ def client_hire():
     if venue_error:
         return jsonify({"success": False, "msg": venue_error}), 400
     
-    # Validate venue data only for EVENT contracts
-    if contract_type == "EVENT":
-        is_valid, validation_error = validate_venue_data(venue_data)
-        if not is_valid:
-            return jsonify({"success": False, "msg": validation_error}), 400
+    # Validate venue data for all contract types
+    is_valid, validation_error, validation_warnings = validate_venue_data(venue_data)
+    if not is_valid:
+        return jsonify({"success": False, "msg": validation_error}), 400
     
     # Check location compatibility
     location_ok, location_note = check_venue_freelancer_compatibility(
@@ -1897,10 +2252,61 @@ def client_hire():
         venue_data.get("event_city")
     )
     
-    # Validate date/time slot if provided
-    if event_date or start_time or end_time:
+    # Validate contract type against freelancer pricing preferences and derive pricing_type
+    conn = freelancer_db()
+    cur = get_dict_cursor(conn)
+    cur.execute("""
+        SELECT category, pricing_type, supports_fixed, supports_hourly, fixed_price, hourly_rate, per_person_rate, starting_price
+        FROM freelancer_profile 
+        WHERE freelancer_id = %s
+    """, (freelancer_id,))
+    freelancer_pricing = cur.fetchone()
+    if not freelancer_pricing:
+        conn.close()
+        return jsonify({"success": False, "msg": "Freelancer pricing preferences not found"}), 400
+
+    if isinstance(freelancer_pricing, dict):
+        category = freelancer_pricing.get("category")
+        profile_pricing_type = freelancer_pricing.get("pricing_type")
+        supports_fixed = freelancer_pricing.get("supports_fixed", True)
+        supports_hourly = freelancer_pricing.get("supports_hourly", True)
+        fp_fixed_price = freelancer_pricing.get("fixed_price")
+        fp_hourly_rate = freelancer_pricing.get("hourly_rate")
+        fp_per_person_rate = freelancer_pricing.get("per_person_rate")
+        fp_starting_price = freelancer_pricing.get("starting_price")
+    else:
+        # Positional fallback (kept only for safety)
+        category = None
+        profile_pricing_type = None
+        supports_fixed = freelancer_pricing[2] if len(freelancer_pricing) > 2 else True
+        supports_hourly = freelancer_pricing[3] if len(freelancer_pricing) > 3 else True
+        fp_fixed_price = freelancer_pricing[4] if len(freelancer_pricing) > 4 else None
+        fp_hourly_rate = freelancer_pricing[5] if len(freelancer_pricing) > 5 else None
+        fp_per_person_rate = freelancer_pricing[6] if len(freelancer_pricing) > 6 else None
+        fp_starting_price = freelancer_pricing[7] if len(freelancer_pricing) > 7 else None
+
+    # Derive pricing_type from category as the primary source of truth
+    try:
+        pricing_type = get_pricing_type_for_category(category)
+    except Exception:
+        pricing_type = profile_pricing_type or None
+
+    # Validate legacy contract_type against basic preferences
+    if contract_type == "FIXED" and not supports_fixed:
+        conn.close()
+        return jsonify({"success": False, "msg": "Freelancer does not support FIXED pricing"}), 400
+    if contract_type == "HOURLY" and not supports_hourly:
+        conn.close()
+        return jsonify({"success": False, "msg": "Freelancer does not support HOURLY pricing"}), 400
+    if contract_type == "EVENT":
+        conn.close()
+        return jsonify({"success": False, "msg": "EVENT contract type is no longer supported. Use FIXED or HOURLY."}), 400
+    
+    # Validate date/time slot based on contract type
+    if contract_type == "HOURLY":
+        # HOURLY contracts require all date/time fields
         if not all([event_date, start_time, end_time]):
-            return jsonify({"success": False, "msg": "All date/time fields (event_date, start_time, end_time) must be provided together"}), 400
+            return jsonify({"success": False, "msg": "HOURLY contracts require event_date, start_time, and end_time"}), 400
         
         # Validate the time slot
         is_valid, error_msg = validate_hire_request_slot(
@@ -1908,14 +2314,122 @@ def client_hire():
         )
         if not is_valid:
             return jsonify({"success": False, "msg": error_msg}), 400
+    else:
+        # For non-HOURLY contracts, only require event_date
+        if not event_date:
+            return jsonify({"success": False, "msg": "event_date is required"}), 400
+        
     
-    # Validate contract type
-    if contract_type not in ["FIXED", "HOURLY", "EVENT"]:
-        return jsonify({"success": False, "msg": "Invalid contract type. Use FIXED, HOURLY, or EVENT"}), 400
+    
+    # Pricing-type aware validation of client inputs
+    client_budget = None
+    number_of_persons = None
+    selected_package_id = None
+    guest_count = None
+    additional_requirements = d.get("additional_requirements")
 
-    # simple existence check
-    conn = freelancer_db()
-    cur = get_dict_cursor(conn)
+    if pricing_type == PRICING_TYPE_HOURLY:
+        # Client must provide date + start/end; rate comes from profile
+        if not all([event_date, start_time, end_time]):
+            conn.close()
+            return jsonify({"success": False, "msg": "Hourly hires require event_date, start_time, end_time"}), 400
+        if not fp_hourly_rate:
+            conn.close()
+            return jsonify({"success": False, "msg": "Freelancer hourly_rate not configured"}), 400
+        contract_type = "HOURLY"
+        proposed_budget = proposed_budget or 0
+
+    elif pricing_type == PRICING_TYPE_PER_PERSON:
+        # Only require event_date for PER_PERSON
+        if not event_date:
+            conn.close()
+            return jsonify({"success": False, "msg": "event_date is required"}), 400
+        number_of_persons = d.get("number_of_persons")
+        if not number_of_persons:
+            conn.close()
+            return jsonify({"success": False, "msg": "Per-person hires require number_of_persons"}), 400
+        try:
+            number_of_persons = int(number_of_persons)
+        except Exception:
+            conn.close()
+            return jsonify({"success": False, "msg": "number_of_persons must be integer"}), 400
+        if number_of_persons <= 0:
+            conn.close()
+            return jsonify({"success": False, "msg": "number_of_persons must be > 0"}), 400
+        if not fp_per_person_rate:
+            conn.close()
+            return jsonify({"success": False, "msg": "Freelancer per_person_rate not configured"}), 400
+        client_budget = number_of_persons * float(fp_per_person_rate or 0)
+        proposed_budget = client_budget
+        contract_type = "FIXED"
+
+    elif pricing_type == PRICING_TYPE_PACKAGE:
+        # Only require event_date for PACKAGE
+        if not event_date:
+            conn.close()
+            return jsonify({"success": False, "msg": "event_date is required"}), 400
+        selected_package_id = d.get("selected_package_id")
+        if not selected_package_id:
+            conn.close()
+            return jsonify({"success": False, "msg": "Package hires require selected_package_id"}), 400
+        try:
+            selected_package_id = int(selected_package_id)
+        except Exception:
+            conn.close()
+            return jsonify({"success": False, "msg": "selected_package_id must be integer"}), 400
+        # Validate package belongs to freelancer and get package details for snapshot
+        cur.execute(
+            "SELECT id, package_name, price, description FROM freelancer_package WHERE id=%s AND freelancer_id=%s",
+            (selected_package_id, freelancer_id),
+        )
+        prow = cur.fetchone()
+        if not prow:
+            conn.close()
+            return jsonify({"success": False, "msg": "Invalid package for this freelancer"}), 400
+        
+        # Extract package details for snapshot
+        if isinstance(prow, dict):
+            selected_package_name = prow.get("package_name")
+            pkg_price = prow.get("price")
+            selected_package_services = prow.get("description")
+        else:
+            selected_package_name = prow[1] if len(prow) > 1 else None
+            pkg_price = prow[2] if len(prow) > 2 else 0
+            selected_package_services = prow[3] if len(prow) > 3 else None
+        
+        proposed_budget = float(pkg_price or 0)
+        client_budget = proposed_budget
+        contract_type = "FIXED"
+
+    elif pricing_type == PRICING_TYPE_PROJECT:
+        # Only require event_date for PROJECT
+        if not event_date:
+            conn.close()
+            return jsonify({"success": False, "msg": "event_date is required"}), 400
+        if proposed_budget <= 0:
+            conn.close()
+            return jsonify({"success": False, "msg": "Project hires require a positive budget"}), 400
+        client_budget = proposed_budget
+        guest_count = d.get("guest_count")
+        if guest_count is not None:
+            try:
+                guest_count = int(guest_count)
+            except Exception:
+                conn.close()
+                return jsonify({"success": False, "msg": "guest_count must be integer"}), 400
+        contract_type = "FIXED"
+
+    # Validate contract type
+    if contract_type not in ["FIXED", "HOURLY"]:
+        conn.close()
+        return jsonify({"success": False, "msg": "Invalid contract type. Use FIXED or HOURLY"}), 400
+
+    # Validate budget generically only when we really need it
+    if pricing_type not in (PRICING_TYPE_HOURLY,) and proposed_budget <= 0:
+        conn.close()
+        return jsonify({"success": False, "msg": "proposed_budget must be > 0"}), 400
+
+    # simple existence check (reuse same connection)
     cur.execute("SELECT id FROM freelancer WHERE id=%s", (freelancer_id,))
     if not cur.fetchone():
         conn.close()
@@ -1924,7 +2438,14 @@ def client_hire():
     # Check freelancer availability status
     cur.execute("SELECT availability_status FROM freelancer_profile WHERE freelancer_id=%s", (freelancer_id,))
     availability_result = cur.fetchone()
-    av = availability_result.get("availability_status") if isinstance(availability_result, dict) else (availability_result[0] if availability_result else None)
+    if not availability_result:
+        conn.close()
+        return jsonify({"success": False, "msg": "Freelancer availability not found"}), 400
+    
+    if isinstance(availability_result, dict):
+        av = availability_result.get("availability_status")
+    else:
+        av = availability_result[0] if len(availability_result) > 0 else None
     if av == "ON_LEAVE":
         conn.close()
         return jsonify({"success": False, "msg": "Freelancer is currently not accepting new projects"}), 403
@@ -1932,7 +2453,14 @@ def client_hire():
         try:
             cur.execute("SELECT COALESCE(is_verified,0) as is_verified FROM freelancer_profile WHERE freelancer_id=%s", (freelancer_id,))
             vr = cur.fetchone()
-            vr_val = vr.get("is_verified", vr[0] if vr and not isinstance(vr, dict) else 0) if vr else 0
+            if not vr:
+                conn.close()
+                return jsonify({"success": False, "msg": "Freelancer verification status not found"}), 400
+            
+            if isinstance(vr, dict):
+                vr_val = vr.get("is_verified", 0)
+            else:
+                vr_val = vr[0] if len(vr) > 0 else 0
             if not vr or int(vr_val) != 1:
                 conn.close()
                 return jsonify({"success": False, "msg": "Freelancer not verified"}), 403
@@ -1941,70 +2469,75 @@ def client_hire():
 
     job_title = str(d.get("job_title", "")).strip()
     
-    # Handle different contract types
+    pricing_type_snapshot = pricing_type
+
+    # Handle different contract types with pricing-type snapshot
     if contract_type == "FIXED":
-        # Keep existing budget logic unchanged
-        cur.execute("""
-            INSERT INTO hire_request (client_id, freelancer_id, job_title, proposed_budget, note, status, contract_type, created_at, event_date, start_time, end_time, event_address, event_city, event_pincode, event_landmark, venue_source)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-            RETURNING id
-        """, (client_id, freelancer_id, job_title, proposed_budget, note, 'PENDING', contract_type, now_ts(), event_date, start_time, end_time, 
-               venue_data.get("event_address"), venue_data.get("event_city"), venue_data.get("event_pincode"), 
-               venue_data.get("event_landmark"), venue_data.get("venue_source")))
+        # Keep existing budget logic but attach pricing context
+        # Include package snapshot if this is a package hire
+        if pricing_type == PRICING_TYPE_PACKAGE:
+            cur.execute("""
+                INSERT INTO hire_request (client_id, freelancer_id, job_title, proposed_budget, note, status, contract_type, created_at, event_date, start_time, end_time, event_address, event_city, event_pincode, event_landmark, venue_source, pricing_type, client_budget, selected_package_id, selected_package_name, selected_package_price, selected_package_services, number_of_persons, guest_count, additional_requirements)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                RETURNING id
+            """, (client_id, freelancer_id, job_title, proposed_budget, note, 'PENDING', contract_type, now_ts(), event_date, start_time, end_time, 
+                   venue_data.get("event_address"), venue_data.get("event_city"), venue_data.get("event_pincode"), 
+                   venue_data.get("event_landmark"), venue_data.get("venue_source"), pricing_type_snapshot, client_budget, selected_package_id, 
+                   selected_package_name, pkg_price, selected_package_services, number_of_persons, guest_count, additional_requirements))
+        else:
+            cur.execute("""
+                INSERT INTO hire_request (client_id, freelancer_id, job_title, proposed_budget, note, status, contract_type, created_at, event_date, start_time, end_time, event_address, event_city, event_pincode, event_landmark, venue_source, pricing_type, client_budget, selected_package_id, number_of_persons, guest_count, additional_requirements)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                RETURNING id
+            """, (client_id, freelancer_id, job_title, proposed_budget, note, 'PENDING', contract_type, now_ts(), event_date, start_time, end_time, 
+                   venue_data.get("event_address"), venue_data.get("event_city"), venue_data.get("event_pincode"), 
+                   venue_data.get("event_landmark"), venue_data.get("venue_source"), pricing_type_snapshot, client_budget, selected_package_id, number_of_persons, guest_count, additional_requirements))
     elif contract_type == "HOURLY":
-        # Require hourly rate field only
-        if "contract_hourly_rate" not in d:
-            return jsonify({"success": False, "msg": "HOURLY contracts require contract_hourly_rate"}), 400
-        
-        hourly_rate = float(d.get("contract_hourly_rate", 0))
-        
+        # For hourly pricing-type categories, use freelancer snapshot rate
+        hourly_rate = float(fp_hourly_rate or 0)
         if hourly_rate <= 0:
-            return jsonify({"success": False, "msg": "HOURLY contracts require positive hourly rate"}), 400
+            conn.close()
+            return jsonify({"success": False, "msg": "Freelancer hourly_rate not configured for HOURLY contract"}), 400
         
         cur.execute("""
-            INSERT INTO hire_request (client_id, freelancer_id, job_title, proposed_budget, note, status, contract_type, contract_hourly_rate, contract_overtime_rate, created_at, event_date, start_time, end_time, event_address, event_city, event_pincode, event_landmark, venue_source)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            INSERT INTO hire_request (client_id, freelancer_id, job_title, proposed_budget, note, status, contract_type, contract_hourly_rate, contract_overtime_rate, created_at, event_date, start_time, end_time, event_address, event_city, event_pincode, event_landmark, venue_source, pricing_type, client_budget, selected_package_id, number_of_persons, guest_count, additional_requirements)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             RETURNING id
         """, (client_id, freelancer_id, job_title, proposed_budget, note, 'PENDING', contract_type, hourly_rate, hourly_rate * 1.5, now_ts(), event_date, start_time, end_time,
                venue_data.get("event_address"), venue_data.get("event_city"), venue_data.get("event_pincode"), 
-               venue_data.get("event_landmark"), venue_data.get("venue_source")))
-    elif contract_type == "EVENT":
-        # Require event fields
-        required_event_fields = ["event_base_fee", "event_included_hours", "event_overtime_rate"]
-        missing_event = [f for f in required_event_fields if f not in d]
-        if missing_event:
-            return jsonify({"success": False, "msg": f"EVENT contracts require: {', '.join(missing_event)}"}), 400
-        
-        event_base_fee = float(d.get("event_base_fee", 0))
-        event_included_hours = float(d.get("event_included_hours", 0))
-        event_overtime_rate = float(d.get("event_overtime_rate", 0))
-        advance_paid = float(d.get("advance_paid", 0))
-        
-        if event_base_fee < 0 or event_included_hours < 0 or event_overtime_rate < 0 or advance_paid < 0:
-            return jsonify({"success": False, "msg": "EVENT contracts require non-negative values"}), 400
-        
-        cur.execute("""
-            INSERT INTO hire_request (client_id, freelancer_id, job_title, proposed_budget, note, status, contract_type, event_base_fee, event_included_hours, event_overtime_rate, advance_paid, created_at, event_date, start_time, end_time, event_address, event_city, event_pincode, event_landmark, venue_source)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-            RETURNING id
-        """, (client_id, freelancer_id, job_title, proposed_budget, note, 'PENDING', contract_type, event_base_fee, event_included_hours, event_overtime_rate, advance_paid, now_ts(), event_date, start_time, end_time,
-               venue_data.get("event_address"), venue_data.get("event_city"), venue_data.get("event_pincode"), 
-               venue_data.get("event_landmark"), venue_data.get("venue_source")))
+               venue_data.get("event_landmark"), venue_data.get("venue_source"), pricing_type_snapshot, client_budget, selected_package_id, number_of_persons, guest_count, additional_requirements))
     else:
+        conn.close()
         return jsonify({"success": False, "msg": "Invalid contract type"}), 400
     req_row = cur.fetchone()
     req_id = req_row["id"] if isinstance(req_row, dict) else req_row[0]
 
-    # Add notification for client in client.db
-    notification_msg = f'Job "{job_title if job_title else "Untitled"}" posted'
-    cconn = client_db()
-    ccur2 = get_dict_cursor(cconn)
-    ccur2.execute("""
-        INSERT INTO notification (client_id, message, created_at)
-        VALUES (%s, %s, %s)
-    """, (client_id, notification_msg, now_ts()))
-    cconn.commit()
-    cconn.close()
+    # Add notifications for both client and freelancer
+    from notification_helper import notify_client, notify_freelancer
+    
+    # Notification for client (job posted)
+    job_title_display = job_title if job_title else "Untitled"
+    notify_client(
+        client_id=client_id,
+        message=f'Job "{job_title_display}" posted successfully',
+        title="Job Posted",
+        related_entity_type="hire_request",
+        related_entity_id=req_id
+    )
+    
+    # Get client name for freelancer notification
+    cur.execute("SELECT name FROM client WHERE id=%s", (client_id,))
+    client_row = cur.fetchone()
+    client_name = (client_row.get("name") if isinstance(client_row, dict) else (client_row[0] if client_row else None)) or "Client"
+    
+    # Notification for freelancer (hire request received)
+    notify_freelancer(
+        freelancer_id=freelancer_id,
+        message=f'New job request from {client_name}: "{job_title_display}"',
+        title="New Job Request",
+        related_entity_type="hire_request",
+        related_entity_id=req_id
+    )
 
     conn.commit()
     conn.close()
@@ -2041,7 +2574,8 @@ def freelancer_hire_inbox():
         SELECT id, client_id, proposed_budget, note, status, created_at, 
                contract_type, contract_hourly_rate, contract_overtime_rate, 
                weekly_limit, max_daily_hours, event_base_fee, event_included_hours, 
-               event_overtime_rate, advance_paid
+               event_overtime_rate, advance_paid,
+               final_agreed_amount, counter_note, negotiation_status
         FROM hire_request
         WHERE freelancer_id=%s
         ORDER BY created_at DESC
@@ -2091,8 +2625,12 @@ def freelancer_hire_inbox():
         client_cur.execute("SELECT name, email FROM client WHERE id=%s", (cid,))
         c = client_cur.fetchone()
         if c:
-            cname = c.get("name") if isinstance(c, dict) else c[0]
-            cemail = c.get("email") if isinstance(c, dict) else c[1]
+            if isinstance(c, dict):
+                cname = c.get("name")
+                cemail = c.get("email")
+            else:
+                cname = c[0] if len(c) > 0 else None
+                cemail = c[1] if len(c) > 1 else None
         else:
             cname = "Unknown"
             cemail = ""
@@ -2118,7 +2656,8 @@ def freelancer_hire_inbox():
         })
 
     client_conn.close()
-    return jsonify(out)
+    return jsonify({"success": True, "requests": out})
+
 
 @app.route("/freelancer/hire/respond", methods=["POST"])
 def freelancer_hire_respond():
@@ -2131,18 +2670,49 @@ def freelancer_hire_respond():
     request_id = int(d["request_id"])
     action = str(d["action"]).strip().upper()
 
-    if action not in ("ACCEPT", "REJECT"):
-        return jsonify({"success": False, "msg": "action must be ACCEPT or REJECT"}), 400
+    if action not in ("ACCEPT", "REJECT", "COUNTER"):
+        return jsonify({"success": False, "msg": "action must be ACCEPT, REJECT, or COUNTER"}), 400
 
-    new_status = "ACCEPTED" if action == "ACCEPT" else "REJECTED"
+    # Handle counteroffer
+    if action == "COUNTER":
+        counter_offer_amount = d.get("counter_offer_amount")
+        counter_offer_note = d.get("counter_offer_note", "")
+        
+        if not counter_offer_amount:
+            return jsonify({"success": False, "msg": "counter_offer_amount is required for COUNTER action"}), 400
+        
+        try:
+            counter_offer_amount = float(counter_offer_amount)
+            if counter_offer_amount <= 0:
+                return jsonify({"success": False, "msg": "counter_offer_amount must be greater than 0"}), 400
+        except (ValueError, TypeError):
+            return jsonify({"success": False, "msg": "counter_offer_amount must be a valid number"}), 400
+        
+        new_status = "COUNTERED"
+        update_fields = [
+            new_status,
+            counter_offer_amount,
+            counter_offer_note,
+            "FREELANCER",
+            request_id, freelancer_id
+        ]
+        update_sql = """
+            UPDATE hire_request
+            SET status=%s, final_agreed_amount=%s, counter_note=%s, negotiation_status=%s
+            WHERE id=%s AND freelancer_id=%s
+        """
+    else:
+        new_status = "ACCEPTED" if action == "ACCEPT" else "REJECTED"
+        update_fields = [new_status, request_id, freelancer_id]
+        update_sql = """
+            UPDATE hire_request
+            SET status=%s
+            WHERE id=%s AND freelancer_id=%s
+        """
 
     conn = freelancer_db()
     cur = get_dict_cursor(conn)
-    cur.execute("""
-        UPDATE hire_request
-        SET status=%s
-        WHERE id=%s AND freelancer_id=%s
-    """, (new_status, request_id, freelancer_id))
+    cur.execute(update_sql, update_fields)
 
     if cur.rowcount == 0:
         conn.commit()
@@ -2151,6 +2721,55 @@ def freelancer_hire_respond():
 
     conn.commit()
     conn.close()
+    
+    # Send notification to freelancer for counteroffer
+    if action == "COUNTER":
+        try:
+            # Get client_id from the hire request
+            client_conn = client_db()
+            client_cur = get_dict_cursor(client_conn)
+            client_cur.execute("SELECT client_id FROM hire_request WHERE id=%s", (request_id,))
+            client_result = client_cur.fetchone()
+            client_conn.close()
+            
+            if client_result:
+                client_id = client_result["client_id"]
+                # Create notification for client
+                freelancer_conn = freelancer_db()
+                freelancer_cur = get_dict_cursor(freelancer_conn)
+                freelancer_cur.execute("""
+                    INSERT INTO notification (client_id, message, created_at)
+                    VALUES (%s, %s, %s)
+                """, (client_id, f"Freelancer sent a counteroffer of ₹{counter_offer_amount} for your hire request.", now_ts()))
+                freelancer_conn.commit()
+                freelancer_conn.close()
+        except Exception as e:
+            print(f"Error creating notification: {e}")
+    
+    # Send notification to client for counteroffer
+    elif action == "COUNTER":
+        try:
+            # Get freelancer_id from the hire request
+            conn = freelancer_db()
+            cur = get_dict_cursor(conn)
+            cur.execute("SELECT freelancer_id FROM hire_request WHERE id=%s", (request_id,))
+            request_data = cur.fetchone()
+            conn.close()
+            
+            if request_data:
+                freelancer_id = request_data["freelancer_id"]
+                # Create notification for freelancer
+                client_conn = client_db()
+                client_cur = get_dict_cursor(client_conn)
+                client_cur.execute("""
+                    INSERT INTO notification (freelancer_id, message, created_at)
+                    VALUES (%s, %s, %s)
+                """, (freelancer_id, f"Client sent a counteroffer of ₹{counter_offer_amount} for your hire request.", now_ts()))
+                client_conn.commit()
+                client_conn.close()
+        except Exception as e:
+            print(f"Error creating notification: {e}")
+    
     return jsonify({"success": True, "status": new_status})
 
 # ============================================================
@@ -2239,7 +2858,10 @@ def client_job_requests():
                 hr.proposed_budget,
                 hr.note,
                 hr.status,
-                hr.created_at
+                hr.created_at,
+                hr.final_agreed_amount,
+                hr.counter_note,
+                hr.negotiation_status
             FROM hire_request hr
             JOIN freelancer f ON f.id = hr.freelancer_id
             WHERE hr.client_id=%s
@@ -2268,7 +2890,7 @@ def client_job_requests():
                     "job_title": r[4] or "", "proposed_budget": r[5], "note": r[6] or "", "status": r[7], "created_at": r[8]
                 })
 
-        return jsonify(out)
+        return jsonify({"success": True, "requests": out})
     except Exception as e:
         if conn:
             conn.close()
@@ -2353,6 +2975,102 @@ def save_freelancer():
         if conn:
             conn.close()
         return jsonify({"success": False, "msg": str(e)}), 500
+
+@app.route("/client/hire/counter", methods=["POST"])
+def client_hire_counter():
+    """Client responds to a freelancer counteroffer"""
+    d = get_json()
+    missing = require_fields(d, ["client_id", "request_id", "action"])
+    if missing:
+        return jsonify({"success": False, "msg": "Missing fields"}), 400
+
+    client_id = int(d["client_id"])
+    request_id = int(d["request_id"])
+    action = str(d["action"]).strip().upper()
+
+    if action not in ("ACCEPT", "REJECT", "COUNTER"):
+        return jsonify({"success": False, "msg": "action must be ACCEPT, REJECT, or COUNTER"}), 400
+
+    # Verify the request belongs to this client
+    conn = freelancer_db()
+    cur = get_dict_cursor(conn)
+    cur.execute("SELECT id, client_id, status FROM hire_request WHERE id=%s", (request_id,))
+    request = cur.fetchone()
+    conn.close()
+
+    if not request or request["client_id"] != client_id:
+        return jsonify({"success": False, "msg": "Request not found or access denied"}), 404
+
+    if request["status"] not in ["COUNTERED", "PENDING"]:
+        return jsonify({"success": False, "msg": "Request cannot be countered in current status"}), 400
+
+    # Handle counteroffer
+    if action == "COUNTER":
+        counter_offer_amount = d.get("counter_offer_amount")
+        counter_offer_note = d.get("counter_offer_note", "")
+        
+        if not counter_offer_amount:
+            return jsonify({"success": False, "msg": "counter_offer_amount is required for COUNTER action"}), 400
+        
+        try:
+            counter_offer_amount = float(counter_offer_amount)
+            if counter_offer_amount <= 0:
+                return jsonify({"success": False, "msg": "counter_offer_amount must be greater than 0"}), 400
+        except (ValueError, TypeError):
+            return jsonify({"success": False, "msg": "counter_offer_amount must be a valid number"}), 400
+        
+        new_status = "COUNTERED"
+        update_fields = [
+            new_status,
+            counter_offer_amount,
+            counter_offer_note,
+            "CLIENT",
+            request_id
+        ]
+        update_sql = """
+            UPDATE hire_request
+            SET status=%s, final_agreed_amount=%s, counter_note=%s, negotiation_status=%s
+            WHERE id=%s
+        """
+        message = f"Client sent a counteroffer of ₹{counter_offer_amount} for your hire request."
+    else:
+        new_status = "ACCEPTED" if action == "ACCEPT" else "REJECTED"
+        update_fields = [new_status, request_id]
+        update_sql = """
+            UPDATE hire_request
+            SET status=%s
+            WHERE id=%s
+        """
+        message = f"Your counteroffer was {new_status.lower()}." if new_status in ["ACCEPTED", "REJECTED"] else None
+
+    # Update the request
+    conn = freelancer_db()
+    cur = get_dict_cursor(conn)
+    cur.execute(update_sql, update_fields)
+
+    if cur.rowcount == 0:
+        conn.commit()
+        conn.close()
+        return jsonify({"success": False, "msg": "Request not found"}), 404
+
+    conn.commit()
+    conn.close()
+
+    # Send notification to freelancer if counteroffer or final action
+    if message:
+        try:
+            freelancer_conn = freelancer_db()
+            freelancer_cur = get_dict_cursor(freelancer_conn)
+            freelancer_cur.execute("""
+                INSERT INTO notification (freelancer_id, message, created_at)
+                VALUES (%s, %s, %s)
+            """, (request["freelancer_id"], message, now_ts()))
+            freelancer_conn.commit()
+            freelancer_conn.close()
+        except Exception as e:
+            print(f"Error creating notification: {e}")
+
+    return jsonify({"success": True, "status": new_status})
 
 # ============================================================
 # CLIENT – VIEW SAVED FREELANCERS
@@ -2494,7 +3212,7 @@ def freelancer_stats():
             completed_jobs = int(row.get("cnt", 0) or 0)
             total_earnings = float(row.get("total", 0) or 0.0)
         else:
-            completed_jobs = int(row[0] if row else 0)
+            completed_jobs = int(row[0] if row and len(row) > 0 else 0)
             total_earnings = float(row[1] if row and len(row) > 1 else 0.0)
 
         # Total jobs for job success %
@@ -2507,7 +3225,7 @@ def freelancer_stats():
         if isinstance(total_jobs_row, dict):
             total_jobs = int(total_jobs_row.get("cnt", 0) or 0)
         else:
-            total_jobs = int(total_jobs_row[0] if total_jobs_row else 0)
+            total_jobs = int(total_jobs_row[0] if total_jobs_row and len(total_jobs_row) > 0 else 0)
 
         # Rating from profile
         cur.execute("""
@@ -2519,7 +3237,7 @@ def freelancer_stats():
         if isinstance(rating_row, dict):
             rating = float(rating_row.get("rating", 0) or 0.0)
         else:
-            rating = float(rating_row[0] if rating_row else 0.0)
+            rating = float(rating_row[0] if rating_row and len(rating_row) > 0 else 0.0)
 
         job_success = 0.0
         if total_jobs > 0:
@@ -2567,6 +3285,34 @@ def freelancer_save_client():
         return jsonify({"success": False, "msg": str(e)}), 500
 
 
+@app.route("/freelancer/unsave-client", methods=["POST"])
+def freelancer_unsave_client():
+    d = get_json()
+    missing = require_fields(d, ["freelancer_id", "client_id"])
+    if missing:
+        return jsonify({"success": False, "msg": "Missing fields"}), 400
+
+    conn = None
+    try:
+        conn = freelancer_db()
+        cur = get_dict_cursor(conn)
+        cur.execute("""
+            DELETE FROM saved_client
+            WHERE freelancer_id=%s AND client_id=%s
+        """, (int(d["freelancer_id"]), int(d["client_id"])))
+        conn.commit()
+        conn.close()
+        
+        if cur.rowcount > 0:
+            return jsonify({"success": True, "msg": "Client removed successfully"})
+        else:
+            return jsonify({"success": True, "msg": "Client was not in saved list"})
+    except Exception as e:
+        if conn:
+            conn.close()
+        return jsonify({"success": False, "msg": str(e)}), 500
+
+
 @app.route("/freelancer/saved-clients", methods=["GET"])
 def freelancer_saved_clients():
     freelancer_id = request.args.get("freelancer_id")
@@ -2584,42 +3330,70 @@ def freelancer_saved_clients():
         conn = freelancer_db()
         cur = get_dict_cursor(conn)
         cur.execute("""
-            SELECT client_id
+            SELECT client_id, created_at
             FROM saved_client
             WHERE freelancer_id=%s
+            ORDER BY created_at DESC
         """, (freelancer_id,))
         rows = cur.fetchall()
         conn.close()
 
         client_ids = []
+        saved_at_map = {}
         for r in rows:
             if isinstance(r, dict):
                 val = r.get("client_id")
+                saved_at = r.get("created_at")
             else:
                 val = r[0]
+                saved_at = r[1]
             if val is not None:
                 client_ids.append(int(val))
+                saved_at_map[int(val)] = saved_at
         if not client_ids:
-            return jsonify([])
+            return jsonify({"success": True, "clients": []})
 
         client_conn = client_db()
         client_cur = get_dict_cursor(client_conn)
 
         out = []
         for cid in client_ids:
-            client_cur.execute("SELECT name, email FROM client WHERE id=%s", (cid,))
+            # Join client and client_profile tables to get complete information
+            client_cur.execute("""
+                SELECT c.id, c.name, c.email, c.profile_image,
+                       cp.location, cp.bio, cp.phone
+                FROM client c
+                LEFT JOIN client_profile cp ON c.id = cp.client_id
+                WHERE c.id=%s
+            """, (cid,))
             c = client_cur.fetchone()
             if c:
                 if isinstance(c, dict):
-                    nm = c.get("name")
-                    em = c.get("email")
+                    client_info = {
+                        "client_id": cid,
+                        "name": c.get("name"),
+                        "email": c.get("email"),
+                        "profile_image": c.get("profile_image"),
+                        "location": c.get("location"),
+                        "bio": c.get("bio"),
+                        "phone": c.get("phone"),
+                        "saved_at": saved_at_map.get(cid)
+                    }
                 else:
-                    nm = c[0]
-                    em = c[1]
-                out.append({"client_id": cid, "name": nm, "email": em})
+                    client_info = {
+                        "client_id": cid,
+                        "name": c[1],
+                        "email": c[2],
+                        "profile_image": c[3],
+                        "location": c[4],
+                        "bio": c[5],
+                        "phone": c[6],
+                        "saved_at": saved_at_map.get(cid)
+                    }
+                out.append(client_info)
 
         client_conn.close()
-        return jsonify(out)
+        return jsonify({"success": True, "clients": out})
     except Exception as e:
         if client_conn:
             client_conn.close()
@@ -3092,37 +3866,6 @@ def freelancer_upload_photo():
     
     return jsonify({"success": True, "image_path": uploaded_path})
 
-@app.route("/client/profile/<int:client_id>", methods=["GET"])
-def get_client_profile(client_id):
-    """NEW CODE: Get client profile with photo"""
-    conn = client_db()
-    cur = conn.cursor(cursor_factory=RealDictCursor)
-    
-    cur.execute("""
-        SELECT c.id, c.name, c.email, c.profile_image,
-               cp.phone, cp.location, cp.bio
-        FROM client c
-        LEFT JOIN client_profile cp ON cp.client_id = c.id
-        WHERE c.id = %s
-    """, (client_id,))
-    
-    row = cur.fetchone()
-    conn.close()
-    
-    if not row:
-        return jsonify({"success": False, "msg": "Client not found"}), 404
-    
-    return jsonify({
-        "success": True,
-        "client_id": row["id"],
-        "name": row["name"],
-        "email": row["email"],
-        "profile_image": row["profile_image"],
-        "phone": row["phone"],
-        "location": row["location"],
-        "bio": row["bio"]
-    })
-
 @app.route("/freelancer/profile/<int:freelancer_id>", methods=["GET"])
 def get_freelancer_profile(freelancer_id):
     """NEW CODE: Get freelancer profile with photo"""
@@ -3132,7 +3875,9 @@ def get_freelancer_profile(freelancer_id):
     cur.execute("""
         SELECT f.id, f.name, f.email, f.profile_image,
                fp.title, fp.skills, fp.experience, fp.min_budget, fp.max_budget,
-               fp.rating, fp.category, fp.bio, fp.availability_status
+               fp.rating, fp.category, fp.bio, fp.availability_status,
+               fp.pricing_type, fp.hourly_rate, fp.per_person_rate, fp.starting_price,
+               fp.work_description, fp.services_included
         FROM freelancer f
         LEFT JOIN freelancer_profile fp ON fp.freelancer_id = f.id
         WHERE f.id = %s
@@ -3144,7 +3889,70 @@ def get_freelancer_profile(freelancer_id):
     if not row:
         return jsonify({"success": False, "msg": "Freelancer not found"}), 404
     
-    return jsonify({
+    # Build pricing-type-specific response
+    pricing_info = {}
+    pricing_type = row.get("pricing_type")
+    
+    if pricing_type == "hourly":
+        if row.get("hourly_rate"):
+            pricing_info = {
+                "type": "hourly",
+                "hourly_rate": row["hourly_rate"],
+                "display": f"₹{row['hourly_rate']}/hour"
+            }
+    elif pricing_type == "per_person":
+        if row.get("per_person_rate"):
+            pricing_info = {
+                "type": "per_person",
+                "per_person_rate": row["per_person_rate"],
+                "display": f"₹{row['per_person_rate']}/person"
+            }
+    elif pricing_type == "package":
+        # Fetch actual packages for this freelancer
+        packages = []
+        try:
+            pkg_conn = freelancer_db()
+            pkg_cur = pkg_conn.cursor(cursor_factory=RealDictCursor)
+            pkg_cur.execute("""
+                SELECT id, package_name, price, description
+                FROM freelancer_package
+                WHERE freelancer_id = %s
+                ORDER BY price ASC
+            """, (freelancer_id,))
+            pkg_results = pkg_cur.fetchall()
+            pkg_conn.close()
+            
+            for pkg in pkg_results:
+                packages.append({
+                    "package_id": pkg["id"],
+                    "package_name": pkg["package_name"],
+                    "services_included": pkg["description"] or "",
+                    "package_price": pkg["price"]
+                })
+        except Exception:
+            pass  # Ignore package fetch errors
+        
+        if packages:
+            pricing_info = {
+                "type": "package",
+                "packages": packages,
+                "display": f"{len(packages)} packages available"
+            }
+        else:
+            pricing_info = {
+                "type": "package",
+                "packages": [],
+                "display": "No packages configured"
+            }
+    elif pricing_type == "project":
+        if row.get("starting_price"):
+            pricing_info = {
+                "type": "project",
+                "starting_price": row["starting_price"],
+                "display": f"Project from ₹{row['starting_price']}"
+            }
+    
+    response_data = {
         "success": True,
         "freelancer_id": row["id"],
         "name": row["name"],
@@ -3153,13 +3961,184 @@ def get_freelancer_profile(freelancer_id):
         "title": row["title"],
         "skills": row["skills"],
         "experience": row["experience"],
-        "min_budget": row["min_budget"],
-        "max_budget": row["max_budget"],
         "rating": row["rating"],
         "category": row["category"],
         "bio": row["bio"],
-        "availability_status": row["availability_status"]
+        "availability_status": row["availability_status"],
+        "pricing": pricing_info,
+        "pricing_type": pricing_type,
+        "work_description": row.get("work_description"),
+        "services_included": row.get("services_included")
+    }
+    
+    # Include legacy budget fields for backward compatibility if they exist
+    if row.get("min_budget") or row.get("max_budget"):
+        response_data["min_budget"] = row.get("min_budget")
+        response_data["max_budget"] = row.get("max_budget")
+    
+    return jsonify(response_data)
+
+# ============================================================
+# PACKAGE MANAGEMENT ENDPOINTS
+# ============================================================
+
+@app.route("/freelancer/packages", methods=["POST"])
+def add_freelancer_package():
+    """Add a package for a freelancer (for package pricing)"""
+    d = get_json()
+    missing = require_fields(d, ["freelancer_id", "package_name", "price"])
+    if missing:
+        return jsonify({"success": False, "msg": f"Missing fields: {', '.join(missing)}"}), 400
+    
+    try:
+        freelancer_id = int(d["freelancer_id"])
+        package_name = str(d["package_name"]).strip()
+        price = float(d["price"])
+        services_included = str(d.get("services_included", "")).strip()
+        
+        if price <= 0:
+            return jsonify({"success": False, "msg": "Price must be greater than 0"}), 400
+        
+        if not package_name:
+            return jsonify({"success": False, "msg": "Package name cannot be empty"}), 400
+        
+        # Verify freelancer exists
+        conn = freelancer_db()
+        cur = get_dict_cursor(conn)
+        cur.execute("SELECT id FROM freelancer WHERE id=%s", (freelancer_id,))
+        freelancer_exists = cur.fetchone()
+        
+        if not freelancer_exists:
+            conn.close()
+            return jsonify({"success": False, "msg": "Freelancer not found"}), 404
+        
+        # Add package
+        cur.execute("""
+            INSERT INTO freelancer_package (freelancer_id, package_name, price, description, created_at)
+            VALUES (%s, %s, %s, %s, %s)
+            RETURNING id
+        """, (freelancer_id, package_name, price, services_included, now_ts()))
+        
+        result = cur.fetchone()
+        
+        if result:
+            package_id = result[0] if isinstance(result, (list, tuple)) else result.get('id')
+        else:
+            package_id = None
+            
+        conn.commit()
+        conn.close()
+        
+        if package_id:
+            return jsonify({"success": True, "package_id": package_id})
+        else:
+            return jsonify({"success": False, "msg": "Failed to insert package"})
+            
+    except Exception as e:
+        return jsonify({"success": False, "msg": str(e)}), 500
+
+@app.route("/freelancer/<int:freelancer_id>/packages", methods=["GET"])
+def get_freelancer_packages(freelancer_id):
+    """Get all packages for a freelancer"""
+    conn = freelancer_db()
+    cur = conn.cursor(cursor_factory=RealDictCursor)
+    
+    cur.execute("""
+        SELECT id, package_name, price, description, created_at
+        FROM freelancer_package
+        WHERE freelancer_id = %s
+        ORDER BY price ASC
+    """, (freelancer_id,))
+    
+    packages = cur.fetchall()
+    conn.close()
+    
+    # Format packages for display
+    formatted_packages = []
+    for pkg in packages:
+        formatted_packages.append({
+            "package_id": pkg["id"],
+            "package_name": pkg["package_name"],
+            "services_included": pkg["description"] or "",
+            "starting_price": pkg["price"],
+            "created_at": pkg["created_at"]
+        })
+    
+    return jsonify({
+        "success": True,
+        "packages": formatted_packages
     })
+
+@app.route("/freelancer/packages/<int:package_id>", methods=["PUT"])
+def update_freelancer_package(package_id):
+    """Update a package"""
+    d = get_json()
+    
+    package_name = d.get("package_name")
+    price = d.get("price")
+    services_included = d.get("services_included")
+    
+    if not any([package_name, price, services_included]):
+        return jsonify({"success": False, "msg": "At least one field must be provided"}), 400
+    
+    # Build update query dynamically
+    updates = []
+    params = []
+    
+    if package_name is not None:
+        updates.append("package_name = %s")
+        params.append(str(package_name).strip())
+    
+    if price is not None:
+        try:
+            price = float(price)
+            if price <= 0:
+                return jsonify({"success": False, "msg": "Price must be greater than 0"}), 400
+            updates.append("price = %s")
+            params.append(price)
+        except (ValueError, TypeError):
+            return jsonify({"success": False, "msg": "Invalid price format"}), 400
+    
+    if services_included is not None:
+        updates.append("description = %s")
+        params.append(str(services_included).strip())
+    
+    params.append(package_id)
+    
+    conn = freelancer_db()
+    cur = get_dict_cursor(conn)
+    
+    cur.execute(f"""
+        UPDATE freelancer_package
+        SET {', '.join(updates)}
+        WHERE id = %s
+    """, params)
+    
+    if cur.rowcount == 0:
+        conn.close()
+        return jsonify({"success": False, "msg": "Package not found"}), 404
+    
+    conn.commit()
+    conn.close()
+    
+    return jsonify({"success": True})
+
+@app.route("/freelancer/packages/<int:package_id>", methods=["DELETE"])
+def delete_freelancer_package(package_id):
+    """Delete a package"""
+    conn = freelancer_db()
+    cur = get_dict_cursor(conn)
+    
+    cur.execute("DELETE FROM freelancer_package WHERE id = %s", (package_id,))
+    
+    if cur.rowcount == 0:
+        conn.close()
+        return jsonify({"success": False, "msg": "Package not found"}), 404
+    
+    conn.commit()
+    conn.close()
+    
+    return jsonify({"success": True})
 
 # ============================================================
 # NEW CODE: PORTFOLIO SYSTEM
@@ -3908,61 +4887,37 @@ def freelancer_subscription_status():
 @app.route("/client/projects/create", methods=["POST"])
 def client_projects_create():
     d = get_json()
-    missing = require_fields(d, ["client_id", "title", "description", "category", "skills", "budget_type"])
+    missing = require_fields(d, ["client_id", "category", "description", "location", "pincode"])
     if missing:
         return jsonify({"success": False, "msg": "Missing fields"}), 400
     
     try:
         client_id = int(d["client_id"])
-        title = str(d["title"]).strip()
-        description = str(d["description"]).strip()
         category = str(d["category"]).strip()
-        skills = str(d["skills"]).strip()
-        budget_type = str(d["budget_type"]).strip().upper()
+        description = str(d["description"]).strip()
+        location = str(d["location"]).strip()
+        pincode = str(d["pincode"]).strip()
         
-        # Validate budget type - only FIXED or HOURLY allowed
-        if budget_type not in ("FIXED", "HOURLY"):
-            return jsonify({"success": False, "msg": "Invalid budget_type. Use FIXED or HOURLY"}), 400
-        
-        # Get single budget value based on type
-        if budget_type == "FIXED":
-            budget_value = float(d.get("budget", 0))
-        elif budget_type == "HOURLY":
-            budget_value = float(d.get("hourly_rate", 0))
-        else:
-            return jsonify({"success": False, "msg": "Invalid budget_type"}), 400
-        
-        if budget_value <= 0:
-            return jsonify({"success": False, "msg": "Budget must be greater than 0"}), 400
-    
     except Exception:
         return jsonify({"success": False, "msg": "Invalid payload"}), 400
     
     conn = freelancer_db()
     try:
         cur = get_dict_cursor(conn)
-        # PostgreSQL syntax with RETURNING id and default status 'pending'
         cur.execute("""
-            INSERT INTO project_post (client_id, title, description, category, skills, budget_type, budget_min, budget_max, status, created_at)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, 'OPEN', %s) RETURNING id
-        """, (client_id, title, description, category, skills, budget_type, budget_value, budget_value, now_ts()))
+            INSERT INTO project_post (client_id, category, description, location, pincode, status, created_at)
+            VALUES (%s, %s, %s, %s, %s, 'OPEN', %s) RETURNING id
+        """, (client_id, category, description, location, pincode, now_ts()))
 
         proj_row = cur.fetchone()
         project_id = proj_row["id"] if isinstance(proj_row, dict) else proj_row[0]
         conn.commit()
 
-        # Enhanced response with status and next actions
         return jsonify({
             "success": True,
             "msg": "Project posted successfully",
             "project_id": project_id,
-            "status": "pending",
-            "budget_type": budget_type,
-            "budget_value": budget_value,
-            "next_actions": [
-                "view_profile",
-                "edit_profile"
-            ]
+            "status": "OPEN"
         })
         
     except psycopg2.Error as e:
@@ -3991,7 +4946,7 @@ def client_projects_list():
     try:
         cur = get_dict_cursor(conn)
         cur.execute("""
-            SELECT id, title, description, category, skills, budget_type, budget_min, budget_max, status, created_at
+            SELECT id, category, description, location, pincode, status, created_at
             FROM project_post
             WHERE client_id=%s
             ORDER BY created_at DESC
@@ -4001,20 +4956,16 @@ def client_projects_list():
         for r in rows:
             projects.append({
                 "project_id": r["id"],
-                "title": r["title"],
-                "description": r["description"],
                 "category": r["category"],
-                "skills": r["skills"],
-                "budget_type": r["budget_type"],
-                "budget_min": r["budget_min"],
-                "budget_max": r["budget_max"],
+                "description": r["description"],
+                "location": r["location"],
+                "pincode": r["pincode"],
                 "status": r["status"],
                 "created_at": r["created_at"],
             })
         return jsonify({"success": True, "projects": projects})
     finally:
         conn.close()
-
 
 @app.route("/client/projects/applicants", methods=["GET"])
 def client_projects_applicants():
@@ -4034,7 +4985,7 @@ def client_projects_applicants():
         if not r or int(r["client_id"]) != cid:
             return jsonify({"success": False, "msg": "Not authorized"}), 403
         cur.execute("""
-            SELECT id, freelancer_id, proposal_text, bid_amount, hourly_rate, event_base_fee, status, created_at
+            SELECT id, freelancer_id, proposal, bid_amount, status, created_at
             FROM project_application
             WHERE project_id=%s
             ORDER BY created_at DESC
@@ -4042,13 +4993,25 @@ def client_projects_applicants():
         rows = cur.fetchall()
         applicants = []
         for a in rows:
+            # Get freelancer details
+            cur.execute("""
+                SELECT f.name, fp.title, fp.skills, fp.experience, f.email
+                FROM freelancer f
+                LEFT JOIN freelancer_profile fp ON f.id = fp.freelancer_id
+                WHERE f.id=%s
+            """, (a["freelancer_id"],))
+            freelancer_info = cur.fetchone()
+            
             applicants.append({
                 "application_id": a["id"],
                 "freelancer_id": a["freelancer_id"],
-                "proposal_text": a["proposal_text"],
+                "freelancer_name": freelancer_info["name"] if freelancer_info else "Unknown",
+                "freelancer_title": freelancer_info.get("title", ""),
+                "freelancer_skills": freelancer_info.get("skills", ""),
+                "freelancer_experience": freelancer_info.get("experience", 0),
+                "freelancer_email": freelancer_info["email"] if freelancer_info else "",
+                "proposal": a["proposal"],
                 "bid_amount": a["bid_amount"],
-                "hourly_rate": a["hourly_rate"],
-                "event_base_fee": a["event_base_fee"],
                 "status": a["status"],
                 "created_at": a["created_at"],
             })
@@ -4097,14 +5060,15 @@ def client_projects_accept_application():
     conn = freelancer_db()
     try:
         cur = get_dict_cursor(conn)
-        cur.execute("SELECT client_id, title, budget_type FROM project_post WHERE id=%s", (pid,))
+        cur.execute("SELECT client_id, category, description FROM project_post WHERE id=%s", (pid,))
         pr = cur.fetchone()
         if not pr or int(pr["client_id"]) != cid:
             return jsonify({"success": False, "msg": "Not authorized"}), 403
-        project_title = pr["title"]
-        budget_type = (pr["budget_type"] or "FIXED").upper()
+        project_category = pr["category"]
+        project_description = pr["description"]
+        
         cur.execute("""
-            SELECT freelancer_id, bid_amount, hourly_rate, event_base_fee, status
+            SELECT freelancer_id, proposal, bid_amount, status
             FROM project_application
             WHERE id=%s AND project_id=%s
         """, (aid, pid))
@@ -4112,24 +5076,24 @@ def client_projects_accept_application():
         if not ar:
             return jsonify({"success": False, "msg": "Application not found"}), 404
         ar_status = ar["status"]
-        if ar_status != "APPLIED":
-            return jsonify({"success": False, "msg": "Application not in APPLIED state"}), 400
+        if ar_status != "PENDING":
+            return jsonify({"success": False, "msg": "Application not in PENDING state"}), 400
         freelancer_id = int(ar["freelancer_id"])
         bid_amount = ar["bid_amount"] or 0
-        hourly_rate = ar["hourly_rate"] or 0
-        event_base_fee = ar["event_base_fee"] or 0
-        if budget_type == "FIXED":
-            proposed_budget = bid_amount
-        elif budget_type == "HOURLY":
-            proposed_budget = hourly_rate
-        else:
-            proposed_budget = event_base_fee
+        
+        # Accept the application and update project status
         cur.execute("UPDATE project_application SET status='ACCEPTED' WHERE id=%s", (aid,))
-        cur.execute("UPDATE project_post SET status='HIRED' WHERE id=%s", (pid,))
+        cur.execute("UPDATE project_post SET status='ASSIGNED' WHERE id=%s", (pid,))
+        
+        # Reject other pending applications
+        cur.execute("UPDATE project_application SET status='REJECTED' WHERE project_id=%s AND status='PENDING' AND id!=%s", (pid, aid))
+        
+        # Create hire request
         cur.execute("""
             INSERT INTO hire_request (client_id, freelancer_id, job_title, proposed_budget, note, status, created_at, contract_type)
             VALUES (%s, %s, %s, %s, %s, 'PENDING', %s, %s)
-        """, (cid, freelancer_id, project_title, proposed_budget, f"Created from project application #{aid}", now_ts(), budget_type))
+        """, (cid, freelancer_id, f"Project: {project_category}", bid_amount, f"Created from project application #{aid}", now_ts(), "PROJECT"))
+        
         conn.commit()
         return jsonify({"success": True})
     finally:
@@ -4138,29 +5102,64 @@ def client_projects_accept_application():
 
 @app.route("/freelancer/projects/feed", methods=["GET"])
 def freelancer_projects_feed():
+    freelancer_id = request.args.get("freelancer_id", "")
+    try:
+        fid = int(freelancer_id)
+    except Exception:
+        return jsonify({"success": False, "msg": "freelancer_id required"}), 400
+    
     conn = freelancer_db()
     from psycopg2.extras import RealDictCursor
     try:
         cur = get_dict_cursor(conn)
+        
+        # Get freelancer profile for filtering
         cur.execute("""
-            SELECT id, client_id, title, description, category, skills, budget_type, budget_min, budget_max, created_at
+            SELECT category, location, pincode 
+            FROM freelancer_profile 
+            WHERE freelancer_id=%s
+        """, (fid,))
+        freelancer_profile = cur.fetchone()
+        
+        if not freelancer_profile:
+            return jsonify({"success": True, "projects": []})
+        
+        freelancer_category = freelancer_profile.get("category", "").lower().strip()
+        freelancer_location = freelancer_profile.get("location", "").lower().strip()
+        freelancer_pincode = freelancer_profile.get("pincode", "").strip()
+        
+        # Filter projects based on freelancer category and location/pincode
+        cur.execute("""
+            SELECT id, client_id, category, description, location, pincode, created_at
             FROM project_post
             WHERE status='OPEN'
             ORDER BY created_at DESC
         """)
         rows = cur.fetchall()
+        
         feed = []
         for r in rows:
+            project_category = r.get("category", "").lower().strip()
+            project_location = r.get("location", "").lower().strip()
+            project_pincode = r.get("pincode", "").strip()
+            
+            # Filter by category (must match)
+            if freelancer_category and project_category and freelancer_category != project_category:
+                continue
+                
+            # Filter by location/pincode (if available)
+            if freelancer_pincode and project_pincode and freelancer_pincode != project_pincode:
+                continue
+            if freelancer_location and project_location and freelancer_location not in project_location and project_location not in freelancer_location:
+                continue
+                
             feed.append({
                 "project_id": r["id"],
                 "client_id": r["client_id"],
-                "title": r["title"],
-                "description": r["description"],
                 "category": r["category"],
-                "skills": r["skills"],
-                "budget_type": r["budget_type"],
-                "budget_min": r["budget_min"],
-                "budget_max": r["budget_max"],
+                "description": r["description"],
+                "location": r["location"],
+                "pincode": r["pincode"],
                 "created_at": r["created_at"],
             })
         return jsonify({"success": True, "projects": feed})
@@ -4171,38 +5170,33 @@ def freelancer_projects_feed():
 @app.route("/freelancer/projects/apply", methods=["POST"])
 def freelancer_projects_apply():
     d = get_json()
-    missing = require_fields(d, ["freelancer_id", "project_id", "proposal_text"])
+    missing = require_fields(d, ["freelancer_id", "project_id", "proposal", "bid_amount"])
     if missing:
         return jsonify({"success": False, "msg": "Missing fields"}), 400
     try:
         fid = int(d["freelancer_id"])
         pid = int(d["project_id"])
-        proposal_text = str(d["proposal_text"]).strip()
-        bid_amount = float(d.get("bid_amount")) if d.get("bid_amount") is not None else None
-        hourly_rate = float(d.get("hourly_rate")) if d.get("hourly_rate") is not None else None
-        event_base_fee = float(d.get("event_base_fee")) if d.get("event_base_fee") is not None else None
+        proposal = str(d["proposal"]).strip()
+        bid_amount = float(d["bid_amount"])
     except Exception:
         return jsonify({"success": False, "msg": "Invalid payload"}), 400
     
     conn = freelancer_db()
     try:
         cur = get_dict_cursor(conn)
-        # PostgreSQL syntax
+        # Check if already applied
         cur.execute("SELECT 1 FROM project_application WHERE project_id=%s AND freelancer_id=%s", (pid, fid))
         if cur.fetchone():
             return jsonify({"success": False, "msg": "Already applied"}), 400
         
-        # Insert application with PostgreSQL syntax
+        # Insert application
         cur.execute("""
-            INSERT INTO project_application (project_id, freelancer_id, proposal_text, bid_amount, hourly_rate, event_base_fee, status, created_at)
-            VALUES (%s, %s, %s, %s, %s, %s, 'APPLIED', %s)
+            INSERT INTO project_application (project_id, freelancer_id, proposal, bid_amount, status, created_at)
+            VALUES (%s, %s, %s, %s, 'PENDING', %s)
             RETURNING id
-        """, (pid, fid, proposal_text, bid_amount, hourly_rate, event_base_fee, now_ts()))
+        """, (pid, fid, proposal, bid_amount, now_ts()))
         app_row = cur.fetchone()
         application_id = app_row["id"] if isinstance(app_row, dict) else app_row[0]
-        
-        # Update project status to 'applied' when freelancer applies
-        cur.execute("UPDATE project_post SET status='applied' WHERE id=%s", (pid,))
         
         conn.commit()
         return jsonify({"success": True, "msg": "Application submitted successfully", "application_id": application_id})
@@ -4223,94 +5217,253 @@ def freelancer_projects_apply():
 @app.route("/client/rate", methods=["POST"])
 def client_rate():
     d = get_json()
-    missing = require_fields(d, ["client_id", "hire_request_id", "rating", "review"])
+    missing = require_fields(d, ["client_id", "freelancer_id", "rating", "review"])
     if missing:
         return jsonify({"success": False, "msg": "Missing fields"}), 400
     
-    # Validate rating range
-    rating = float(d["rating"])
+    try:
+        rating = float(d["rating"])
+    except (ValueError, TypeError):
+        return jsonify({"success": False, "msg": "Invalid rating format"}), 400
+    
     if rating < 1 or rating > 5:
         return jsonify({"success": False, "msg": "Rating must be between 1 and 5"}), 400
     
     client_id = int(d["client_id"])
+    freelancer_id = int(d["freelancer_id"])
+    review_text = str(d.get("review", "")).strip()
+    
+    conn = None
+    try:
+        conn = freelancer_db()
+        cur = get_dict_cursor(conn)
+        
+        # Get current freelancer stats
+        cur.execute("""
+            SELECT rating, total_projects, total_rating_sum 
+            FROM freelancer_profile 
+            WHERE freelancer_id = %s
+        """, (freelancer_id,))
+        
+        stats = cur.fetchone()
+        if not stats:
+            # Create profile if it doesn't exist
+            cur.execute("""
+                INSERT INTO freelancer_profile (freelancer_id, rating, total_projects, total_rating_sum)
+                VALUES (%s, %s, 1, %s)
+            """, (freelancer_id, rating, rating))
+            new_average = rating
+            new_total_projects = 1
+        else:
+            # Handle both dict and tuple responses
+            if isinstance(stats, dict):
+                current_rating = stats.get("rating")
+                total_projects = stats.get("total_projects")
+                total_rating_sum = stats.get("total_rating_sum")
+            else:
+                current_rating = stats[0] if len(stats) > 0 else 0
+                total_projects = stats[1] if len(stats) > 1 else 0
+                total_rating_sum = stats[2] if len(stats) > 2 else 0
+            
+            total_projects = int(total_projects or 0)
+            total_rating_sum = float(total_rating_sum or 0)
+            
+            # Calculate new rating
+            new_total_projects = total_projects + 1
+            new_total_rating_sum = total_rating_sum + rating
+            new_average = new_total_rating_sum / new_total_projects
+            
+            # Update freelancer profile
+            cur.execute("""
+                UPDATE freelancer_profile 
+                SET rating = %s, total_projects = %s, total_rating_sum = %s
+                WHERE freelancer_id = %s
+            """, (new_average, new_total_projects, new_total_rating_sum, freelancer_id))
+        
+        # Insert a dummy review for testing with unique ID
+        cur.execute("""
+            INSERT INTO review (hire_request_id, client_id, freelancer_id, rating, review_text, created_at)
+            VALUES (%s, %s, %s, %s, %s, %s)
+        """, (None, client_id, freelancer_id, rating, review_text, now_ts()))
+        
+        conn.commit()
+        conn.close()
+        
+        return jsonify({
+            "success": True,
+            "new_rating": new_average,
+            "total_reviews": new_total_projects
+        })
+    except Exception as e:
+        if conn:
+            conn.close()
+        return jsonify({"success": False, "msg": str(e)}), 500
+@app.route("/client/kyc/upload", methods=["POST"])
+def client_kyc_upload():
+    """Client KYC document upload"""
+    client_id = request.form.get("client_id")
+    if not client_id:
+        return jsonify({"success": False, "msg": "client_id required"}), 400
+    
+    try:
+        client_id = int(client_id)
+    except ValueError:
+        return jsonify({"success": False, "msg": "Invalid client_id"}), 400
+    
+    # Check if files were uploaded
+    if 'government_id' not in request.files or 'pan_card' not in request.files:
+        return jsonify({"success": False, "msg": "Both government_id and pan_card files required"}), 400
+    
+    gov_file = request.files['government_id']
+    pan_file = request.files['pan_card']
+    
+    if gov_file.filename == '' or pan_file.filename == '':
+        return jsonify({"success": False, "msg": "No selected file"}), 400
+    
+    conn = None
+    try:
+        # Create uploads directory if it doesn't exist
+        if not os.path.exists(UPLOADS_FOLDER):
+            os.makedirs(UPLOADS_FOLDER)
+        
+        conn = freelancer_db()
+        cur = get_dict_cursor(conn)
+        
+        # Save files to uploads folder
+        gov_filename = secure_filename(gov_file.filename)
+        pan_filename = secure_filename(pan_file.filename)
+        
+        gov_path = os.path.join(UPLOADS_FOLDER, f"client_{client_id}_gov_{gov_filename}")
+        pan_path = os.path.join(UPLOADS_FOLDER, f"client_{client_id}_pan_{pan_filename}")
+        
+        gov_file.save(gov_path)
+        pan_file.save(pan_path)
+        
+        # Create client verification record (simplified)
+        cur.execute("""
+            INSERT INTO client_verification (client_id, government_id_path, pan_card_path, status, submitted_at)
+            VALUES (%s, %s, %s, 'PENDING', %s)
+        """, (client_id, gov_path, pan_path, now_ts()))
+        
+        conn.commit()
+        conn.close()
+        
+        return jsonify({
+            "success": True,
+            "msg": "KYC documents uploaded successfully"
+        })
+    except Exception as e:
+        print(f"KYC Upload Error: {str(e)}")
+        if conn:
+            conn.close()
+        return jsonify({"success": False, "msg": f"Failed to save verification data: {str(e)}"}), 500
+
+@app.route("/client/verification/status", methods=["GET"])
+def client_verification_status():
+    """Get client verification status"""
+    client_id = request.args.get("client_id")
+    if not client_id:
+        return jsonify({"success": False, "msg": "client_id required"}), 400
+    
+    try:
+        client_id = int(client_id)
+    except ValueError:
+        return jsonify({"success": False, "msg": "Invalid client_id"}), 400
+    
+    conn = None
+    try:
+        conn = freelancer_db()
+        cur = get_dict_cursor(conn)
+        
+        cur.execute("""
+            SELECT status, submitted_at, reviewed_at, rejection_reason
+            FROM client_verification
+            WHERE client_id = %s
+        """, (client_id,))
+        
+        result = cur.fetchone()
+        conn.close()
+        
+        if not result:
+            return jsonify({
+                "success": True,
+                "status": "NOT_SUBMITTED",
+                "msg": "No verification submitted yet."
+            })
+        
+        return jsonify({
+            "success": True,
+            "status": result["status"],
+            "submitted_at": result["submitted_at"],
+            "reviewed_at": result.get("reviewed_at"),
+            "rejection_reason": result.get("rejection_reason")
+        })
+    except Exception as e:
+        if conn:
+            conn.close()
+        return jsonify({"success": False, "msg": str(e)}), 500
+    d = get_json()
+    missing = require_fields(d, ["hire_request_id", "freelancer_id", "hours"])
+    if missing:
+        return jsonify({"success": False, "msg": "Missing fields"}), 400
+    
     hire_request_id = int(d["hire_request_id"])
-    review_text = d["review"]
+    freelancer_id = int(d["freelancer_id"])
+    hours = float(d["hours"])
     
     conn = freelancer_db()
     cur = get_dict_cursor(conn)
     
-    # Check if hire request belongs to client and status is PAID
+    # Fetch contract snapshot
     cur.execute("""
-        SELECT freelancer_id, status 
+        SELECT contract_type, contract_hourly_rate, contract_overtime_rate, max_daily_hours
         FROM hire_request 
-        WHERE id = %s AND client_id = %s
-    """, (hire_request_id, client_id))
+        WHERE id = %s AND freelancer_id = %s
+    """, (hire_request_id, freelancer_id))
     
-    request = cur.fetchone()
-    if not request:
+    contract = cur.fetchone()
+    if not contract:
         conn.close()
         return jsonify({"success": False, "msg": "Hire request not found"}), 404
     
-    freelancer_id, status = request
-    if status != "PAID":
+    contract_type, hourly_rate, overtime_rate, max_daily_hours = contract
+    
+    # Ensure contract type is HOURLY
+    if contract_type != "HOURLY":
         conn.close()
-        return jsonify({"success": False, "msg": "Rating only allowed for paid jobs"}), 400
+        return jsonify({"success": False, "msg": "Work logging only available for HOURLY contracts"}), 400
     
-    # Check if already rated
-    cur.execute("SELECT id FROM review WHERE hire_request_id = %s", (hire_request_id,))
-    if cur.fetchone():
-        conn.close()
-        return jsonify({"success": False, "msg": "Already rated"}), 400
+    hourly_rate = hourly_rate or 0
+    overtime_rate = overtime_rate or 0
+    max_daily_hours = max_daily_hours or 8
     
-    # Get current freelancer stats
+    # Calculate regular and overtime
+    if hours > max_daily_hours:
+        overtime = hours - max_daily_hours
+        regular = max_daily_hours
+    else:
+        overtime = 0
+        regular = hours
+    
+    # Calculate amount
+    amount = (regular * hourly_rate) + (overtime * overtime_rate)
+    
+    # Insert work log
     cur.execute("""
-        SELECT rating, total_projects, total_rating_sum 
-        FROM freelancer_profile 
-        WHERE freelancer_id = %s
-    """, (freelancer_id,))
-    
-    stats = cur.fetchone()
-    if not stats:
-        conn.close()
-        return jsonify({"success": False, "msg": "Freelancer not found"}), 404
-    
-    current_rating, total_projects, total_rating_sum = stats
-    total_projects = total_projects or 0
-    total_rating_sum = total_rating_sum or 0
-    
-    # Calculate new rating
-    new_total_projects = total_projects + 1
-    new_total_rating_sum = total_rating_sum + rating
-    new_average = new_total_rating_sum / new_total_projects
-    
-    # Update freelancer profile
-    cur.execute("""
-        UPDATE freelancer_profile 
-        SET rating = %s, total_projects = %s, total_rating_sum = %s
-        WHERE freelancer_id = %s
-    """, (new_average, new_total_projects, new_total_rating_sum, freelancer_id))
-    
-    # Insert review
-    cur.execute("""
-        INSERT INTO review (hire_request_id, client_id, freelancer_id, rating, review_text, created_at)
-        VALUES (%s, %s, %s, %s, %s, %s)
-    """, (hire_request_id, client_id, freelancer_id, rating, review_text, now_ts()))
-    
-    # Update hire request status
-    cur.execute("""
-        UPDATE hire_request 
-        SET status = 'RATED' 
-        WHERE id = %s
-    """, (hire_request_id,))
+        INSERT INTO work_log (hire_request_id, freelancer_id, work_date, hours, calculated_regular, calculated_overtime, calculated_amount, created_at)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+    """, (hire_request_id, freelancer_id, now_ts().split()[0], hours, regular, overtime, amount, now_ts()))
     
     conn.commit()
     conn.close()
     
     return jsonify({
         "success": True,
-        "new_rating": new_average,
-        "total_reviews": new_total_projects
-    }), 500
+        "regular_hours": regular,
+        "overtime_hours": overtime,
+        "calculated_amount": amount
+    })
+
 
 
 @app.route("/hourly/log", methods=["POST"])
@@ -4678,6 +5831,7 @@ def call_incoming():
         
     except Exception as e:
         return jsonify({"success": False, "msg": str(e)}), 500
+
 
 if __name__ == "__main__":
     app.run(debug=True, host="0.0.0.0", port=5000)

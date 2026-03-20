@@ -79,6 +79,12 @@ def create_tables():
         created_at INTEGER
     )
     """)
+    
+    # Add enhanced notification columns if they don't exist
+    _try_add_column(cur, "notification", "title TEXT")
+    _try_add_column(cur, "notification", "related_entity_type TEXT")
+    _try_add_column(cur, "notification", "related_entity_id INTEGER")
+    _try_add_column(cur, "notification", "is_read BOOLEAN DEFAULT FALSE")
 
     # Call session (client.db copy)
     cur.execute("""
@@ -211,6 +217,18 @@ def create_tables():
     _try_add_column(cur, "freelancer_profile", "dob TEXT")
     _try_add_column(cur, "freelancer_profile", "total_rating_sum REAL DEFAULT 0")
     _try_add_column(cur, "freelancer_profile", "availability_status TEXT DEFAULT 'AVAILABLE'")
+    _try_add_column(cur, "freelancer_profile", "supports_fixed BOOLEAN DEFAULT TRUE")
+    _try_add_column(cur, "freelancer_profile", "supports_hourly BOOLEAN DEFAULT TRUE")
+    _try_add_column(cur, "freelancer_profile", "fixed_price REAL")
+    _try_add_column(cur, "freelancer_profile", "hourly_rate REAL")
+    _try_add_column(cur, "freelancer_profile", "overtime_rate_per_hour REAL")
+    # New pricing-type aware fields
+    _try_add_column(cur, "freelancer_profile", "pricing_type TEXT")
+    _try_add_column(cur, "freelancer_profile", "per_person_rate REAL")
+    _try_add_column(cur, "freelancer_profile", "starting_price REAL")
+    _try_add_column(cur, "freelancer_profile", "searchable_price REAL")
+    _try_add_column(cur, "freelancer_profile", "work_description TEXT")
+    _try_add_column(cur, "freelancer_profile", "services_included TEXT")
 
     # Migrate experience from INTEGER to REAL for existing records
     try:
@@ -277,19 +295,33 @@ def create_tables():
     CREATE TABLE IF NOT EXISTS saved_client (
         freelancer_id INTEGER,
         client_id INTEGER,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         UNIQUE(freelancer_id, client_id)
     )
     """)
+    
+    # Add created_at column to existing saved_client table if it doesn't exist
+    _try_add_column(cur, "saved_client", "created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP")
 
     # Notifications (legacy copy kept in freelancer.db in your project)
     cur.execute("""
     CREATE TABLE IF NOT EXISTS notification (
         id SERIAL PRIMARY KEY ,
         client_id INTEGER,
+        freelancer_id INTEGER,
         message TEXT,
         created_at INTEGER
     )
     """)
+    
+    # Add freelancer_id column if it doesn't exist
+    _try_add_column(cur, "notification", "freelancer_id INTEGER")
+    
+    # Add enhanced notification columns if they don't exist
+    _try_add_column(cur, "notification", "title TEXT")
+    _try_add_column(cur, "notification", "related_entity_type TEXT")
+    _try_add_column(cur, "notification", "related_entity_id INTEGER")
+    _try_add_column(cur, "notification", "is_read BOOLEAN DEFAULT FALSE")
 
     # Portfolio
     cur.execute("""
@@ -326,30 +358,33 @@ def create_tables():
     CREATE TABLE IF NOT EXISTS project_post (
         id SERIAL PRIMARY KEY,
         client_id INTEGER,
-        title TEXT,
-        description TEXT,
         category TEXT,
-        skills TEXT,
-        budget_type TEXT,
-        budget_min REAL,
-        budget_max REAL,
+        description TEXT,
+        location TEXT,
+        pincode TEXT,
         status TEXT DEFAULT 'OPEN',
         created_at INTEGER
     )
     """)
+    
+    # Ensure location column exists (for existing databases)
+    _try_add_column(cur, "project_post", "location TEXT")
+    _try_add_column(cur, "project_post", "pincode TEXT")
     cur.execute("""
     CREATE TABLE IF NOT EXISTS project_application (
         id SERIAL PRIMARY KEY,
         project_id INTEGER,
         freelancer_id INTEGER,
-        proposal_text TEXT,
+        proposal TEXT,
         bid_amount REAL,
-        hourly_rate REAL,
-        event_base_fee REAL,
-        status TEXT DEFAULT 'APPLIED',
+        status TEXT DEFAULT 'PENDING',
         created_at INTEGER
     )
     """)
+    
+    # Ensure proposal column exists (for existing databases)
+    _try_add_column(cur, "project_application", "proposal TEXT")
+    _try_add_column(cur, "project_application", "bid_amount REAL")
 
     # ==========================
     # FTS5: Search index (PostgreSQL doesn't have FTS5, use full-text search)
@@ -370,6 +405,22 @@ def create_tables():
         cur.execute("CREATE INDEX IF NOT EXISTS freelancer_search_text_idx ON freelancer_search USING gin(to_tsvector('english', title || ' ' || skills || ' ' || bio || ' ' || tags || ' ' || portfolio_text))")
     except Exception:
         pass
+
+    # ==========================
+    # CLIENT VERIFICATION
+    # ==========================
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS client_verification (
+        id SERIAL PRIMARY KEY,
+        client_id INTEGER UNIQUE,
+        government_id_path TEXT,
+        pan_card_path TEXT,
+        status TEXT DEFAULT 'PENDING',
+        submitted_at INTEGER,
+        reviewed_at INTEGER,
+        rejection_reason TEXT
+    )
+    """)
 
     # ==========================
     # FREELANCER VERIFICATION
@@ -448,6 +499,32 @@ def create_tables():
     _try_add_column(cur, "hire_request", "event_pincode TEXT")
     _try_add_column(cur, "hire_request", "event_landmark TEXT")
     _try_add_column(cur, "hire_request", "venue_source TEXT DEFAULT 'custom'")
+    # Pricing-type and negotiation / hire-flow extensions (additive)
+    _try_add_column(cur, "hire_request", "pricing_type TEXT")
+    _try_add_column(cur, "hire_request", "selected_package_id INTEGER")
+    _try_add_column(cur, "hire_request", "selected_package_name TEXT")
+    _try_add_column(cur, "hire_request", "selected_package_price REAL")
+    _try_add_column(cur, "hire_request", "selected_package_services TEXT")
+    _try_add_column(cur, "hire_request", "client_budget REAL")
+    _try_add_column(cur, "hire_request", "freelancer_quote REAL")
+    _try_add_column(cur, "hire_request", "final_agreed_amount REAL")
+    _try_add_column(cur, "hire_request", "counter_note TEXT")
+    _try_add_column(cur, "hire_request", "negotiation_status TEXT DEFAULT 'REQUESTED'")
+    _try_add_column(cur, "hire_request", "number_of_persons INTEGER")
+    _try_add_column(cur, "hire_request", "guest_count INTEGER")
+    _try_add_column(cur, "hire_request", "additional_requirements TEXT")
+
+    # Package records for package-based pricing categories
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS freelancer_package (
+        id SERIAL PRIMARY KEY,
+        freelancer_id INTEGER NOT NULL,
+        package_name TEXT NOT NULL,
+        price REAL NOT NULL,
+        description TEXT,
+        created_at INTEGER
+    )
+    """)
 
     # ==========================
     # CALLS TABLE (Voice/Video Calls)
@@ -936,7 +1013,8 @@ def get_freelancer_profile(freelancer_id: int):
         cur.execute("""
             SELECT f.id, f.name, f.email, f.profile_image,
                    p.title, p.skills, p.experience, p.min_budget, p.max_budget,
-                   p.rating, p.total_projects, p.bio, p.category, p.location, p.pincode, p.latitude, p.longitude, COALESCE(p.tags,''), COALESCE(p.availability_status,'AVAILABLE')
+                   p.rating, p.total_projects, p.bio, p.category, p.location, p.pincode, p.latitude, p.longitude, COALESCE(p.tags,''), COALESCE(p.availability_status,'AVAILABLE'),
+                   COALESCE(p.supports_fixed, TRUE), COALESCE(p.supports_hourly, TRUE), p.fixed_price, p.hourly_rate, p.overtime_rate_per_hour
             FROM freelancer f
             LEFT JOIN freelancer_profile p ON p.freelancer_id = f.id
             WHERE f.id=%s
@@ -948,29 +1026,45 @@ def get_freelancer_profile(freelancer_id: int):
         # Get completed projects count
         completed_projects = get_completed_project_count(fid)
         
-        # Format experience from decimal to years and months
+        # Extract pricing fields with backward compatibility
         if isinstance(r, dict):
-            experience_decimal = r.get("experience", 0) or 0
+            supports_fixed = r.get("supports_fixed", True)
+            supports_hourly = r.get("supports_hourly", True)
+            fixed_price = r.get("fixed_price")
+            hourly_rate = r.get("hourly_rate")
+            overtime_rate = r.get("overtime_rate_per_hour")
         else:
-            experience_decimal = r[6] or 0
+            supports_fixed = r[19] if len(r) > 19 else True
+            supports_hourly = r[20] if len(r) > 20 else True
+            fixed_price = r[21] if len(r) > 21 else None
+            hourly_rate = r[22] if len(r) > 22 else None
+            overtime_rate = r[23] if len(r) > 23 else None
+        
+        # Backward compatibility: infer pricing models from existing data
+        if supports_fixed is None and supports_hourly is None:
+            # Old record - infer from pricing fields
+            if fixed_price is not None and hourly_rate is not None:
+                supports_fixed = True
+                supports_hourly = True
+            elif fixed_price is not None:
+                supports_fixed = True
+                supports_hourly = False
+            elif hourly_rate is not None:
+                supports_fixed = False
+                supports_hourly = True
+            else:
+                # Default to both if no pricing data exists
+                supports_fixed = True
+                supports_hourly = True
+        
+        # Format experience from years (now stored as whole years)
+        if isinstance(r, dict):
+            experience_years = r.get("experience", 0) or 0
+        else:
+            experience_years = r[6] or 0
             
-        years = int(experience_decimal)
-        months = round((experience_decimal - years) * 12)
-        
-        # Handle rounding edge cases
-        if months == 12:
-            years += 1
-            months = 0
-        elif months < 0:
-            months = 0
-        
-        # Format experience string
-        if years == 0:
-            experience_str = f"{months} months"
-        elif months == 0:
-            experience_str = f"{years} years"
-        else:
-            experience_str = f"{years} years {months} months"
+        # Since experience is now stored as whole years, display as years only
+        experience_str = f"{int(experience_years)} years"
         
         if isinstance(r, dict):
             return {
@@ -980,7 +1074,7 @@ def get_freelancer_profile(freelancer_id: int):
                 "profile_image": r.get("profile_image"),
                 "title": r.get("title"),
                 "skills": r.get("skills"),
-                "experience": experience_decimal,
+                "experience": experience_years,
                 "experience_formatted": experience_str,
                 "min_budget": r.get("min_budget"),
                 "max_budget": r.get("max_budget"),
@@ -995,6 +1089,11 @@ def get_freelancer_profile(freelancer_id: int):
                 "longitude": r.get("longitude"),
                 "tags": r.get("tags"),
                 "availability_status": r.get("availability_status", "AVAILABLE"),
+                "supports_fixed": supports_fixed,
+                "supports_hourly": supports_hourly,
+                "fixed_price": fixed_price,
+                "hourly_rate": hourly_rate,
+                "overtime_rate_per_hour": overtime_rate,
             }
         else:
             return {
@@ -1004,7 +1103,7 @@ def get_freelancer_profile(freelancer_id: int):
                 "profile_image": r[3],
                 "title": r[4],
                 "skills": r[5],
-                "experience": experience_decimal,
+                "experience": experience_years,
                 "experience_formatted": experience_str,
                 "min_budget": r[7],
                 "max_budget": r[8],
@@ -1019,6 +1118,11 @@ def get_freelancer_profile(freelancer_id: int):
                 "longitude": r[16],
                 "tags": r[17],
                 "availability_status": r[18],
+                "supports_fixed": supports_fixed,
+                "supports_hourly": supports_hourly,
+                "fixed_price": fixed_price,
+                "hourly_rate": hourly_rate,
+                "overtime_rate_per_hour": overtime_rate,
             }
     except Exception:
         return None
