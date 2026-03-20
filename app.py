@@ -1447,7 +1447,7 @@ def update_freelancer_availability():
 def freelancers_search():
     category = (request.args.get("category", "") or "").strip().lower()
     q = (request.args.get("q", "") or "").strip().lower()
-
+    pricing_type = (request.args.get("pricing_type", "") or "").strip().upper()
     try:
         budget = float(request.args.get("budget", 0))
     except (ValueError, TypeError):
@@ -2241,7 +2241,8 @@ def client_hire():
         return jsonify({"success": False, "msg": venue_error}), 400
     
     # Validate venue data for all contract types
-    is_valid, validation_error, validation_warnings = validate_venue_data(venue_data)
+    is_valid, validation_error = validate_venue_data(venue_data)
+    validation_warnings = []
     if not is_valid:
         return jsonify({"success": False, "msg": validation_error}), 400
     
