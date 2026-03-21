@@ -512,6 +512,60 @@ def _handle_request_action(user_id: int, role: str, parameters: Dict[str, Any]) 
         """, (new_status, int(request_id)))
         
         conn.commit()
+        
+        # Get request details for notification
+        cur.execute("""
+            SELECT client_id, freelancer_id, job_title 
+            FROM hire_request 
+            WHERE id = ?
+        """, (int(request_id),))
+        req_data = cur.fetchone()
+        
+        if req_data:
+            client_id, freelancer_id, job_title = req_data
+            job_title = job_title or "Untitled"
+            
+            # Create notifications
+            from notification_helper import notify_client, notify_freelancer
+            
+            if action_type == "accept":
+                # Notify client that freelancer accepted
+                notify_client(
+                    client_id=client_id,
+                    message=f'Freelancer accepted your job request: "{job_title}"',
+                    title="Request Accepted",
+                    related_entity_type="hire_request",
+                    related_entity_id=int(request_id)
+                )
+                
+                # Notify freelancer of their own acceptance (confirmation)
+                notify_freelancer(
+                    freelancer_id=freelancer_id,
+                    message=f'You accepted the job request: "{job_title}"',
+                    title="Request Accepted",
+                    related_entity_type="hire_request",
+                    related_entity_id=int(request_id)
+                )
+                
+            else:  # reject
+                # Notify client that freelancer rejected
+                notify_client(
+                    client_id=client_id,
+                    message=f'Freelancer rejected your job request: "{job_title}"',
+                    title="Request Rejected",
+                    related_entity_type="hire_request",
+                    related_entity_id=int(request_id)
+                )
+                
+                # Notify freelancer of their own rejection (confirmation)
+                notify_freelancer(
+                    freelancer_id=freelancer_id,
+                    message=f'You rejected the job request: "{job_title}"',
+                    title="Request Rejected",
+                    related_entity_type="hire_request",
+                    related_entity_id=int(request_id)
+                )
+        
         conn.close()
         
         return {"type": "answer", "text": f"Request {request_id} {new_status.lower()}."}

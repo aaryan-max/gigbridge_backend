@@ -635,25 +635,36 @@ def rebuild_freelancer_search_index(freelancer_id: int):
         cur = get_dict_cursor(conn)
 
         cur.execute("""
-            SELECT COALESCE(title,''), COALESCE(skills,''), COALESCE(bio,''), COALESCE(tags,'')
+            SELECT 
+                COALESCE(title,'') as title,
+                COALESCE(skills,'') as skills, 
+                COALESCE(bio,'') as bio, 
+                COALESCE(tags,'') as tags
             FROM freelancer_profile
             WHERE freelancer_id=%s
         """, (fid,))
         row = cur.fetchone()
+        
         if not row:
             cur.execute("DELETE FROM freelancer_search WHERE freelancer_id=%s", (fid,))
             conn.commit()
             return
 
-        title, skills, bio, tags = row
+        title = row["title"] if isinstance(row, dict) else row[0]
+        skills = row["skills"] if isinstance(row, dict) else row[1]
+        bio = row["bio"] if isinstance(row, dict) else row[2]
+        tags = row["tags"] if isinstance(row, dict) else row[3]
 
-        cur.execute("""
-            SELECT STRING_AGG(COALESCE(title,'') || ' ' || COALESCE(description,''), ' ')
-            FROM portfolio
-            WHERE freelancer_id=%s
-        """, (fid,))
-        prow = cur.fetchone()
-        portfolio_text = (prow[0] if prow and prow[0] else "")
+        try:
+            cur.execute("""
+                SELECT STRING_AGG(COALESCE(title,'') || ' ' || COALESCE(description,''), ' ')
+                FROM portfolio
+                WHERE freelancer_id=%s
+            """, (fid,))
+            prow = cur.fetchone()
+            portfolio_text = (prow[0] if prow and prow[0] and len(prow) > 0 else "")
+        except Exception:
+            portfolio_text = ""
 
         # Replace row
         cur.execute("DELETE FROM freelancer_search WHERE freelancer_id=%s", (fid,))
@@ -669,7 +680,8 @@ def rebuild_freelancer_search_index(freelancer_id: int):
         """, (fid, title, skills, bio, tags, portfolio_text))
 
         conn.commit()
-    except Exception:
+    except Exception as e:
+        print(f"DEBUG rebuild: Exception occurred: {e}")
         # Don't crash the app if indexing fails
         try:
             conn.commit()

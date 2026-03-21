@@ -46,6 +46,7 @@ from categories import (
 )
 from call_service import start_call, update_call_status, get_incoming_calls
 from notification_utils import enhance_notification_message, get_notification_icon
+from notification_helper import notify_freelancer
 
 
 
@@ -992,9 +993,10 @@ def client_signup():
         return jsonify({"success": False, "msg": "Email already exists"}), 400
     
     # Insert new client
-    cur.execute("INSERT INTO client (name, email, password) VALUES (%s, %s, %s)", 
+    cur.execute("INSERT INTO client (name, email, password) VALUES (%s, %s, %s) RETURNING id", 
                 (name, email, generate_password_hash(password)))
-    client_id = cur.lastrowid
+    result = cur.fetchone()
+    client_id = result["id"] if result else 0
     conn.commit()
     conn.close()
     
@@ -1025,9 +1027,10 @@ def freelancer_signup():
         return jsonify({"success": False, "msg": "Email already exists"}), 400
     
     # Insert new freelancer
-    cur.execute("INSERT INTO freelancer (name, email, password) VALUES (%s, %s, %s)", 
+    cur.execute("INSERT INTO freelancer (name, email, password) VALUES (%s, %s, %s) RETURNING id", 
                 (name, email, generate_password_hash(password)))
-    freelancer_id = cur.lastrowid
+    result = cur.fetchone()
+    freelancer_id = result["id"] if result else 0
     conn.commit()
     conn.close()
     
@@ -1523,8 +1526,8 @@ def freelancers_search():
             elif pricing_type == "PROJECT":
                 pricing_where = " AND fp.pricing_type = 'project' AND fp.searchable_price IS NOT NULL AND fp.searchable_price <= %s"
             else:
-                # Backward compatibility: use generic budget filtering if no pricing_type
-                pricing_where = " AND fp.min_budget <= %s AND fp.max_budget >= %s"
+                # Backward compatibility: handle PACKAGE pricing (searchable_price = 0) and other pricing types
+                pricing_where = " AND (CASE WHEN fp.pricing_type = 'package' THEN 1 = 1 WHEN fp.searchable_price > 0 THEN fp.searchable_price <= %s ELSE (fp.min_budget <= %s AND fp.max_budget >= %s) END)"
             
             try:
                 sql = f"""
@@ -1566,7 +1569,7 @@ def freelancers_search():
                 if pricing_type in ["HOURLY", "PER_PERSON", "PACKAGE", "PROJECT"]:
                     cur.execute(sql, (q, q, budget))
                 else:
-                    cur.execute(sql, (q, q, budget, budget))
+                    cur.execute(sql, (q, q, budget, budget, budget))
                 rows = cur.fetchall()
 
             except Exception:
@@ -1866,14 +1869,25 @@ def freelancers_search():
         if subscription_plan == "PREMIUM":
             rank_boost = 1
         
-        # Adjust rank with boost and specialization relevance
+        # Adjust rank with boost, specialization relevance, and location proximity
         base_rank = _get("rank", _get(13, 999999))
         
         # Convert specialization relevance to rank boost (higher relevance = lower rank number)
         # Scale: 100 relevance = 200 rank boost, 0 relevance = 0 boost
         spec_rank_boost = spec_relevance_score * 2.0
         
-        adjusted_rank = (float(base_rank) if base_rank is not None else 999999) - (rank_boost * 100) - spec_rank_boost
+        # Add location-based boost (closer = lower rank number)
+        # Scale: 0-10km = 50 boost, 10-50km = 30 boost, 50-100km = 15 boost, 100km+ = 0 boost
+        location_rank_boost = 0
+        if dist < 999999:  # Only apply if valid distance calculated
+            if dist <= 10:
+                location_rank_boost = 50
+            elif dist <= 50:
+                location_rank_boost = 30
+            elif dist <= 100:
+                location_rank_boost = 15
+        
+        adjusted_rank = (float(base_rank) if base_rank is not None else 999999) - (rank_boost * 100) - spec_rank_boost - location_rank_boost
         
         # Add badge
         badge = None
@@ -2160,24 +2174,28 @@ def client_send_message():
     client_row = cur.fetchone()
     client_name = (client_row.get("name") if isinstance(client_row, dict) else (client_row[0] if client_row else None)) or "Client"
 
-    # Enhanced message generation
-    from notification_utils import enhance_notification_message
-    
-    enhanced_message = enhance_notification_message(
-        message=f"You messaged {freelancer_name}",
-        title="New Message",
-        related_entity_type="MESSAGE",
-        context_data={"sender_name": client_name, "receiver_name": freelancer_name}
-    )
-    
-    cconn = client_db()
-    ccur2 = get_dict_cursor(cconn)
-    ccur2.execute("""
-        INSERT INTO notification (client_id, message, title, related_entity_type, created_at)
-        VALUES (%s, %s, %s, %s, %s)
-    """, (int(d["client_id"]), enhanced_message, "New Message", "MESSAGE", now_ts()))
-    cconn.commit()
-    cconn.close()
+    # Add notification for client using notification helper
+    try:
+        from notification_helper import notify_client
+        
+        notify_client(
+            client_id=int(d["client_id"]),
+            message=f'You sent a message to {freelancer_name}',
+            title="Message Sent",
+            related_entity_type="message",
+            related_entity_id=None
+        )
+        
+        # Also notify freelancer about new message
+        notify_freelancer(
+            freelancer_id=int(d["freelancer_id"]),
+            message=f'New message from {client_name}',
+            title="New Message",
+            related_entity_type="message",
+            related_entity_id=None
+        )
+    except Exception as e:
+        print(f"Error creating message notifications: {e}")
 
     conn.commit()
     conn.close()
@@ -2197,6 +2215,26 @@ def freelancer_send_message():
         INSERT INTO message (sender_role, sender_id, receiver_id, text, timestamp)
         VALUES (%s, %s, %s, %s, %s)
     """, ("freelancer", int(d["freelancer_id"]), int(d["client_id"]), str(d["text"]), now_ts()))
+    
+    # Add notification for client using notification helper
+    try:
+        from notification_helper import notify_client
+        
+        # Get freelancer name for context
+        cur.execute("SELECT name FROM freelancer WHERE id=%s", (int(d["freelancer_id"]),))
+        freelancer_row = cur.fetchone()
+        freelancer_name = (freelancer_row.get("name") if isinstance(freelancer_row, dict) else (freelancer_row[0] if freelancer_row else None)) or "Freelancer"
+        
+        notify_client(
+            client_id=int(d["client_id"]),
+            message=f'New message from {freelancer_name}',
+            title="New Message",
+            related_entity_type="message",
+            related_entity_id=None
+        )
+    except Exception as e:
+        print(f"Error creating client message notification: {e}")
+    
     conn.commit()
     conn.close()
 
@@ -3130,27 +3168,79 @@ def client_hire_counter():
     conn.commit()
     conn.close()
 
-    # Send notification to freelancer if counteroffer or final action
-    if message:
-        try:
-            freelancer_conn = freelancer_db()
-            freelancer_cur = get_dict_cursor(freelancer_conn)
+    # Send notifications for counteroffer actions
+    try:
+        from notification_helper import notify_client, notify_freelancer
+        
+        # Get request details
+        conn = freelancer_db()
+        cur = get_dict_cursor(conn)
+        cur.execute("SELECT freelancer_id, client_id, job_title FROM hire_request WHERE id=%s", (request_id,))
+        req_data = cur.fetchone()
+        conn.close()
+        
+        if req_data:
+            freelancer_id, client_id, job_title = req_data
+            job_title = job_title or "Untitled"
             
-            # Use enhanced notification message
-            enhanced_message = enhance_notification_message(
-                message,
-                title="Counteroffer Update",
-                related_entity_type="hire"
-            )
-            
-            freelancer_cur.execute("""
-                INSERT INTO notification (freelancer_id, message, title, related_entity_type, created_at)
-                VALUES (%s, %s, %s, %s, %s)
-            """, (request["freelancer_id"], enhanced_message, "Counteroffer Update", "HIRE", now_ts()))
-            freelancer_conn.commit()
-            freelancer_conn.close()
-        except Exception as e:
-            print(f"Error creating notification: {e}")
+            if action == "COUNTER":
+                # Notify freelancer about client's counteroffer
+                notify_freelancer(
+                    freelancer_id=freelancer_id,
+                    message=f'Client sent a counteroffer of ₹{counter_offer_amount} for "{job_title}"',
+                    title="New Counteroffer",
+                    related_entity_type="hire_request",
+                    related_entity_id=request_id
+                )
+                
+                # Notify client about their own counteroffer (confirmation)
+                notify_client(
+                    client_id=client_id,
+                    message=f'You sent a counteroffer of ₹{counter_offer_amount} for "{job_title}"',
+                    title="Counteroffer Sent",
+                    related_entity_type="hire_request",
+                    related_entity_id=request_id
+                )
+                
+            elif action == "ACCEPT":
+                # Notify freelancer that client accepted their counteroffer
+                notify_freelancer(
+                    freelancer_id=freelancer_id,
+                    message=f'Client accepted your counteroffer for "{job_title}"',
+                    title="Counteroffer Accepted",
+                    related_entity_type="hire_request",
+                    related_entity_id=request_id
+                )
+                
+                # Notify client about acceptance confirmation
+                notify_client(
+                    client_id=client_id,
+                    message=f'You accepted the counteroffer for "{job_title}"',
+                    title="Counteroffer Accepted",
+                    related_entity_type="hire_request",
+                    related_entity_id=request_id
+                )
+                
+            elif action == "REJECT":
+                # Notify freelancer that client rejected their counteroffer
+                notify_freelancer(
+                    freelancer_id=freelancer_id,
+                    message=f'Client rejected your counteroffer for "{job_title}"',
+                    title="Counteroffer Rejected",
+                    related_entity_type="hire_request",
+                    related_entity_id=request_id
+                )
+                
+                # Notify client about rejection confirmation
+                notify_client(
+                    client_id=client_id,
+                    message=f'You rejected the counteroffer for "{job_title}"',
+                    title="Counteroffer Rejected",
+                    related_entity_type="hire_request",
+                    related_entity_id=request_id
+                )
+    except Exception as e:
+        print(f"Error creating counteroffer notifications: {e}")
 
     return jsonify({"success": True, "status": new_status})
 
@@ -3248,44 +3338,30 @@ def client_notifications():
         return jsonify({"success": False, "msg": "Invalid client_id"}), 400
 
     try:
-        conn = client_db()
-        cur = get_dict_cursor(conn)
-        cur.execute("""
-            SELECT message, title, related_entity_type
-            FROM notification
-            WHERE client_id=%s
-            ORDER BY created_at DESC
-        """, (client_id,))
-        rows = cur.fetchall()
-        conn.close()
-
+        from notification_helper import get_client_notifications
+        from notification_utils import enhance_notification_message, get_notification_icon
+        
+        # Get notifications using centralized helper
+        notifications = get_client_notifications(client_id, limit=50)
+        
         result = []
-        for r in rows:
-            if isinstance(r, dict):
-                raw_message = r.get("message", "")
-                title = r.get("title", "")
-                entity_type = r.get("related_entity_type", "")
-            else:
-                raw_message = r[0] if r else ""
-                title = ""
-                entity_type = ""
-            
+        for notif in notifications:
             # Use enhanced notification message
             enhanced_message = enhance_notification_message(
-                raw_message,
-                title=title,
-                related_entity_type=entity_type
+                notif['message'],
+                title=notif['title'],
+                related_entity_type=notif['related_entity_type']
             )
             
             # Add icon mapping for CLI display
-            icon = get_notification_icon(enhanced_message, title, entity_type)
+            icon = get_notification_icon(enhanced_message, notif['title'], notif['related_entity_type'])
             formatted_message = f"{icon} {enhanced_message}"
             
             result.append(formatted_message)
+            
         return jsonify(result)
+        
     except Exception as e:
-        if conn:
-            conn.close()
         return jsonify({"success": False, "msg": str(e)}), 500
 
 # ============================================================
@@ -3604,98 +3680,31 @@ def freelancer_notifications():
     except ValueError:
         return jsonify({"success": False, "msg": "Invalid freelancer_id"}), 400
 
-    conn = None
     try:
-        conn = freelancer_db()
-        cur = get_dict_cursor(conn)
-
-        notifications = []
-
-        # From hire requests
-        cur.execute("""
-            SELECT job_title, status, created_at
-            FROM hire_request
-            WHERE freelancer_id=%s
-            ORDER BY created_at DESC
-            LIMIT 20
-        """, (freelancer_id,))
-        for title, status, _created_at in cur.fetchall():
-            job_title = title or "Untitled"
-            
-            # Use enhanced notification message
-            context_data = {
-                "job_title": job_title,
-                "status": status
-            }
-            enhanced_message = enhance_notification_message(
-                f"Job status: {status}",
-                title="Job Status Update",
-                related_entity_type="job",
-                context_data=context_data
-            )
-            
-            # Add icon mapping for CLI display
-            icon = get_notification_icon(enhanced_message, "Job Status Update", "job")
-            formatted_message = f"{icon} {enhanced_message}"
-            notifications.append(formatted_message)
-
-        # From messages (client -> freelancer)
-        cur.execute("""
-            SELECT timestamp
-            FROM message
-            WHERE receiver_id=%s AND sender_role='client'
-            ORDER BY timestamp DESC
-            LIMIT 20
-        """, (freelancer_id,))
-        msg_rows = cur.fetchall()
-        if msg_rows:
-            # Use enhanced notification message
-            enhanced_msg = enhance_notification_message(
-                "You have new messages",
-                title="New Messages",
-                related_entity_type="message"
-            )
-            
-            # Add icon mapping for CLI display
-            icon = get_notification_icon(enhanced_msg, "New Messages", "message")
-            formatted_message = f"{icon} {enhanced_msg}"
-            notifications.append(formatted_message)
-
-        # From notification table (enhanced notifications)
-        cur.execute("""
-            SELECT message, title, related_entity_type
-            FROM notification
-            WHERE freelancer_id=%s
-            ORDER BY created_at DESC
-            LIMIT 20
-        """, (freelancer_id,))
-        for r in cur.fetchall():
-            if isinstance(r, dict):
-                raw_message = r.get("message", "")
-                title = r.get("title", "")
-                entity_type = r.get("related_entity_type", "")
-            else:
-                raw_message = r[0] if r else ""
-                title = ""
-                entity_type = ""
-            
+        from notification_helper import get_freelancer_notifications
+        from notification_utils import enhance_notification_message, get_notification_icon
+        
+        # Get notifications using centralized helper
+        notifications = get_freelancer_notifications(freelancer_id, limit=50)
+        
+        result = []
+        for notif in notifications:
             # Use enhanced notification message
             enhanced_message = enhance_notification_message(
-                raw_message,
-                title=title,
-                related_entity_type=entity_type
+                notif['message'],
+                title=notif['title'],
+                related_entity_type=notif['related_entity_type']
             )
             
             # Add icon mapping for CLI display
-            icon = get_notification_icon(enhanced_message, title, entity_type)
+            icon = get_notification_icon(enhanced_message, notif['title'], notif['related_entity_type'])
             formatted_message = f"{icon} {enhanced_message}"
-            notifications.append(formatted_message)
-
-        conn.close()
-        return jsonify(notifications)
+            
+            result.append(formatted_message)
+            
+        return jsonify(result)
+        
     except Exception as e:
-        if conn:
-            conn.close()
         return jsonify({"success": False, "msg": str(e)}), 500
 
 # ============================================================
@@ -4855,59 +4864,135 @@ def ai_chat():
 @app.route("/freelancer/verification/upload", methods=["POST"])
 def freelancer_verification_upload():
     """Upload verification documents for freelancer"""
-    data = request.get_json() or {}
-    freelancer_id = data.get("freelancer_id")
-    government_id_path = data.get("government_id_path")
-    pan_card_path = data.get("pan_card_path")
-    artist_proof_path = data.get("artist_proof_path")  # Optional
+    import os
+    import shutil
     
-    if not all([freelancer_id, government_id_path, pan_card_path]):
-        return jsonify({"success": False, "msg": "Missing required fields: freelancer_id, government_id_path, pan_card_path"}), 400
+    # Handle both JSON paths and actual file uploads
+    if request.is_json:
+        # JSON payload with file paths (CLI-style)
+        data = request.get_json() or {}
+        freelancer_id = data.get("freelancer_id")
+        government_id_path = data.get("government_id_path")
+        pan_card_path = data.get("pan_card_path")
+        artist_proof_path = data.get("artist_proof_path")  # Optional
+        
+        if not all([freelancer_id, government_id_path, pan_card_path]):
+            return jsonify({"success": False, "msg": "Missing required fields: freelancer_id, government_id_path, pan_card_path"}), 400
+        
+        # Validate and sanitize file paths
+        def sanitize_path(path):
+            if not path:
+                return None
+            return path.strip().strip('"').strip("'")
+        
+        government_id_path = sanitize_path(government_id_path)
+        pan_card_path = sanitize_path(pan_card_path)
+        artist_proof_path = sanitize_path(artist_proof_path) if artist_proof_path else None
+        
+        # Validate file exists on server
+        def validate_file_exists(file_path):
+            if not file_path:
+                return True  # Optional file
+            return os.path.isfile(file_path)
+        
+        if not validate_file_exists(government_id_path):
+            return jsonify({"success": False, "msg": f"Government ID file not found: {government_id_path}"}), 400
+        
+        if not validate_file_exists(pan_card_path):
+            return jsonify({"success": False, "msg": f"PAN card file not found: {pan_card_path}"}), 400
+        
+        if artist_proof_path and not validate_file_exists(artist_proof_path):
+            return jsonify({"success": False, "msg": f"Artist proof file not found: {artist_proof_path}"}), 400
+        
+        # Validate file extensions
+        allowed_extensions = {'.pdf', '.jpg', '.jpeg', '.png'}
+        
+        def validate_file_extension(file_path):
+            if not file_path:
+                return True  # Optional file
+            ext = os.path.splitext(file_path)[1].lower()
+            return ext in allowed_extensions
+        
+        if not validate_file_extension(government_id_path):
+            return jsonify({"success": False, "msg": "Invalid government ID file type. Allowed: PDF, JPG, PNG"}), 400
+        
+        if not validate_file_extension(pan_card_path):
+            return jsonify({"success": False, "msg": "Invalid PAN card file type. Allowed: PDF, JPG, PNG"}), 400
+        
+        if artist_proof_path and not validate_file_extension(artist_proof_path):
+            return jsonify({"success": False, "msg": "Invalid artist proof file type. Allowed: PDF, JPG, PNG"}), 400
+    
+    else:
+        # Multipart form data upload (web-style)
+        freelancer_id = request.form.get("freelancer_id")
+        government_id_file = request.files.get("government_id_file")
+        pan_card_file = request.files.get("pan_card_file")
+        artist_proof_file = request.files.get("artist_proof_file")  # Optional
+        
+        if not all([freelancer_id, government_id_file, pan_card_file]):
+            return jsonify({"success": False, "msg": "Missing required fields: freelancer_id, government_id_file, pan_card_file"}), 400
+        
+        # Validate file extensions
+        allowed_extensions = {'.pdf', '.jpg', '.jpeg', '.png'}
+        
+        def validate_file_extension(file):
+            if not file:
+                return True  # Optional file
+            ext = os.path.splitext(file.filename)[1].lower()
+            return ext in allowed_extensions
+        
+        if not validate_file_extension(government_id_file):
+            return jsonify({"success": False, "msg": "Invalid government ID file type. Allowed: PDF, JPG, PNG"}), 400
+        
+        if not validate_file_extension(pan_card_file):
+            return jsonify({"success": False, "msg": "Invalid PAN card file type. Allowed: PDF, JPG, PNG"}), 400
+        
+        if artist_proof_file and not validate_file_extension(artist_proof_file):
+            return jsonify({"success": False, "msg": "Invalid artist proof file type. Allowed: PDF, JPG, PNG"}), 400
     
     # Validate freelancer exists
     from database import get_freelancer_profile
     if not get_freelancer_profile(freelancer_id):
         return jsonify({"success": False, "msg": "Freelancer not found"}), 404
     
-    # Validate file extensions
-    allowed_extensions = {'.pdf', '.jpg', '.jpeg', '.png'}
-    
-    def validate_file_path(file_path):
-        if not file_path:
-            return True  # Optional file
-        ext = os.path.splitext(file_path)[1].lower()
-        return ext in allowed_extensions
-    
-    if not validate_file_path(government_id_path):
-        return jsonify({"success": False, "msg": "Invalid government ID file type. Allowed: PDF, JPG, PNG"}), 400
-    
-    if not validate_file_path(pan_card_path):
-        return jsonify({"success": False, "msg": "Invalid PAN card file type. Allowed: PDF, JPG, PNG"}), 400
-    
-    if artist_proof_path and not validate_file_path(artist_proof_path):
-        return jsonify({"success": False, "msg": "Invalid artist proof file type. Allowed: PDF, JPG, PNG"}), 400
-    
     # Create upload directory if not exists
     upload_dir = f"uploads/verification/{freelancer_id}"
     os.makedirs(upload_dir, exist_ok=True)
     
+    if request.is_json:
+        # Save files from paths
+        government_id_path = os.path.join(upload_dir, os.path.basename(government_id_path))
+        pan_card_path = os.path.join(upload_dir, os.path.basename(pan_card_path))
+        artist_proof_path = os.path.join(upload_dir, os.path.basename(artist_proof_path)) if artist_proof_path else None
+        
+        shutil.copy(government_id_path, upload_dir)
+        shutil.copy(pan_card_path, upload_dir)
+        if artist_proof_path:
+            shutil.copy(artist_proof_path, upload_dir)
+    else:
+        # Save files from multipart form data
+        government_id_file.save(os.path.join(upload_dir, government_id_file.filename))
+        pan_card_file.save(os.path.join(upload_dir, pan_card_file.filename))
+        if artist_proof_file:
+            artist_proof_file.save(os.path.join(upload_dir, artist_proof_file.filename))
+    
     # Update verification record
     success = update_freelancer_verification(
         freelancer_id, 
-        government_id_path, 
-        pan_card_path, 
-        artist_proof_path
+        government_id_path if request.is_json else government_id_file.filename, 
+        pan_card_path if request.is_json else pan_card_file.filename, 
+        artist_proof_path if request.is_json else artist_proof_file.filename if artist_proof_file else None
     )
     
     if success:
         return jsonify({
             "success": True, 
-            "msg": "Documents submitted successfully. Status: PENDING"
+            "msg": "Verification documents uploaded successfully"
         })
     else:
         return jsonify({
             "success": False, 
-            "msg": "Failed to save verification documents"
+            "msg": "Failed to save verification data"
         }), 500
 
 
@@ -5297,6 +5382,15 @@ def client_projects_accept_application():
         # Reject other pending applications
         cur.execute("UPDATE project_application SET status='REJECTED' WHERE project_id=%s AND status='PENDING' AND id!=%s", (pid, aid))
         
+        # Get details for notifications
+        cur.execute("""
+            SELECT f.name as freelancer_name, p.title as project_title
+            FROM freelancer f 
+            JOIN project_post p ON p.id = %s
+            WHERE f.id = %s
+        """, (pid, freelancer_id))
+        details = cur.fetchone()
+        
         # Create hire request
         cur.execute("""
             INSERT INTO hire_request (client_id, freelancer_id, job_title, proposed_budget, note, status, created_at, contract_type)
@@ -5304,6 +5398,53 @@ def client_projects_accept_application():
         """, (cid, freelancer_id, f"Project: {project_category}", bid_amount, f"Created from project application #{aid}", now_ts(), "PROJECT"))
         
         conn.commit()
+        
+        # Send notifications
+        try:
+            from notification_helper import notify_client, notify_freelancer
+            
+            if details:
+                freelancer_name = details.get("freelancer_name", "Freelancer")
+                project_title = details.get("project_title", "Untitled")
+                
+                # Notify accepted freelancer
+                notify_freelancer(
+                    freelancer_id=freelancer_id,
+                    message=f'Your application for "{project_title}" was accepted!',
+                    title="Application Accepted",
+                    related_entity_type="project_application",
+                    related_entity_id=aid
+                )
+                
+                # Notify client about acceptance
+                notify_client(
+                    client_id=cid,
+                    message=f'You accepted {freelancer_name}\'s application for "{project_title}"',
+                    title="Application Accepted",
+                    related_entity_type="project_application",
+                    related_entity_id=aid
+                )
+                
+                # Notify rejected freelancers
+                cur.execute("""
+                    SELECT pa.freelancer_id, f.name 
+                    FROM project_application pa
+                    JOIN freelancer f ON f.id = pa.freelancer_id
+                    WHERE pa.project_id=%s AND pa.status='REJECTED'
+                """, (pid,))
+                rejected = cur.fetchall()
+                
+                for rej_freelancer_id, rej_freelancer_name in rejected:
+                    notify_freelancer(
+                        freelancer_id=rej_freelancer_id,
+                        message=f'Your application for "{project_title}" was not selected',
+                        title="Application Not Selected",
+                        related_entity_type="project_application",
+                        related_entity_id=aid
+                    )
+        except Exception as e:
+            print(f"Error creating application notifications: {e}")
+        
         return jsonify({"success": True})
     finally:
         conn.close()
@@ -5408,6 +5549,35 @@ def freelancer_projects_apply():
         application_id = app_row["id"] if isinstance(app_row, dict) else app_row[0]
         
         conn.commit()
+        
+        # Notify client about new application
+        try:
+            from notification_helper import notify_client
+            
+            # Get project and client details
+            cur.execute("""
+                SELECT p.title, p.client_id, f.name 
+                FROM project_post p 
+                JOIN freelancer f ON f.id = %s 
+                WHERE p.id = %s
+            """, (fid, pid))
+            result = cur.fetchone()
+            
+            if result:
+                project_title, client_id, freelancer_name = result
+                project_title = project_title or "Untitled"
+                freelancer_name = freelancer_name or "Freelancer"
+                
+                notify_client(
+                    client_id=client_id,
+                    message=f'{freelancer_name} applied to your project: "{project_title}"',
+                    title="New Application",
+                    related_entity_type="project_application",
+                    related_entity_id=application_id
+                )
+        except Exception as e:
+            print(f"Error creating application notification: {e}")
+        
         return jsonify({"success": True, "msg": "Application submitted successfully", "application_id": application_id})
         
     except psycopg2.Error as e:
