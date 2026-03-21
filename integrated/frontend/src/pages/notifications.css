@@ -1,0 +1,139 @@
+/* Notifications Page Dashboard Styles */
+
+/* Notifications Page Container - Full Screen */
+.notifications-page {
+  padding: 2rem;
+  width: 100%;
+  max-width: none;
+  background: #f8fafc;
+  min-height: 100vh;
+}
+
+/* Header Section */
+.notifications-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 2rem;
+  padding-bottom: 1rem;
+  border-bottom: 1px solid #e2e8f0;
+}
+
+.notifications-title-section h2 {
+  font-size: 2rem;
+  font-weight: 700;
+  color: #1e293b;
+  margin: 0 0 0.5rem 0;
+}
+
+.notifications-unread-count {
+  font-size: 0.95rem;
+  color: #64748b;
+  margin: 0;
+}
+
+.notifications-mark-all-read {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.75rem 1.25rem;
+  background: transparent;
+  color: #2563eb;
+  border: none;
+  border-radius: 0.5rem;
+  font-size: 0.875rem;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background-color 0.2s, color 0.2s;
+}
+
+.notifications-mark-all-read:hover {
+  background: #f1f5f9;
+  color: #1d4ed8;
+}
+
+.icon-check::before {
+  content: "✓";
+  font-weight: 600;
+}
+
+/* Search Bar - Full Width */
+.notifications-search {
+  margin-bottom: 2rem;
+}
+
+.notifications-search .db-search-input {
+  width: 100%;
+  max-width: none;
+  padding: 0.875rem 1rem;
+  border: 1px solid #e2e8f0;
+  border-radius: 0.75rem;
+  font-size: 0.875rem;
+  background: white;
+  outline: none;
+  transition: border-color 0.2s, box-shadow 0.2s;
+}
+
+.notifications-search .db-search-input:focus {
+  border-color: #3b82f6;
+  box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.1);
+}
+
+.notifications-search .db-search-input::placeholder {
+  color: #94a3b8;
+}
+
+/* Notifications List - Multi-column for big screen */
+.notifications-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(500px, 1fr));
+  gap: 1.5rem;
+  align-items: start;
+}
+
+/* Empty State */
+.db-empty-state {
+  text-align: center;
+  padding: 4rem 2rem;
+  color: #64748b;
+  font-size: 0.95rem;
+}
+
+.db-empty-state p {
+  margin: 0;
+}
+
+/* Responsive Design */
+@media (max-width: 768px) {
+  .notifications-page {
+    padding: 1rem;
+  }
+  
+  .notifications-header {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 1rem;
+  }
+  
+  .notifications-title-section h2 {
+    font-size: 1.75rem;
+  }
+  
+  .notifications-mark-all-read {
+    width: 100%;
+    justify-content: center;
+  }
+  
+  /* Single column on mobile */
+  .notifications-list {
+    grid-template-columns: 1fr;
+    gap: 1rem;
+  }
+}
+
+@media (max-width: 1200px) {
+  /* 2 columns on medium screens */
+  .notifications-list {
+    grid-template-columns: repeat(2, 1fr);
+  }
+}

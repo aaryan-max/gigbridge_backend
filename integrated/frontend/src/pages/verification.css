@@ -1,0 +1,476 @@
+/* Verification Page Styles - Exact Image Design */
+
+.verification-page {
+  padding: 2rem !important;
+  width: 100% !important;
+  max-width: none !important;
+  background: #f8fafc !important;
+  min-height: 100vh !important;
+}
+
+/* Page Header */
+.verification-header {
+  margin-bottom: 2rem !important;
+  background: linear-gradient(135deg, #3b82f6 0%, #2563eb 100%) !important;
+  border-radius: 1rem !important;
+  padding: 2rem !important;
+  box-shadow: 0 4px 6px -1px rgba(59, 130, 246, 0.2) !important;
+  color: white !important;
+}
+
+.verification-header h2 {
+  font-size: 2rem !important;
+  font-weight: 700 !important;
+  color: #ffffff !important;
+  margin: 0 0 0.5rem 0 !important;
+  text-shadow: 0 2px 4px rgba(0, 0, 0, 0.1) !important;
+}
+
+.verification-header p {
+  color: #dbeafe !important;
+  font-size: 1rem !important;
+  margin: 0 !important;
+}
+
+/* Verification Status Card */
+.verification-status-card {
+  background: linear-gradient(135deg, #ffffff 0%, #f8fafc 100%) !important;
+  border: 1px solid #e0f2fe !important;
+  border-radius: 1rem !important;
+  padding: 1.5rem !important;
+  box-shadow: 0 4px 6px -1px rgba(59, 130, 246, 0.1) !important;
+  margin-bottom: 2rem !important;
+  display: flex !important;
+  align-items: center !important;
+  justify-content: space-between !important;
+  gap: 2rem !important;
+}
+
+.status-left {
+  display: flex !important;
+  align-items: center !important;
+  gap: 1rem !important;
+}
+
+.status-icon {
+  width: 3rem !important;
+  height: 3rem !important;
+  background: linear-gradient(135deg, #3b82f6 0%, #2563eb 100%) !important;
+  border-radius: 0.75rem !important;
+  display: flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  color: white !important;
+  font-size: 1.5rem !important;
+  box-shadow: 0 2px 4px rgba(59, 130, 246, 0.3) !important;
+}
+
+.status-text h3 {
+  font-size: 1.125rem !important;
+  font-weight: 600 !important;
+  color: #1e40af !important;
+  margin: 0 0 0.25rem 0 !important;
+}
+
+.status-text p {
+  color: #64748b !important;
+  font-size: 0.875rem !important;
+  margin: 0 !important;
+}
+
+.status-progress {
+  flex: 1 !important;
+  max-width: 200px !important;
+}
+
+/* Progress Bar */
+.progress-bar {
+  width: 100% !important;
+  height: 0.5rem !important;
+  background: linear-gradient(135deg, #e0f2fe 0%, #bfdbfe 100%) !important;
+  border-radius: 1rem !important;
+  overflow: hidden !important;
+  margin-top: 0.5rem !important;
+}
+
+.progress-fill {
+  height: 100% !important;
+  background: linear-gradient(135deg, #3b82f6 0%, #2563eb 100%) !important;
+  border-radius: 1rem !important;
+  transition: width 0.3s ease !important;
+  box-shadow: 0 0 10px rgba(59, 130, 246, 0.5) !important;
+}
+
+/* Why Verify Section - Grid Layout like image */
+.why-verify-section {
+  margin-bottom: 2rem !important;
+}
+
+.why-verify-section h3 {
+  font-size: 1.5rem !important;
+  font-weight: 600 !important;
+  color: #1e40af !important;
+  margin: 0 0 1.5rem 0 !important;
+}
+
+/* Info Cards - Grid Layout (3 columns) */
+.info-cards {
+  display: grid !important;
+  grid-template-columns: repeat(3, 1fr) !important;
+  gap: 1.5rem !important;
+  margin-bottom: 2rem !important;
+}
+
+@media (max-width: 1024px) {
+  .info-cards {
+    grid-template-columns: repeat(2, 1fr) !important;
+  }
+}
+
+@media (max-width: 768px) {
+  .info-cards {
+    grid-template-columns: 1fr !important;
+  }
+}
+
+.info-card {
+  background: linear-gradient(135deg, #ffffff 0%, #f8fafc 100%) !important;
+  border: 1px solid #e0f2fe !important;
+  border-radius: 1rem !important;
+  padding: 1.5rem !important;
+  text-align: center !important;
+  box-shadow: 0 4px 6px -1px rgba(59, 130, 246, 0.1) !important;
+  transition: all 0.3s ease !important;
+  display: flex !important;
+  flex-direction: column !important;
+  align-items: center !important;
+  gap: 1rem !important;
+}
+
+.info-card:hover {
+  transform: translateY(-2px) !important;
+  box-shadow: 0 8px 12px -1px rgba(59, 130, 246, 0.2) !important;
+  border-color: #3b82f6 !important;
+  background: linear-gradient(135deg, #ffffff 0%, #f0f9ff 100%) !important;
+}
+
+.info-card svg {
+  width: 3rem !important;
+  height: 3rem !important;
+  background: linear-gradient(135deg, #3b82f6 0%, #2563eb 100%) !important;
+  border-radius: 50% !important;
+  padding: 0.75rem !important;
+  color: white !important;
+  box-shadow: 0 4px 6px -1px rgba(59, 130, 246, 0.3) !important;
+}
+
+.info-card:hover svg {
+  background: linear-gradient(135deg, #2563eb 0%, #1d4ed8 100%) !important;
+  box-shadow: 0 6px 8px -1px rgba(59, 130, 246, 0.4) !important;
+}
+
+.info-card h4 {
+  font-size: 1.125rem !important;
+  font-weight: 600 !important;
+  color: #1e40af !important;
+  margin: 0 !important;
+}
+
+.info-card:hover h4 {
+  color: #2563eb !important;
+}
+
+.info-card p {
+  color: #64748b !important;
+  font-size: 0.875rem !important;
+  line-height: 1.5 !important;
+  margin: 0 !important;
+}
+
+.info-card:hover p {
+  color: #475569 !important;
+}
+
+/* Verification Steps - Vertical Layout (One Below Another) */
+.verification-steps {
+  margin-bottom: 2rem !important;
+}
+
+.verification-steps h3 {
+  font-size: 1.5rem !important;
+  font-weight: 600 !important;
+  color: #1e40af !important;
+  margin: 0 0 1.5rem 0 !important;
+}
+
+.steps-grid {
+  display: flex !important;
+  flex-direction: column !important;
+  gap: 1.5rem !important;
+}
+
+.step-card {
+  background: linear-gradient(135deg, #ffffff 0%, #f8fafc 100%) !important;
+  border: 1px solid #e0f2fe !important;
+  border-radius: 1rem !important;
+  padding: 1.5rem !important;
+  box-shadow: 0 4px 6px -1px rgba(59, 130, 246, 0.1) !important;
+  transition: all 0.3s ease !important;
+  display: flex !important;
+  flex-direction: column !important;
+}
+
+.step-card:hover {
+  transform: translateY(-2px) !important;
+  box-shadow: 0 8px 12px -1px rgba(59, 130, 246, 0.2) !important;
+  border-color: #3b82f6 !important;
+}
+
+.step-header {
+  display: flex !important;
+  align-items: center !important;
+  justify-content: space-between !important;
+  margin-bottom: 1rem !important;
+}
+
+.step-info {
+  display: flex !important;
+  align-items: center !important;
+  gap: 1rem !important;
+  flex: 1 !important;
+}
+
+.step-number {
+  width: 2.5rem !important;
+  height: 2.5rem !important;
+  background: linear-gradient(135deg, #3b82f6 0%, #2563eb 100%) !important;
+  border-radius: 50% !important;
+  display: flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  color: white !important;
+  font-weight: 600 !important;
+  font-size: 1rem !important;
+  box-shadow: 0 2px 4px rgba(59, 130, 246, 0.3) !important;
+}
+
+.step-info h4 {
+  font-size: 1.125rem !important;
+  font-weight: 600 !important;
+  color: #1e40af !important;
+  margin: 0 0 0.25rem 0 !important;
+}
+
+.step-info p {
+  color: #64748b !important;
+  font-size: 0.875rem !important;
+  margin: 0 !important;
+}
+
+.step-status {
+  padding: 0.25rem 0.75rem !important;
+  border-radius: 1rem !important;
+  font-size: 0.75rem !important;
+  font-weight: 500 !important;
+  text-transform: uppercase !important;
+}
+
+/* Override Tailwind classes with custom styles */
+.step-status.bg-gray-100 {
+  background: linear-gradient(135deg, #f1f5f9 0%, #e2e8f0 100%) !important;
+  color: #64748b !important;
+  border: 1px solid #e2e8f0 !important;
+}
+
+.step-status.bg-yellow-100 {
+  background: linear-gradient(135deg, #fef3c7 0%, #fde68a 100%) !important;
+  color: #92400e !important;
+  border: 1px solid #fde68a !important;
+}
+
+.step-status.bg-green-100 {
+  background: linear-gradient(135deg, #d1fae5 0%, #a7f3d0 100%) !important;
+  color: #065f46 !important;
+  border: 1px solid #a7f3d0 !important;
+}
+
+/* Upload Area - Vertical Content within Vertical Cards */
+.upload-area {
+  border: 2px dashed #3b82f6 !important;
+  border-radius: 0.75rem !important;
+  padding: 2rem !important;
+  text-align: center !important;
+  background: linear-gradient(135deg, #f0f9ff 0%, #e0f2fe 100%) !important;
+  transition: all 0.3s ease !important;
+  cursor: pointer !important;
+  position: relative !important;
+  min-height: 120px !important;
+  display: flex !important;
+  flex-direction: column !important;
+  align-items: center !important;
+  justify-content: center !important;
+  margin-top: 1rem !important;
+}
+
+.upload-area:hover {
+  border-color: #2563eb !important;
+  background: linear-gradient(135deg, #dbeafe 0%, #bfdbfe 100%) !important;
+  transform: translateY(-1px) !important;
+  box-shadow: 0 4px 8px -1px rgba(59, 130, 246, 0.2) !important;
+}
+
+.upload-area.drag-over {
+  border-color: #2563eb !important;
+  background: linear-gradient(135deg, #dbeafe 0%, #bfdbfe 100%) !important;
+  transform: scale(1.02) !important;
+  box-shadow: 0 4px 8px -1px rgba(59, 130, 246, 0.2) !important;
+}
+
+.upload-area svg {
+  width: 3rem !important;
+  height: 3rem !important;
+  color: #3b82f6 !important;
+  margin-bottom: 0.5rem !important;
+}
+
+.upload-area:hover svg {
+  color: #2563eb !important;
+}
+
+.upload-text {
+  color: #1e40af !important;
+  font-size: 0.875rem !important;
+  font-weight: 500 !important;
+  margin-bottom: 0.25rem !important;
+}
+
+.upload-subtext {
+  color: #64748b !important;
+  font-size: 0.75rem !important;
+}
+
+.file-input {
+  position: absolute !important;
+  top: 0 !important;
+  left: 0 !important;
+  width: 100% !important;
+  height: 100% !important;
+  opacity: 0 !important;
+  cursor: pointer !important;
+}
+
+.uploaded-file {
+  display: flex !important;
+  align-items: center !important;
+  gap: 0.5rem !important;
+  padding: 0.75rem !important;
+  background: linear-gradient(135deg, #f0fdf4 0%, #dcfce7 100%) !important;
+  border: 1px solid #86efac !important;
+  border-radius: 0.5rem !important;
+  color: #166534 !important;
+  font-size: 0.875rem !important;
+  margin-bottom: 1rem !important;
+  box-shadow: 0 1px 3px rgba(34, 197, 94, 0.1) !important;
+}
+
+.uploaded-file svg {
+  color: #16a34a !important;
+}
+
+.examples-section {
+  margin-top: 1rem !important;
+  padding-top: 1rem !important;
+  border-top: 1px solid #e2e8f0 !important;
+}
+
+.examples-section h5 {
+  font-size: 0.875rem !important;
+  font-weight: 600 !important;
+  color: #374151 !important;
+  margin: 0 0 0.75rem 0 !important;
+}
+
+.examples-section ul {
+  list-style: none !important;
+  padding: 0 !important;
+  margin: 0 !important;
+}
+
+.examples-section li {
+  color: #64748b !important;
+  font-size: 0.875rem !important;
+  padding: 0.25rem 0 !important;
+  position: relative !important;
+  padding-left: 1rem !important;
+}
+
+.examples-section li:before {
+  content: "•" !important;
+  color: #3b82f6 !important;
+  position: absolute !important;
+  left: 0 !important;
+  font-weight: bold !important;
+}
+
+.examples-section ul {
+  margin: 0;
+  padding-left: 1.25rem;
+  color: #6b7280;
+  font-size: 0.875rem;
+}
+
+.examples-section li {
+  margin-bottom: 0.25rem;
+}
+
+/* Responsive Design */
+@media (max-width: 768px) {
+  .verification-page {
+    padding: 1rem;
+  }
+  
+  .verification-status-card {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 1rem;
+  }
+  
+  .status-progress {
+    max-width: none;
+    width: 100%;
+  }
+  
+  .info-cards {
+    grid-template-columns: 1fr;
+  }
+  
+  .steps-grid {
+    grid-template-columns: 1fr;
+  }
+  
+  .step-header {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 0.75rem;
+  }
+}
+
+@media (max-width: 1200px) {
+  .info-cards {
+    grid-template-columns: repeat(2, 1fr);
+  }
+  
+  .steps-grid {
+    grid-template-columns: repeat(2, 1fr);
+  }
+}
+
+@media (min-width: 1201px) {
+  .info-cards {
+    grid-template-columns: repeat(3, 1fr);
+  }
+  
+  .steps-grid {
+    grid-template-columns: repeat(3, 1fr);
+  }
+}
