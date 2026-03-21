@@ -83,23 +83,22 @@ def enhance_notification_message(message, title="", related_entity_type="", cont
     
     # Job status enhancements
     elif any(keyword in message_lower for keyword in ["job", "status"]):
-        if "job_title" in context_data and "status" in context_data:
-            job_title = context_data["job_title"]
-            status = context_data["status"]
-            
-            # Enhanced status messages
-            if status == "ACCEPTED":
-                return f"Your hire request has been accepted ✅"
-            elif status == "REJECTED":
-                return f"Your hire request was rejected"
-            elif status == "ONGOING":
-                return f"Your job '{job_title}' is now ONGOING"
-            elif status == "COMPLETED":
-                return f"Your job '{job_title}' has been COMPLETED 🎉"
-            elif status == "PAID":
-                return f"Job '{job_title}' marked as PAID 💰"
-            else:
-                return f"Job '{job_title}' status: {status}"
+        job_title = context_data.get("job_title", "Unknown Job")
+        status = context_data.get("status", "Updated")
+        
+        # Enhanced status messages
+        if status == "ACCEPTED":
+            return f"Your hire request has been accepted ✅"
+        elif status == "REJECTED":
+            return f"Your hire request was rejected"
+        elif status == "ONGOING":
+            return f"Your job '{job_title}' is now ONGOING"
+        elif status == "COMPLETED":
+            return f"Your job '{job_title}' has been COMPLETED 🎉"
+        elif status == "PAID":
+            return f"Job '{job_title}' marked as PAID 💰"
+        else:
+            return f"Your job '{job_title}' is now {status}"
     
     # Payment enhancements
     elif any(keyword in message_lower for keyword in ["payment", "paid", "received"]):
@@ -183,6 +182,5 @@ def get_notification_type(message="", title="", related_entity_type=""):
         return "SYSTEM"
     elif any(keyword in message_lower for keyword in ["subscription", "activated", "plan"]):
         return "SYSTEM"
-    
-    # Default type
+
     return "DEFAULT"

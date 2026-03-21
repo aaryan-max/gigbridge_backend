@@ -27,7 +27,8 @@ try:
     from ai_chat_routes import register_ai_chat_routes
 except Exception as _e:
     register_ai_chat_routes = None
-    print(f"AI chat disabled: {type(_e).__name__}: {_e}")
+    import logging
+    logging.getLogger(__name__).warning(f"AI chat disabled: {type(_e).__name__}: {_e}")
 
 from database import create_tables, rebuild_freelancer_search_index
 from venue_helper import prepare_venue_data, validate_venue_data, check_venue_freelancer_compatibility
@@ -112,18 +113,12 @@ def internal_error(error):
 @app.errorhandler(Exception)
 def handle_exception(error):
     # Log the full error for debugging
-    import traceback
-    print("="*50)
-    print("🚨 UNHANDLED EXCEPTION CAUGHT:")
-    print(f"Error Type: {type(error).__name__}")
-    print(f"Error Message: {str(error)}")
-    print("Full Traceback:")
-    traceback.print_exc()
-    print("="*50)
+    import logging
+    logger = logging.getLogger(__name__)
+    logger.error(f"Unhandled exception: {type(error).__name__}: {str(error)}", exc_info=True)
     
-    # Return user-friendly error but include actual error message in dev mode
-    error_msg = str(error) if app.debug else "Server error occurred"
-    return jsonify({"success": False, "msg": error_msg}), 500
+    # Return user-friendly error
+    return jsonify({"success": False, "msg": "Server error occurred"}), 500
 
 create_tables()
 ensure_admin_tables()
@@ -135,21 +130,17 @@ ensure_admin_tables()
 def validate_startup():
     """Validate database connectivity and required tables"""
     try:
-        print("Validating database connectivity...")
-        
         # Test client database
         client_conn = client_db()
         client_cur = get_dict_cursor(client_conn)
         client_cur.execute("SELECT 1")
         client_conn.close()
-        print("[OK] Client database connection")
         
         # Test freelancer database
         freelancer_conn = freelancer_db()
         freelancer_cur = get_dict_cursor(freelancer_conn)
         freelancer_cur.execute("SELECT 1")
         freelancer_conn.close()
-        print("[OK] Freelancer database connection")
         
         # Check required tables exist
         conn = client_db()
@@ -159,21 +150,20 @@ def validate_startup():
         for table in tables_to_check:
             try:
                 cur.execute(f"SELECT 1 FROM {table} LIMIT 1")
-                print(f"[OK] Table '{table}'")
             except Exception as e:
-                print(f"[ERROR] Table '{table}': {str(e)}")
+                import logging
+                logging.getLogger(__name__).error(f"Table '{table}' validation failed: {str(e)}")
         
         conn.close()
-        print("Startup validation completed successfully!")
         
     except Exception as e:
-        print(f"Startup validation failed: {str(e)}")
-        import traceback
-        traceback.print_exc()
+        import logging
+        logging.getLogger(__name__).error(f"Startup validation failed: {str(e)}", exc_info=True)
 
 # Run startup validation
 validate_startup()
 
+# Register blueprints
 app.register_blueprint(admin_bp)
 app.register_blueprint(kyc_bp)
 app.register_blueprint(client_kyc_bp)
@@ -186,7 +176,8 @@ app.register_blueprint(payment_bp)
 try:
     load_or_build()
 except Exception as _e:
-    print("Semantic index not loaded:", _e)
+    import logging
+    logging.getLogger(__name__).warning(f"Semantic index not loaded: {_e}")
 
 # ============================================================
 # AGENT: PENDING ACTION MEMORY
@@ -250,6 +241,45 @@ def valid_email(email):
     email = (email or "").strip()
     return ("@" in email) and ("." in email)
 
+def validate_input(value, max_length, field_name):
+    """Validate input length and content"""
+    if value is None:
+        return None, f"{field_name} is required"
+    
+    value_str = str(value).strip()
+    if not value_str:
+        return None, f"{field_name} cannot be empty"
+    
+    if len(value_str) > max_length:
+        return None, f"{field_name} cannot exceed {max_length} characters"
+    
+    # Basic sanitization - remove potential script tags
+    value_str = value_str.replace('<script>', '').replace('</script>', '')
+    value_str = value_str.replace('<', '&lt;').replace('>', '&gt;')
+    
+    return value_str, None
+
+def validate_email_input(email):
+    """Validate and sanitize email input"""
+    if not email:
+        return None, "Email is required"
+    
+    email = str(email).strip().lower()
+    if len(email) > 255:
+        return None, "Email cannot exceed 255 characters"
+    
+    if not valid_email(email):
+        return None, "Invalid email format"
+    
+    return email, None
+
+def validate_payload_size(max_size_mb=1):
+    """Validate request payload size to prevent DoS attacks"""
+    content_length = request.content_length
+    if content_length and content_length > max_size_mb * 1024 * 1024:
+        return False, f"Request too large. Maximum size is {max_size_mb}MB"
+    return True, None
+
 # ============================================================
 # GEO HELPERS
 # ============================================================
@@ -276,34 +306,35 @@ def geocode_address(address: str):
     except Exception:
         return None, None
 
-def geocode_pincode(pincode: str, location_hint: str = None):
-    pincode = (pincode or "").strip()
-    if not pincode:
-        return None, None
+def geocode_pincode(pincode, hint=None):
+    """Geocode Indian pincode using Nominatim with optional hint for disambiguation"""
     try:
-        hint = (location_hint or "").strip()
+        query = f"{pincode}, India"
         if hint:
-            q = f"{pincode}, {hint}, India"
-        else:
-            q = f"{pincode}, Mumbai, India"
+            query = f"{hint}, {pincode}, India"
+        
         resp = requests.get(
             "https://nominatim.openstreetmap.org/search",
-            params={"q": q, "format": "json", "limit": 1},
-            headers={"User-Agent": "GigBridge/1.0 (contact: support@gigbridge.local)"},
+            params={
+                "q": query,
+                "format": "json",
+                "addressdetails": 1,
+                "limit": 1,
+            },
+            headers={
+                "User-Agent": "GigBridge/1.0 (geocoding service)"
+            },
             timeout=8,
         )
         if resp.status_code != 200:
-            print(f"[geo] Nominatim HTTP {resp.status_code} for pincode={pincode} hint={hint}")
             return None, None
         data = resp.json()
         if not data:
-            print(f"[geo] No results from Nominatim for pincode={pincode} hint={hint}")
             return None, None
         lat = float(data[0]["lat"])
         lon = float(data[0]["lon"])
         return lat, lon
     except Exception as e:
-        print(f"[geo] Exception geocoding pincode={pincode}: {e}")
         return None, None
 
 def calculate_distance(lat1, lon1, lat2, lon2):
@@ -334,11 +365,18 @@ def send_email(to_email, subject, body):
     msg["Subject"] = subject
     msg.set_content(body)
 
-    server = smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=10)
-    server.starttls()
-    server.login(SENDER_EMAIL, APP_PASSWORD)
-    server.send_message(msg)
-    server.quit()
+    server = None
+    try:
+        server = smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=30)
+        server.starttls()
+        server.login(SENDER_EMAIL, APP_PASSWORD)
+        server.send_message(msg)
+    finally:
+        if server:
+            try:
+                server.quit()
+            except:
+                pass
 
 def send_login_email(to_email, name, role, action):
     send_email(
@@ -404,81 +442,102 @@ create_otp_tables()
 
 @app.route("/client/send-otp", methods=["POST"])
 def client_send_otp():
-    d = get_json()
-    missing = require_fields(d, ["email"])
-    if missing:
-        return jsonify({"success": False, "msg": "Email required"}), 400
-
-    email = str(d["email"]).strip().lower()
-    if not valid_email(email):
-        return jsonify({"success": False, "msg": "Invalid email"}), 400
-
-    otp = str(random.randint(100000, 999999))
-    expires_at = now_ts() + OTP_TTL_SECONDS
-
-    conn = client_db()
-    cur = get_dict_cursor(conn)
-    cur.execute(
-        "INSERT INTO client_otp (email, otp, expires_at) VALUES (%s, %s, %s) ON CONFLICT (email) DO UPDATE SET otp=EXCLUDED.otp, expires_at=EXCLUDED.expires_at",
-        (email, otp, expires_at)
-    )
-    conn.commit()
-    conn.close()
-
     try:
-        send_otp_email(email, otp)
-    except:
-        pass
+        # Validate payload size
+        valid_size, size_error = validate_payload_size(0.1)  # 100KB limit for OTP
+        if not valid_size:
+            return jsonify({"success": False, "msg": size_error}), 413
 
-    return jsonify({"success": True, "msg": "OTP sent"})
+        d = get_json()
+        missing = require_fields(d, ["email"])
+        if missing:
+            return jsonify({"success": False, "msg": "Email required"}), 400
+
+        # Validate and sanitize email input
+        email, error = validate_email_input(d["email"])
+        if error:
+            return jsonify({"success": False, "msg": error}), 400
+
+        otp = str(random.randint(100000, 999999))
+        expires_at = now_ts() + OTP_TTL_SECONDS
+
+        # Ensure DB insert always succeeds
+        conn = None
+        try:
+            conn = client_db()
+            cur = get_dict_cursor(conn)
+            cur.execute(
+                "INSERT INTO client_otp (email, otp, expires_at) VALUES (%s, %s, %s) ON CONFLICT (email) DO UPDATE SET otp=EXCLUDED.otp, expires_at=EXCLUDED.expires_at",
+                (email, otp, expires_at)
+            )
+            conn.commit()
+        except Exception as db_error:
+            if conn:
+                conn.rollback()
+            return jsonify({"success": False, "msg": "Database operation failed"}), 500
+        finally:
+            if conn:
+                conn.close()
+
+        # Try to send email, but don't fail if email service is down
+        try:
+            send_otp_email(email, otp)
+        except Exception as email_error:
+            # Log email error but don't expose to user
+            import logging
+            logging.getLogger(__name__).warning(f"Email sending failed for {email}: {type(email_error).__name__}")
+
+        return jsonify({"success": True, "msg": "OTP sent"})
+        
+    except Exception as e:
+        return jsonify({"success": False, "msg": "Server error occurred"}), 500
 
 @app.route("/client/verify-otp", methods=["POST"])
 def client_verify_otp():
-    print("=== CLIENT VERIFY OTP DEBUG ===")
-    
     d = get_json()
-    print(f"Received data: {d}")
-    
     missing = require_fields(d, ["name", "email", "password", "otp"])
     if missing:
-        print("Missing fields error")
         return jsonify({"success": False, "msg": "Missing fields"}), 400
 
-    name = str(d["name"]).strip()
-    email = str(d["email"]).strip().lower()
-    password = str(d["password"])
-    otp_in = str(d["otp"]).strip()
+    # Validate and sanitize inputs
+    name, error = validate_input(d["name"], 100, "Name")
+    if error:
+        return jsonify({"success": False, "msg": error}), 400
     
-    print(f"Processed: name={name}, email={email}, otp={otp_in}")
+    email, error = validate_email_input(d["email"])
+    if error:
+        return jsonify({"success": False, "msg": error}), 400
+    
+    password = str(d["password"]).strip()
+    if not password or len(password) < 6:
+        return jsonify({"success": False, "msg": "Password must be at least 6 characters"}), 400
+    
+    otp_in, error = validate_input(d["otp"], 10, "OTP")
+    if error:
+        return jsonify({"success": False, "msg": error}), 400
 
     conn = None
     try:
         conn = client_db()
         cur = get_dict_cursor(conn)
-        print("Database connection established")
         
         # Verify OTP
         cur.execute("SELECT otp, expires_at FROM client_otp WHERE email=%s", (email,))    
         row = cur.fetchone()
-        print(f"OTP query result: {row}")
 
         if not row:
-            print("OTP not found")
             return jsonify({"success": False, "msg": "OTP not found"}), 400
 
         db_otp = row["otp"]
         expires_at = int(row["expires_at"])
         if now_ts() > expires_at:
-            print("OTP expired")
             cur.execute("DELETE FROM client_otp WHERE email=%s", (email,))
             conn.commit()
             return jsonify({"success": False, "msg": "OTP expired"}), 400
 
         if str(db_otp) != otp_in:
-            print("Invalid OTP")
             return jsonify({"success": False, "msg": "Invalid OTP"}), 400
 
-        print("OTP verified, inserting client")
         # Insert client with RETURNING id
         cur.execute(
             "INSERT INTO client (name, email, password) VALUES (%s, %s, %s) RETURNING id",
@@ -486,36 +545,29 @@ def client_verify_otp():
         )
         row = cur.fetchone()
         client_id = row["id"] if isinstance(row, dict) else row[0]
-        print(f"Client inserted with ID: {client_id}")
 
         # Clean up OTP
         cur.execute("DELETE FROM client_otp WHERE email=%s", (email,))
         conn.commit()
-        print("Transaction committed")
 
         try:
             send_login_email(email, name, "Client", "signup")
         except Exception as e:
-            print(f"Email sending failed: {e}")
+            pass  # Email failure shouldn't break signup
 
-        print("Returning success response")
         return jsonify({"success": True, "client_id": client_id})
 
     except psycopg2.IntegrityError as e:
-        print(f"IntegrityError (duplicate email): {e}")
         if conn:
             conn.rollback()
         return jsonify({"success": False, "msg": "Client already exists"}), 409
     except Exception as e:
-        print(f"Unexpected error: {type(e).__name__}: {str(e)}")
         if conn:
             conn.rollback()
-        return jsonify({"success": False, "msg": "Server error"}), 500
+        return jsonify({"success": False, "msg": "Server error occurred"}), 500
     finally:
         if conn:
             conn.close()
-            print("Database connection closed")
-        print("=== END CLIENT VERIFY OTP DEBUG ===")
 
 # ============================================================
 # OTP – FREELANCER
@@ -523,31 +575,22 @@ def client_verify_otp():
 
 @app.route("/freelancer/send-otp", methods=["POST"])
 def freelancer_send_otp():
-    print("=== FREELANCER SEND OTP DEBUG ===")
-    
     d = get_json()
-    print(f"Received data: {d}")
-    
     missing = require_fields(d, ["email"])
     if missing:
-        print("Missing email field")
         return jsonify({"success": False, "msg": "Email required"}), 400
 
     email = str(d["email"]).strip().lower()
     if not valid_email(email):
-        print("Invalid email format")
         return jsonify({"success": False, "msg": "Invalid email"}), 400
 
     otp = str(random.randint(100000, 999999))
     expires_at = now_ts() + OTP_TTL_SECONDS
-    
-    print(f"Generated OTP for {email}: {otp}")
 
     conn = None
     try:
         conn = freelancer_db()
         cur = get_dict_cursor(conn)
-        print("Database connection established")
         
         # PostgreSQL UPSERT syntax
         cur.execute(
@@ -556,92 +599,69 @@ def freelancer_send_otp():
             (email, otp, expires_at)
         )
         conn.commit()
-        print("OTP saved to database")
 
     except psycopg2.errors.UniqueViolation as e:
-        print(f"UniqueViolation error: {str(e)}")
         if conn:
             conn.rollback()
         return jsonify({"success": False, "msg": "Email already has OTP pending"}), 409
     except psycopg2.IntegrityError as e:
-        print(f"IntegrityError: {str(e)}")
         if conn:
             conn.rollback()
         return jsonify({"success": False, "msg": "Database integrity error"}), 409
     except psycopg2.Error as e:
-        print(f"PostgreSQL error: {type(e).__name__}: {str(e)}")
         if conn:
             conn.rollback()
-        return jsonify({"success": False, "msg": f"Database error: {str(e)}"}), 500
+        return jsonify({"success": False, "msg": "Database error occurred"}), 500
     except Exception as e:
-        print(f"Unexpected error: {type(e).__name__}: {str(e)}")
-        import traceback
-        traceback.print_exc()
         if conn:
             conn.rollback()
-        return jsonify({"success": False, "msg": f"Server error: {str(e)}"}), 500
+        return jsonify({"success": False, "msg": "Server error occurred"}), 500
     finally:
         if conn:
             conn.close()
-            print("Database connection closed")
 
     try:
         send_otp_email(email, otp)
-        print("OTP email sent successfully")
     except Exception as e:
-        print(f"Email sending failed: {str(e)}")
         # Continue even if email fails
+        pass
 
-    print("=== END FREELANCER SEND OTP DEBUG ===")
     return jsonify({"success": True, "msg": "OTP sent"})
 
 @app.route("/freelancer/verify-otp", methods=["POST"])
 def freelancer_verify_otp():
-    print("=== FREELANCER VERIFY OTP DEBUG ===")
-    
     d = get_json()
-    print(f"Received data: {d}")
-    
     missing = require_fields(d, ["name", "email", "password", "otp"])
     if missing:
-        print("Missing fields error")
         return jsonify({"success": False, "msg": "Missing fields"}), 400
 
     name = str(d["name"]).strip()
     email = str(d["email"]).strip().lower()
     password = str(d["password"])
     otp_in = str(d["otp"]).strip()
-    
-    print(f"Processed: name={name}, email={email}, otp={otp_in}")
 
     conn = None
     try:
         conn = freelancer_db()
         cur = get_dict_cursor(conn)
-        print("Database connection established")
         
         # Verify OTP
         cur.execute("SELECT otp, expires_at FROM freelancer_otp WHERE email=%s", (email,))    
         row = cur.fetchone()
-        print(f"OTP query result: {row}")
 
         if not row:
-            print("OTP not found")
             return jsonify({"success": False, "msg": "OTP not found"}), 400
 
         db_otp = row["otp"]
         expires_at = int(row["expires_at"])
         if now_ts() > expires_at:
-            print("OTP expired")
             cur.execute("DELETE FROM freelancer_otp WHERE email=%s", (email,))
             conn.commit()
             return jsonify({"success": False, "msg": "OTP expired"}), 400
 
         if str(db_otp) != otp_in:
-            print("Invalid OTP")
             return jsonify({"success": False, "msg": "Invalid OTP"}), 400
 
-        print("OTP verified, inserting freelancer")
         # Insert freelancer with RETURNING id
         cur.execute(
             "INSERT INTO freelancer (name, email, password) VALUES (%s, %s, %s) RETURNING id",
@@ -649,48 +669,37 @@ def freelancer_verify_otp():
         )
         row = cur.fetchone()
         freelancer_id = row["id"] if isinstance(row, dict) else row[0]
-        print(f"Freelancer inserted with ID: {freelancer_id}")
 
         # Clean up OTP
         cur.execute("DELETE FROM freelancer_otp WHERE email=%s", (email,))
         conn.commit()
-        print("Transaction committed")
 
         try:
             send_login_email(email, name, "Freelancer", "signup")
         except Exception as e:
-            print(f"Email sending failed: {e}")
+            pass  # Email failure shouldn't break signup
 
-        print("Returning success response")
         return jsonify({"success": True, "freelancer_id": freelancer_id})
 
     except psycopg2.errors.UniqueViolation as e:
-        print(f"UniqueViolation (duplicate email): {str(e)}")
         if conn:
             conn.rollback()
         return jsonify({"success": False, "msg": "Freelancer already exists"}), 409
     except psycopg2.IntegrityError as e:
-        print(f"IntegrityError: {str(e)}")
         if conn:
             conn.rollback()
         return jsonify({"success": False, "msg": "Database integrity error"}), 409
     except psycopg2.Error as e:
-        print(f"PostgreSQL error: {type(e).__name__}: {str(e)}")
         if conn:
             conn.rollback()
-        return jsonify({"success": False, "msg": f"Database error: {str(e)}"}), 500
+        return jsonify({"success": False, "msg": "Database error occurred"}), 500
     except Exception as e:
-        print(f"Unexpected error: {type(e).__name__}: {str(e)}")
-        import traceback
-        traceback.print_exc()
         if conn:
             conn.rollback()
-        return jsonify({"success": False, "msg": f"Server error: {str(e)}"}), 500
+        return jsonify({"success": False, "msg": "Server error occurred"}), 500
     finally:
         if conn:
             conn.close()
-            print("Database connection closed")
-        print("=== END FREELANCER VERIFY OTP DEBUG ===")
 
 # ============================================================
 # PASSWORD RESET – CLIENT
@@ -699,136 +708,96 @@ def freelancer_verify_otp():
 @app.route("/client/verify-otp-for-reset", methods=["POST"])
 def client_verify_otp_for_reset():
     """Verify OTP for password reset"""
-    print("=== CLIENT VERIFY OTP FOR RESET DEBUG ===")
-    
     d = get_json()
-    print(f"Received data: {d}")
-    
     missing = require_fields(d, ["email", "otp"])
     if missing:
-        print("Missing fields error")
         return jsonify({"success": False, "msg": "Missing fields"}), 400
 
     email = str(d["email"]).strip().lower()
     otp_in = str(d["otp"]).strip()
-    
-    print(f"Processed: email={email}, otp_entered={otp_in}")
 
     conn = None
     try:
         conn = client_db()
         cur = get_dict_cursor(conn)
-        print("Database connection established")
         
         # PostgreSQL placeholder syntax
         cur.execute("SELECT otp, expires_at FROM client_otp WHERE email=%s", (email,))
         row = cur.fetchone()
-        print(f"OTP query result: {row}")
         
         if not row:
-            print("OTP not found for email:", email)
             return jsonify({"success": False, "msg": "OTP not found"}), 400
         
         stored_otp = row["otp"]
         expires_at = int(row["expires_at"])
-        print(f"Stored OTP: {stored_otp}, Entered OTP: {otp_in}")
-        print(f"Current time: {now_ts()}, Expires at: {expires_at}")
         
         if now_ts() > expires_at:
-            print("OTP expired")
             # Clean up expired OTP
             cur.execute("DELETE FROM client_otp WHERE email=%s", (email,))
             conn.commit()
             return jsonify({"success": False, "msg": "OTP expired"}), 400
         
         if str(stored_otp) != otp_in:
-            print(f"OTP mismatch: stored='{stored_otp}' vs entered='{otp_in}'")
             return jsonify({"success": False, "msg": "Invalid OTP or OTP expired"}), 400
         
-        print("OTP verified successfully")
         # OTP verified, allow password reset
         return jsonify({"success": True, "msg": "OTP verified"})
         
     except psycopg2.Error as e:
-        print(f"PostgreSQL error: {type(e).__name__}: {str(e)}")
         if conn:
             conn.rollback()
-        return jsonify({"success": False, "msg": f"Database error: {str(e)}"}), 500
+        return jsonify({"success": False, "msg": "Database error occurred"}), 500
     except Exception as e:
-        print(f"Unexpected error: {type(e).__name__}: {str(e)}")
-        import traceback
-        traceback.print_exc()
         if conn:
             conn.rollback()
-        return jsonify({"success": False, "msg": f"Server error: {str(e)}"}), 500
+        return jsonify({"success": False, "msg": "Server error occurred"}), 500
     finally:
         if conn:
             conn.close()
-            print("Database connection closed")
-        print("=== END CLIENT VERIFY OTP FOR RESET DEBUG ===")
 
 @app.route("/client/reset-password", methods=["POST"])
 def client_reset_password():
     """Reset client password"""
-    print("=== CLIENT RESET PASSWORD DEBUG ===")
-    
     d = get_json()
-    print(f"Received data: {d}")
-    
     missing = require_fields(d, ["email", "new_password"])
     if missing:
-        print("Missing fields error")
         return jsonify({"success": False, "msg": "Missing fields"}), 400
 
     email = str(d["email"]).strip().lower()
     new_password = str(d["new_password"])
     
-    print(f"Processed: email={email}, password_length={len(new_password)}")
-    
     if len(new_password) < 6:
-        print("Password too short")
         return jsonify({"success": False, "msg": "Password must be at least 6 characters"}), 400
 
     conn = None
     try:
         conn = client_db()
         cur = get_dict_cursor(conn)
-        print("Database connection established")
         
         # PostgreSQL placeholder syntax
         cur.execute("UPDATE client SET password=%s WHERE email=%s", 
                     (generate_password_hash(new_password), email))
         
         if cur.rowcount == 0:
-            print("No client found with email:", email)
             return jsonify({"success": False, "msg": "Email not found"}), 404
-        
-        print(f"Password updated for {cur.rowcount} client(s)")
         
         # Clean up OTP after successful password reset
         cur.execute("DELETE FROM client_otp WHERE email=%s", (email,))
         conn.commit()
-        print("OTP cleaned up, transaction committed")
         
         return jsonify({"success": True, "msg": "Password reset successful"})
         
     except psycopg2.Error as e:
-        print(f"PostgreSQL error: {type(e).__name__}: {str(e)}")
         if conn:
             conn.rollback()
-        return jsonify({"success": False, "msg": f"Database error: {str(e)}"}), 500
+        return jsonify({"success": False, "msg": "Database error occurred"}), 500
     except Exception as e:
-        print(f"Unexpected error: {type(e).__name__}: {str(e)}")
-        import traceback
-        traceback.print_exc()
         if conn:
             conn.rollback()
-        return jsonify({"success": False, "msg": f"Server error: {str(e)}"}), 500
+        return jsonify({"success": False, "msg": "Server error occurred"}), 500
     finally:
         if conn:
             conn.close()
-            print("Database connection closed")
-        print("=== END CLIENT RESET PASSWORD DEBUG ===")
 
 # ============================================================
 # PASSWORD RESET – FREELANCER
@@ -837,136 +806,96 @@ def client_reset_password():
 @app.route("/freelancer/verify-otp-for-reset", methods=["POST"])
 def freelancer_verify_otp_for_reset():
     """Verify OTP for password reset"""
-    print("=== FREELANCER VERIFY OTP FOR RESET DEBUG ===")
-    
     d = get_json()
-    print(f"Received data: {d}")
-    
     missing = require_fields(d, ["email", "otp"])
     if missing:
-        print("Missing fields error")
         return jsonify({"success": False, "msg": "Missing fields"}), 400
 
     email = str(d["email"]).strip().lower()
     otp_in = str(d["otp"]).strip()
-    
-    print(f"Processed: email={email}, otp_entered={otp_in}")
 
     conn = None
     try:
         conn = freelancer_db()
         cur = get_dict_cursor(conn)
-        print("Database connection established")
         
         # PostgreSQL placeholder syntax
         cur.execute("SELECT otp, expires_at FROM freelancer_otp WHERE email=%s", (email,))
         row = cur.fetchone()
-        print(f"OTP query result: {row}")
         
         if not row:
-            print("OTP not found for email:", email)
             return jsonify({"success": False, "msg": "OTP not found"}), 400
         
         stored_otp = row["otp"]
         expires_at = int(row["expires_at"])
-        print(f"Stored OTP: {stored_otp}, Entered OTP: {otp_in}")
-        print(f"Current time: {now_ts()}, Expires at: {expires_at}")
         
         if now_ts() > expires_at:
-            print("OTP expired")
             # Clean up expired OTP
             cur.execute("DELETE FROM freelancer_otp WHERE email=%s", (email,))
             conn.commit()
             return jsonify({"success": False, "msg": "OTP expired"}), 400
         
         if str(stored_otp) != otp_in:
-            print(f"OTP mismatch: stored='{stored_otp}' vs entered='{otp_in}'")
             return jsonify({"success": False, "msg": "Invalid OTP or OTP expired"}), 400
         
-        print("OTP verified successfully")
         # OTP verified, allow password reset
         return jsonify({"success": True, "msg": "OTP verified"})
         
     except psycopg2.Error as e:
-        print(f"PostgreSQL error: {type(e).__name__}: {str(e)}")
         if conn:
             conn.rollback()
-        return jsonify({"success": False, "msg": f"Database error: {str(e)}"}), 500
+        return jsonify({"success": False, "msg": "Database error occurred"}), 500
     except Exception as e:
-        print(f"Unexpected error: {type(e).__name__}: {str(e)}")
-        import traceback
-        traceback.print_exc()
         if conn:
             conn.rollback()
-        return jsonify({"success": False, "msg": f"Server error: {str(e)}"}), 500
+        return jsonify({"success": False, "msg": "Server error occurred"}), 500
     finally:
         if conn:
             conn.close()
-            print("Database connection closed")
-        print("=== END FREELANCER VERIFY OTP FOR RESET DEBUG ===")
 
 @app.route("/freelancer/reset-password", methods=["POST"])
 def freelancer_reset_password():
     """Reset freelancer password"""
-    print("=== FREELANCER RESET PASSWORD DEBUG ===")
-    
     d = get_json()
-    print(f"Received data: {d}")
-    
     missing = require_fields(d, ["email", "new_password"])
     if missing:
-        print("Missing fields error")
         return jsonify({"success": False, "msg": "Missing fields"}), 400
 
     email = str(d["email"]).strip().lower()
     new_password = str(d["new_password"])
     
-    print(f"Processed: email={email}, password_length={len(new_password)}")
-    
     if len(new_password) < 6:
-        print("Password too short")
         return jsonify({"success": False, "msg": "Password must be at least 6 characters"}), 400
 
     conn = None
     try:
         conn = freelancer_db()
         cur = get_dict_cursor(conn)
-        print("Database connection established")
         
         # PostgreSQL placeholder syntax
         cur.execute("UPDATE freelancer SET password=%s WHERE email=%s", 
                     (generate_password_hash(new_password), email))
         
         if cur.rowcount == 0:
-            print("No freelancer found with email:", email)
             return jsonify({"success": False, "msg": "Email not found"}), 404
-        
-        print(f"Password updated for {cur.rowcount} freelancer(s)")
         
         # Clean up OTP after successful password reset
         cur.execute("DELETE FROM freelancer_otp WHERE email=%s", (email,))
         conn.commit()
-        print("OTP cleaned up, transaction committed")
         
         return jsonify({"success": True, "msg": "Password reset successful"})
         
     except psycopg2.Error as e:
-        print(f"PostgreSQL error: {type(e).__name__}: {str(e)}")
         if conn:
             conn.rollback()
-        return jsonify({"success": False, "msg": f"Database error: {str(e)}"}), 500
+        return jsonify({"success": False, "msg": "Database error occurred"}), 500
     except Exception as e:
-        print(f"Unexpected error: {type(e).__name__}: {str(e)}")
-        import traceback
-        traceback.print_exc()
         if conn:
             conn.rollback()
-        return jsonify({"success": False, "msg": f"Server error: {str(e)}"}), 500
+        return jsonify({"success": False, "msg": "Server error occurred"}), 500
     finally:
         if conn:
             conn.close()
-            print("Database connection closed")
-        print("=== END FREELANCER RESET PASSWORD DEBUG ===")
 
 @app.route("/client/signup", methods=["POST"])
 def client_signup():
@@ -1480,7 +1409,7 @@ def freelancers_search():
         except ValueError:
             return jsonify({"success": False, "msg": f"Invalid category: {category}"}), 400
 
-    print(f"FEATURE_HIDE_UNVERIFIED_FROM_SEARCH = {FEATURE_HIDE_UNVERIFIED_FROM_SEARCH}")
+    # Feature flag for hiding unverified freelancers
     client_id = request.args.get("client_id")
     client_lat = client_lon = None
 
@@ -1646,8 +1575,6 @@ def freelancers_search():
                     # Calculate weighted specialization score (0-100)
                     spec_relevance_score = (title_score * 0.4 + skills_score * 0.4 + bio_score * 0.1 + tags_score * 0.1)
                     
-                    print(f"Fuzzy fallback - Freelancer {r.get('freelancer_id')} spec scores - Title:{title_score:.1f} Skills:{skills_score:.1f} Bio:{bio_score:.1f} Tags:{tags_score:.1f} Combined:{spec_relevance_score:.1f}")
-                    
                     scored.append((spec_relevance_score, r))
 
                 scored.sort(key=lambda x: x[0], reverse=True)
@@ -1667,7 +1594,6 @@ def freelancers_search():
             if not rows:
                 try:
                     sem_ids = semantic_search(q, top_k=30)
-                    print("✅ SEMANTIC USED:", q, sem_ids[:10])
                 except Exception:
                     sem_ids = []
 

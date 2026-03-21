@@ -28,6 +28,10 @@ current_client_id = None
 current_freelancer_id = None
 selected_package = None
 
+def clean_path(p):
+    """Clean file path by removing quotes and trailing spaces"""
+    return p.strip().strip('"').strip("'").strip()
+
 def check_server_connection():
     """Check if Flask server is running"""
     try:
@@ -2532,17 +2536,33 @@ def client_flow():
                             message = notif.get("message", notif.get("title", "No message"))
                             title = notif.get("title", "")
                             related_type = notif.get("related_entity_type", "")
+                            
+                            # Fix old placeholders if present
+                            if "job_title" in message and "status" in message:
+                                job_title = notif.get("job_title", "Unknown")
+                                status = notif.get("status", "Updated")
+                                message = message.replace("job_title", job_title).replace("status", status)
                         else:
                             # Handle legacy format (string only)
                             message = str(notif) if notif else "No message"
                             title = ""
                             related_type = ""
+                            
+                            # Fix old placeholders in legacy format
+                            if "job_title" in message and "status" in message:
+                                message = message.replace("job_title", "Unknown").replace("status", "Updated")
                         
                         # Get appropriate icon
                         icon = get_notification_icon(message, title, related_type)
                         
-                        # Display with icon and formatted message
-                        print(f"{idx}. {icon} {message}")
+                        # Remove duplicate icons and display with single icon
+                        clean_message = message.strip()
+                        if clean_message.startswith("✅ ✅"):
+                            clean_message = clean_message.replace("✅ ✅", "✅")
+                        elif clean_message.startswith("❌ ❌"):
+                            clean_message = clean_message.replace("❌ ❌", "❌")
+                        
+                        print(f"{idx}. {icon} {clean_message}")
             except Exception as e:
                 print("❌ Error getting notifications:", str(e))
 
@@ -2865,11 +2885,15 @@ def freelancer_upload_verification():
     if not artist_proof:
         artist_proof = None
     
-    # Validate file extensions
+    # Validate file extensions (using same logic as server)
     def validate_file_ext(file_path):
         if not file_path:
             return True
-        ext = file_path.lower().split('.')[-1]
+        # Clean path and extract filename first
+        import os
+        cleaned_path = file_path.strip().strip('"').strip("'").strip()
+        filename = os.path.basename(cleaned_path)
+        ext = filename.split(".")[-1].lower()
         return ext in ['pdf', 'jpg', 'jpeg', 'png']
     
     if not validate_file_ext(government_id):
@@ -2954,12 +2978,14 @@ def client_upload_verification():
     # Get file paths
     print("\n📂 Enter file paths (local file paths):")
     
-    government_id = input("Government ID file path: ").strip()
+    government_id = clean_path(input("Government ID file path: "))
+    print("DEBUG CLEAN PATH:", government_id)
     if not government_id:
         print("❌ Government ID file path required")
         return
     
-    pan_card = input("PAN card file path: ").strip()
+    pan_card = clean_path(input("PAN card file path: "))
+    print("DEBUG CLEAN PATH:", pan_card)
     if not pan_card:
         print("❌ PAN card file path required")
         return
@@ -3530,9 +3556,6 @@ def freelancer_flow():
                     freelancer_info = profile_data  # Data is directly in root, not under "freelancer" key
                     # Get pricing_type directly from database
                     freelancer_pricing_type = freelancer_info.get("pricing_type")
-                    
-                    # Debug print to verify correct value
-                    print("DEBUG pricing_type:", freelancer_pricing_type)
                     
                     # Fallback to category-based detection if database pricing_type is None
                     if not freelancer_pricing_type and get_pricing_type_for_category:
@@ -4335,13 +4358,37 @@ def freelancer_flow():
                 
                 for idx, note in enumerate(notes, 1):
                     # Safe handling with fallbacks
-                    message = str(note) if note else "No activity details"
+                    if isinstance(note, dict):
+                        message = note.get("message", "No activity details")
+                        title = note.get("title", "")
+                        related_type = note.get("related_entity_type", "")
+                        
+                        # Fix old placeholders if present
+                        if "job_title" in message and "status" in message:
+                            job_title = note.get("job_title", "Unknown")
+                            status = note.get("status", "Updated")
+                            message = message.replace("job_title", job_title).replace("status", status)
+                    else:
+                        # Handle legacy format (string only)
+                        message = str(note) if note else "No activity details"
+                        title = ""
+                        related_type = ""
+                        
+                        # Fix old placeholders in legacy format
+                        if "job_title" in message and "status" in message:
+                            message = message.replace("job_title", "Unknown").replace("status", "Updated")
                     
                     # Get appropriate icon based on content
-                    icon = get_notification_icon(message=message)
+                    icon = get_notification_icon(message=message, title=title, related_entity_type=related_type)
                     
-                    # Display with icon and formatted message
-                    print(f"{idx}. {icon} {message}")
+                    # Remove duplicate icons and display with single icon
+                    clean_message = message.strip()
+                    if clean_message.startswith("✅ ✅"):
+                        clean_message = clean_message.replace("✅ ✅", "✅")
+                    elif clean_message.startswith("❌ ❌"):
+                        clean_message = clean_message.replace("❌ ❌", "❌")
+                    
+                    print(f"{idx}. {icon} {clean_message}")
 
         # 10️⃣ Manage Portfolio
         elif choice == "10":
