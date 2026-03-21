@@ -2954,31 +2954,71 @@ def client_jobs():
         conn = freelancer_db()
         cur = get_dict_cursor(conn)
         cur.execute("""
-            SELECT id, job_title, proposed_budget, status
-            FROM hire_request
-            WHERE client_id=%s
-            ORDER BY created_at DESC
-        """, (client_id,))
+            SELECT pp.id, pp.title, pp.description, pp.category, 
+                   pp.budget_min, pp.budget_max, pp.status as project_status,
+                   latest_hr.status as hire_status
+            FROM project_post pp
+            LEFT JOIN (
+                SELECT DISTINCT ON (job_title) job_title, status
+                FROM hire_request 
+                WHERE client_id = %s
+                ORDER BY job_title, created_at DESC
+            ) latest_hr ON pp.title = latest_hr.job_title
+            WHERE pp.client_id = %s
+            ORDER BY pp.created_at DESC
+        """, (client_id, client_id))
         rows = cur.fetchall()
         conn.close()
 
         result = []
         for r in rows:
             if isinstance(r, dict):
-                st = r.get("status", "")
+                # Use hire_status as primary, fallback to project_status
+                status = r.get("hire_status") or r.get("project_status", "unknown")
+                # Format budget: show range if both min and max exist, otherwise single value
+                budget_min = r.get("budget_min")
+                budget_max = r.get("budget_max")
+                if budget_min and budget_max and budget_min != budget_max:
+                    budget = f"₹{budget_min}-{budget_max}"
+                elif budget_max:
+                    budget = f"₹{budget_max}"
+                elif budget_min:
+                    budget = f"₹{budget_min}"
+                else:
+                    budget = "N/A"
+                
                 result.append({
                     "id": r.get("id"),
-                    "title": r.get("job_title") or "",
-                    "budget": r.get("proposed_budget"),
-                    "status": "open" if st == "PENDING" else str(st).lower()
+                    "title": r.get("title") or "Untitled",
+                    "description": r.get("description") or "N/A",
+                    "category": r.get("category") or "N/A",
+                    "budget": budget,
+                    "status": str(status).lower()
                 })
             else:
-                st = r[3] if len(r) > 3 else r[2]
+                # Handle tuple format (fallback)
+                project_id, title, description, category = r[0], r[1], r[2], r[3]
+                budget_min, budget_max, project_status, hire_status = r[4], r[5], r[6], r[7] if len(r) > 7 else None
+                
+                if budget_min and budget_max and budget_min != budget_max:
+                    budget = f"₹{budget_min}-{budget_max}"
+                elif budget_max:
+                    budget = f"₹{budget_max}"
+                elif budget_min:
+                    budget = f"₹{budget_min}"
+                else:
+                    budget = "N/A"
+                
+                # Use hire_status as primary, fallback to project_status
+                status = hire_status or project_status or "unknown"
+                
                 result.append({
-                    "id": r[0],
-                    "title": r[1] or "",
-                    "budget": r[2],
-                    "status": "open" if st == "PENDING" else str(st).lower()
+                    "id": project_id,
+                    "title": title or "Untitled",
+                    "description": description or "N/A",
+                    "category": category or "N/A",
+                    "budget": budget,
+                    "status": str(status).lower()
                 })
         return jsonify(result)
     except Exception as e:

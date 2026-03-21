@@ -2318,9 +2318,17 @@ def client_flow():
                     for i, j in enumerate(jobs, 1):
                         if isinstance(j, dict):
                             title = j.get('title', 'Untitled')
+                            category = j.get('category', 'N/A')
                             budget = j.get('budget', 'N/A')
+                            description = j.get('description', 'N/A')
                             status = j.get('status', 'N/A')
-                            print(f"{i}. {title} | ₹{budget} | {status}")
+                            
+                            print(f"\n{i}. {title}")
+                            print(f"Category   : {category}")
+                            print(f"Budget     : {budget}")
+                            print(f"Description: {description}")
+                            print(f"Status     : {status}")
+                            print("----------------------------------")
                             
                             # Show rating option for PAID jobs
                             if j.get('status') == 'PAID':
