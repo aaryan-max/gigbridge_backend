@@ -60,9 +60,17 @@ def show_server_error():
 # ===== NEW: CALL FEATURE =====
 # ============================================================
 
-def start_call(caller_role, receiver_id, call_type):
+def start_call(caller_role, receiver_id=None, call_type=None):
     """Start a voice or video call"""
     try:
+        # Safety check: ensure user is logged in
+        if caller_role == "client" and not current_client_id:
+            print("❌ Please login as client first")
+            return
+        elif caller_role == "freelancer" and not current_freelancer_id:
+            print("❌ Please login as freelancer first")
+            return
+        
         # Determine caller ID based on role
         if caller_role == "client":
             caller_id = current_client_id
@@ -70,6 +78,35 @@ def start_call(caller_role, receiver_id, call_type):
         else:
             caller_id = current_freelancer_id
             receiver_role = "client"
+        
+        # Ask for receiver ID if not provided
+        if receiver_id is None:
+            try:
+                receiver_id = int(input(f"Enter {receiver_role} ID to call: ").strip())
+            except ValueError:
+                print("❌ Invalid ID")
+                return
+        
+        # Ask for call type if not provided
+        if call_type is None:
+            print("\nCall type:")
+            print("1. Voice Call")
+            print("2. Video Call")
+            choice = input("Choose (1-2): ").strip()
+            if choice == "1":
+                call_type = "voice"
+            elif choice == "2":
+                call_type = "video"
+            else:
+                print("❌ Invalid choice")
+                return
+        
+        # Safety validation: cannot call yourself
+        if caller_id == receiver_id:
+            print("❌ Cannot call yourself")
+            return
+        
+        print(f"📞 Starting {call_type} call to {receiver_role} ID {receiver_id}...")
         
         res = requests.post(f"{BASE_URL}/call/start", json={
             "caller_id": caller_id,
@@ -152,7 +189,17 @@ def check_incoming_calls():
                         print("❌ Failed to reject call")
                 elif action == "3":
                     print("📱 Opening chat...")
-                    # Would open chat functionality here
+                    # Open chat with the caller
+                    caller_id = call.get("caller_id")
+                    if caller_id:
+                        if current_client_id:
+                            # Current user is client, caller is freelancer
+                            open_chat_with_freelancer(caller_id)
+                        else:
+                            # Current user is freelancer, caller is client
+                            open_chat_with_client(caller_id)
+                    else:
+                        print("❌ Could not determine caller ID")
                 elif action == "4":
                     continue
                 else:
@@ -207,11 +254,27 @@ def get_valid_dob():
 def rate_freelancer_for_job(job):
     """Rate freelancer for a completed job"""
     try:
-        print(f"\n--- Rate Freelancer for: {job['title']} ---")
-        print(f"Freelancer ID: {job.get('freelancer_id')}")
-        print(f"Job Budget: ₹{job.get('budget')}")
+        # Safety check: ensure job data is valid
+        if not job or not isinstance(job, dict):
+            print("❌ Invalid job data")
+            return
+            
+        job_id = job.get('id')
+        freelancer_id = job.get('freelancer_id')
         
-        # Get rating
+        if not job_id:
+            print("❌ Job ID missing")
+            return
+            
+        if not freelancer_id:
+            print("❌ Freelancer ID missing")
+            return
+        
+        print(f"\n--- Rate Freelancer for: {job.get('title', 'Untitled')} ---")
+        print(f"Freelancer ID: {freelancer_id}")
+        print(f"Job Budget: ₹{job.get('budget', 'N/A')}")
+        
+        # Get rating with validation
         while True:
             rating_input = input("Rating (1-5): ")
             try:
@@ -226,10 +289,13 @@ def rate_freelancer_for_job(job):
         # Get review
         review = input("Review (optional): ").strip()
         
-        # Submit rating
+        print("📝 Submitting rating...")
+        
+        # Submit rating with proper job ID
         res = requests.post(f"{BASE_URL}/client/rate", json={
             "client_id": current_client_id,
-            "hire_request_id": job['id'],
+            "freelancer_id": freelancer_id,
+            "hire_request_id": job_id,
             "rating": rating,
             "review": review
         })
@@ -237,10 +303,23 @@ def rate_freelancer_for_job(job):
         result = res.json()
         if result.get("success"):
             print(f"✅ Rating submitted successfully!")
-            print(f"New average rating: {result.get('new_rating', 'N/A'):.2f}")
-            print(f"Total reviews: {result.get('total_reviews', 'N/A')}")
+            new_rating = result.get('new_rating')
+            total_reviews = result.get('total_reviews')
+            if new_rating is not None:
+                print(f"New average rating: {new_rating:.2f}")
+            if total_reviews is not None:
+                print(f"Total reviews: {total_reviews}")
         else:
-            print(f"❌ Failed to submit rating: {result.get('msg', 'Unknown error')}")
+            error_msg = result.get('msg', 'Unknown error')
+            print(f"❌ Failed to submit rating: {error_msg}")
+            
+            # Show helpful messages for common errors
+            if "job completion" in error_msg:
+                print("💡 Note: You can only rate jobs that are marked as 'PAID'")
+            elif "already rated" in error_msg:
+                print("💡 Note: You can only rate each job once")
+            elif "own jobs" in error_msg:
+                print("💡 Note: You can only rate your own hired jobs")
             
     except Exception as e:
         print(f"❌ Error submitting rating: {str(e)}")
@@ -1655,18 +1734,56 @@ def client_ai_recommendations():
         print("❌ Error getting recommendations:", str(e))
         return
     
+    # DEBUG: Print AI response structure
+    print("DEBUG AI response:", recommendations)
+    
     if not recommendations:
         print("📭 No recommendations found")
         return
     
+    # NORMALIZATION LOGIC: Convert all items to dict format
+    normalized_freelancers = []
+    for f in recommendations:
+        if isinstance(f, dict):
+            # Use as-is but ensure required fields with defaults
+            normalized_freelancers.append({
+                "name": f.get("name", "Unknown"),
+                "match_score": f.get("match_score", 0),
+                "rating": f.get("rating", 0),
+                "experience": f.get("experience", 0),
+                "budget_range": f.get("budget_range", "Not specified"),
+                "category": f.get("category", "Not specified"),
+                "freelancer_id": f.get("freelancer_id")
+            })
+        else:
+            # Convert string to dict format
+            normalized_freelancers.append({
+                "name": str(f),
+                "match_score": 0,
+                "rating": 0,
+                "experience": 0,
+                "budget_range": "Not specified",
+                "category": "Not specified",
+                "freelancer_id": None
+            })
+    
     print("\n--- AI RECOMMENDED FREELANCERS ---")
-    for i, freelancer in enumerate(recommendations, 1):
-        print(f"\n{i}. {freelancer['name']}")
-        print(f"   Match Score: {freelancer['match_score']}%")
-        print(f"   Rating: {freelancer['rating']}")
-        print(f"   Experience: {freelancer['experience']} years")
-        print(f"   Budget: {freelancer['budget_range']}")
-        print(f"   Category: {freelancer['category']}")
+    for i, freelancer in enumerate(normalized_freelancers, 1):
+        # SAFE DISPLAY: Use .get() with defaults
+        name = freelancer.get("name", "Unknown")
+        match_score = freelancer.get("match_score", 0)
+        rating = freelancer.get("rating", 0)
+        experience = freelancer.get("experience", 0)
+        budget_range = freelancer.get("budget_range", "Not specified")
+        category = freelancer.get("category", "Not specified")
+        freelancer_id = freelancer.get("freelancer_id")
+        
+        print(f"\n{i}. {name}")
+        print(f"   Match Score: {match_score}%")
+        print(f"   Rating: {rating}")
+        print(f"   Experience: {experience} years")
+        print(f"   Budget: {budget_range}")
+        print(f"   Category: {category}")
         
         print("1. View Details")
         print("2. Message")
@@ -1675,16 +1792,16 @@ def client_ai_recommendations():
         print("5. Next")
         
         action = input("Choose: ")
-        if action == "1":
-            view_freelancer_details(freelancer["freelancer_id"])
-        elif action == "2":
-            open_chat_with_freelancer(freelancer["freelancer_id"])
-        elif action == "3":
-            hire_freelancer(freelancer["freelancer_id"])
-        elif action == "4":
+        if action == "1" and freelancer_id:
+            view_freelancer_details(freelancer_id)
+        elif action == "2" and freelancer_id:
+            open_chat_with_freelancer(freelancer_id)
+        elif action == "3" and freelancer_id:
+            hire_freelancer(freelancer_id)
+        elif action == "4" and freelancer_id:
             res = requests.post(f"{BASE_URL}/client/save-freelancer", json={
                 "client_id": current_client_id,
-                "freelancer_id": freelancer["freelancer_id"]
+                "freelancer_id": freelancer_id
             })
             print(res.json())
 
@@ -2403,12 +2520,29 @@ def client_flow():
             })
             print("\n--- NOTIFICATIONS ---")
             try:
+                from notification_utils import get_notification_icon
+                
                 notifications = res.json()
                 if not notifications:
-                    print("❌ No notifications")
+                    print("📭 No notifications available")
                 else:
-                    for n in notifications:
-                        print("*", n)
+                    for idx, notif in enumerate(notifications, 1):
+                        # Safe dictionary access with fallbacks
+                        if isinstance(notif, dict):
+                            message = notif.get("message", notif.get("title", "No message"))
+                            title = notif.get("title", "")
+                            related_type = notif.get("related_entity_type", "")
+                        else:
+                            # Handle legacy format (string only)
+                            message = str(notif) if notif else "No message"
+                            title = ""
+                            related_type = ""
+                        
+                        # Get appropriate icon
+                        icon = get_notification_icon(message, title, related_type)
+                        
+                        # Display with icon and formatted message
+                        print(f"{idx}. {icon} {message}")
             except Exception as e:
                 print("❌ Error getting notifications:", str(e))
 
@@ -4120,7 +4254,15 @@ def freelancer_flow():
                 print("❌ No saved clients")
             else:
                 for c in clients:
-                    print(f"{c['client_id']}. {c['name']} - {c['email']}")
+                    # Safe dictionary access with type checking
+                    if isinstance(c, dict):
+                        client_id = c.get('client_id', 'Unknown')
+                        name = c.get('name', 'Unknown')
+                        email = c.get('email', 'Unknown')
+                        print(f"{client_id}. {name} - {email}")
+                    else:
+                        # Handle legacy string format
+                        print(f"Legacy client: {c}")
                     print("1. Message 💬")
                     print("2. Voice Call 📞")
                     print("3. Video Call 🎥")
@@ -4189,8 +4331,17 @@ def freelancer_flow():
             if not notes:
                 print("📭 No recent activity")
             else:
-                for n in notes:
-                    print("✔", n)
+                from notification_utils import get_notification_icon
+                
+                for idx, note in enumerate(notes, 1):
+                    # Safe handling with fallbacks
+                    message = str(note) if note else "No activity details"
+                    
+                    # Get appropriate icon based on content
+                    icon = get_notification_icon(message=message)
+                    
+                    # Display with icon and formatted message
+                    print(f"{idx}. {icon} {message}")
 
         # 10️⃣ Manage Portfolio
         elif choice == "10":

@@ -45,6 +45,7 @@ from categories import (
     PRICING_TYPE_PROJECT,
 )
 from call_service import start_call, update_call_status, get_incoming_calls
+from notification_utils import enhance_notification_message, get_notification_icon
 
 
 
@@ -1162,10 +1163,21 @@ def client_profile():
     # Add notification (store in PostgreSQL)
     c2 = client_db()
     cur2 = get_dict_cursor(c2)
+    
+    # Enhanced message generation
+    from notification_utils import enhance_notification_message, get_notification_icon
+    
+    enhanced_message = enhance_notification_message(
+        message="Profile updated successfully",
+        title="Profile Update",
+        related_entity_type="SYSTEM",
+        context_data={"action": "profile_update"}
+    )
+    
     cur2.execute("""
-        INSERT INTO notification (client_id, message, created_at)
-        VALUES (%s, %s, %s)
-    """, (d["client_id"], "Profile updated successfully", now_ts()))
+        INSERT INTO notification (client_id, message, title, related_entity_type, created_at)
+        VALUES (%s, %s, %s, %s, %s)
+    """, (d["client_id"], enhanced_message, "Profile Update", "SYSTEM", now_ts()))
     c2.commit()
     c2.close()
 
@@ -1379,14 +1391,20 @@ def freelancer_profile():
     conn.close()
 
     # Add notification for freelancer profile update
-    from notification_helper import notify_freelancer
+    from notification_utils import enhance_notification_message, get_notification_icon
+    
+    enhanced_message = enhance_notification_message(
+        message="Profile updated successfully",
+        title="Profile Update",
+        related_entity_type="SYSTEM",
+        context_data={"action": "profile_update"}
+    )
+    
     notify_freelancer(
         freelancer_id=freelancer_id,
-        message="Profile updated successfully",
-        title="Profile Updated",
-        related_entity_type="profile",
-        related_entity_id=freelancer_id
-    )
+        message=enhanced_message,
+        title="Profile Update",
+        related_entity_type="SYSTEM")
 
     # Rebuild FTS index for better keyword search
     rebuild_freelancer_search_index(freelancer_id)
@@ -1459,7 +1477,7 @@ def freelancers_search():
         except ValueError:
             return jsonify({"success": False, "msg": f"Invalid category: {category}"}), 400
 
-    print(f"DEBUG: FEATURE_HIDE_UNVERIFIED_FROM_SEARCH = {FEATURE_HIDE_UNVERIFIED_FROM_SEARCH}")
+    print(f"FEATURE_HIDE_UNVERIFIED_FROM_SEARCH = {FEATURE_HIDE_UNVERIFIED_FROM_SEARCH}")
     client_id = request.args.get("client_id")
     client_lat = client_lon = None
 
@@ -1625,7 +1643,7 @@ def freelancers_search():
                     # Calculate weighted specialization score (0-100)
                     spec_relevance_score = (title_score * 0.4 + skills_score * 0.4 + bio_score * 0.1 + tags_score * 0.1)
                     
-                    print(f"DEBUG: Fuzzy fallback - Freelancer {r.get('freelancer_id')} spec scores - Title:{title_score:.1f} Skills:{skills_score:.1f} Bio:{bio_score:.1f} Tags:{tags_score:.1f} Combined:{spec_relevance_score:.1f}")
+                    print(f"Fuzzy fallback - Freelancer {r.get('freelancer_id')} spec scores - Title:{title_score:.1f} Skills:{skills_score:.1f} Bio:{bio_score:.1f} Tags:{tags_score:.1f} Combined:{spec_relevance_score:.1f}")
                     
                     scored.append((spec_relevance_score, r))
 
@@ -2137,12 +2155,27 @@ def client_send_message():
     freelancer_row = cur.fetchone()
     freelancer_name = (freelancer_row.get("name") if isinstance(freelancer_row, dict) else (freelancer_row[0] if freelancer_row else None)) or "Freelancer"
     
+    # Get client name for context
+    cur.execute("SELECT name FROM client WHERE id=%s", (int(d["client_id"]),))
+    client_row = cur.fetchone()
+    client_name = (client_row.get("name") if isinstance(client_row, dict) else (client_row[0] if client_row else None)) or "Client"
+
+    # Enhanced message generation
+    from notification_utils import enhance_notification_message
+    
+    enhanced_message = enhance_notification_message(
+        message=f"You messaged {freelancer_name}",
+        title="New Message",
+        related_entity_type="MESSAGE",
+        context_data={"sender_name": client_name, "receiver_name": freelancer_name}
+    )
+    
     cconn = client_db()
     ccur2 = get_dict_cursor(cconn)
     ccur2.execute("""
-        INSERT INTO notification (client_id, message, created_at)
-        VALUES (%s, %s, %s)
-    """, (int(d["client_id"]), f"You messaged {freelancer_name}", now_ts()))
+        INSERT INTO notification (client_id, message, title, related_entity_type, created_at)
+        VALUES (%s, %s, %s, %s, %s)
+    """, (int(d["client_id"]), enhanced_message, "New Message", "MESSAGE", now_ts()))
     cconn.commit()
     cconn.close()
 
@@ -2747,10 +2780,23 @@ def freelancer_hire_respond():
                 # Create notification for client
                 freelancer_conn = freelancer_db()
                 freelancer_cur = get_dict_cursor(freelancer_conn)
+                
+                # Use enhanced notification message for counteroffer
+                context_data = {
+                    "client_name": client_name,
+                    "amount": counter_offer_amount
+                }
+                enhanced_message = enhance_notification_message(
+                    f"Client sent counteroffer of ₹{counter_offer_amount}",
+                    title="Counteroffer Received",
+                    related_entity_type="payment",
+                    context_data=context_data
+                )
+                
                 freelancer_cur.execute("""
-                    INSERT INTO notification (client_id, message, created_at)
-                    VALUES (%s, %s, %s)
-                """, (client_id, f"Freelancer sent a counteroffer of ₹{counter_offer_amount} for your hire request.", now_ts()))
+                    INSERT INTO notification (client_id, message, title, related_entity_type, created_at)
+                    VALUES (%s, %s, %s, %s, %s)
+                """, (client_id, enhanced_message, "Counteroffer Received", "PAYMENT", now_ts()))
                 freelancer_conn.commit()
                 freelancer_conn.close()
         except Exception as e:
@@ -2771,10 +2817,22 @@ def freelancer_hire_respond():
                 # Create notification for freelancer
                 client_conn = client_db()
                 client_cur = get_dict_cursor(client_conn)
+                
+                # Use enhanced notification message for counteroffer
+                context_data = {
+                    "amount": counter_offer_amount
+                }
+                enhanced_message = enhance_notification_message(
+                    f"Client sent counteroffer of ₹{counter_offer_amount}",
+                    title="Counteroffer Received",
+                    related_entity_type="payment",
+                    context_data=context_data
+                )
+                
                 client_cur.execute("""
-                    INSERT INTO notification (freelancer_id, message, created_at)
-                    VALUES (%s, %s, %s)
-                """, (freelancer_id, f"Client sent a counteroffer of ₹{counter_offer_amount} for your hire request.", now_ts()))
+                    INSERT INTO notification (freelancer_id, message, title, related_entity_type, created_at)
+                    VALUES (%s, %s, %s, %s, %s)
+                """, (freelancer_id, enhanced_message, "Counteroffer Received", "PAYMENT", now_ts()))
                 client_conn.commit()
                 client_conn.close()
         except Exception as e:
@@ -3077,10 +3135,18 @@ def client_hire_counter():
         try:
             freelancer_conn = freelancer_db()
             freelancer_cur = get_dict_cursor(freelancer_conn)
+            
+            # Use enhanced notification message
+            enhanced_message = enhance_notification_message(
+                message,
+                title="Counteroffer Update",
+                related_entity_type="hire"
+            )
+            
             freelancer_cur.execute("""
-                INSERT INTO notification (freelancer_id, message, created_at)
-                VALUES (%s, %s, %s)
-            """, (request["freelancer_id"], message, now_ts()))
+                INSERT INTO notification (freelancer_id, message, title, related_entity_type, created_at)
+                VALUES (%s, %s, %s, %s, %s)
+            """, (request["freelancer_id"], enhanced_message, "Counteroffer Update", "HIRE", now_ts()))
             freelancer_conn.commit()
             freelancer_conn.close()
         except Exception as e:
@@ -3148,10 +3214,18 @@ def client_send_notification():
     try:
         conn = client_db()
         cur = get_dict_cursor(conn)
+        
+        # Use enhanced notification message
+        enhanced_message = enhance_notification_message(
+            str(message),
+            title="Notification",
+            related_entity_type="SYSTEM"
+        )
+        
         cur.execute("""
-            INSERT INTO notification (client_id, message, created_at)
-            VALUES (%s, %s, %s)
-        """, (client_id, str(message), now_ts()))
+            INSERT INTO notification (client_id, message, title, related_entity_type, created_at)
+            VALUES (%s, %s, %s, %s, %s)
+        """, (client_id, enhanced_message, "Notification", "SYSTEM", now_ts()))
         conn.commit()
         conn.close()
         return jsonify({"success": True})
@@ -3177,7 +3251,7 @@ def client_notifications():
         conn = client_db()
         cur = get_dict_cursor(conn)
         cur.execute("""
-            SELECT message
+            SELECT message, title, related_entity_type
             FROM notification
             WHERE client_id=%s
             ORDER BY created_at DESC
@@ -3188,9 +3262,26 @@ def client_notifications():
         result = []
         for r in rows:
             if isinstance(r, dict):
-                result.append(r.get("message", ""))
+                raw_message = r.get("message", "")
+                title = r.get("title", "")
+                entity_type = r.get("related_entity_type", "")
             else:
-                result.append(r[0] if r else "")
+                raw_message = r[0] if r else ""
+                title = ""
+                entity_type = ""
+            
+            # Use enhanced notification message
+            enhanced_message = enhance_notification_message(
+                raw_message,
+                title=title,
+                related_entity_type=entity_type
+            )
+            
+            # Add icon mapping for CLI display
+            icon = get_notification_icon(enhanced_message, title, entity_type)
+            formatted_message = f"{icon} {enhanced_message}"
+            
+            result.append(formatted_message)
         return jsonify(result)
     except Exception as e:
         if conn:
@@ -3346,29 +3437,35 @@ def freelancer_saved_clients():
         conn = freelancer_db()
         cur = get_dict_cursor(conn)
         cur.execute("""
-            SELECT client_id, created_at
-            FROM saved_client
-            WHERE freelancer_id=%s
-            ORDER BY created_at DESC
+            SELECT sc.client_id, sc.name, sc.email, sc.created_at
+            FROM saved_client sc
+            JOIN client c ON sc.client_id = c.id
+            WHERE sc.freelancer_id=%s
+            ORDER BY sc.created_at DESC
         """, (freelancer_id,))
         rows = cur.fetchall()
         conn.close()
-
-        client_ids = []
-        saved_at_map = {}
+        
+        # Build response with client information
+        clients_list = []
         for r in rows:
             if isinstance(r, dict):
-                val = r.get("client_id")
-                saved_at = r.get("created_at")
+                clients_list.append({
+                    "client_id": r.get("client_id"),
+                    "name": r.get("name", "Unknown"),
+                    "email": r.get("email", "Unknown"),
+                    "created_at": r.get("created_at")
+                })
             else:
-                val = r[0]
-                saved_at = r[1]
-            if val is not None:
-                client_ids.append(int(val))
-                saved_at_map[int(val)] = saved_at
-        if not client_ids:
-            return jsonify({"success": True, "clients": []})
-
+                # Handle legacy format
+                clients_list.append({
+                    "client_id": r[0] if len(r) > 0 else None,
+                    "name": r[1] if len(r) > 1 else None,
+                    "email": r[2] if len(r) > 2 else None,
+                    "created_at": r[3] if len(r) > 3 else None
+                })
+        
+        return jsonify({"success": True, "clients": clients_list})
         client_conn = client_db()
         client_cur = get_dict_cursor(client_conn)
 
@@ -3524,7 +3621,23 @@ def freelancer_notifications():
         """, (freelancer_id,))
         for title, status, _created_at in cur.fetchall():
             job_title = title or "Untitled"
-            notifications.append(f'Job "{job_title}" status: {status}')
+            
+            # Use enhanced notification message
+            context_data = {
+                "job_title": job_title,
+                "status": status
+            }
+            enhanced_message = enhance_notification_message(
+                f"Job status: {status}",
+                title="Job Status Update",
+                related_entity_type="job",
+                context_data=context_data
+            )
+            
+            # Add icon mapping for CLI display
+            icon = get_notification_icon(enhanced_message, "Job Status Update", "job")
+            formatted_message = f"{icon} {enhanced_message}"
+            notifications.append(formatted_message)
 
         # From messages (client -> freelancer)
         cur.execute("""
@@ -3536,7 +3649,47 @@ def freelancer_notifications():
         """, (freelancer_id,))
         msg_rows = cur.fetchall()
         if msg_rows:
-            notifications.append("Clients have recently sent you messages.")
+            # Use enhanced notification message
+            enhanced_msg = enhance_notification_message(
+                "You have new messages",
+                title="New Messages",
+                related_entity_type="message"
+            )
+            
+            # Add icon mapping for CLI display
+            icon = get_notification_icon(enhanced_msg, "New Messages", "message")
+            formatted_message = f"{icon} {enhanced_msg}"
+            notifications.append(formatted_message)
+
+        # From notification table (enhanced notifications)
+        cur.execute("""
+            SELECT message, title, related_entity_type
+            FROM notification
+            WHERE freelancer_id=%s
+            ORDER BY created_at DESC
+            LIMIT 20
+        """, (freelancer_id,))
+        for r in cur.fetchall():
+            if isinstance(r, dict):
+                raw_message = r.get("message", "")
+                title = r.get("title", "")
+                entity_type = r.get("related_entity_type", "")
+            else:
+                raw_message = r[0] if r else ""
+                title = ""
+                entity_type = ""
+            
+            # Use enhanced notification message
+            enhanced_message = enhance_notification_message(
+                raw_message,
+                title=title,
+                related_entity_type=entity_type
+            )
+            
+            # Add icon mapping for CLI display
+            icon = get_notification_icon(enhanced_message, title, entity_type)
+            formatted_message = f"{icon} {enhanced_message}"
+            notifications.append(formatted_message)
 
         conn.close()
         return jsonify(notifications)
@@ -4280,8 +4433,14 @@ def calculate_recommendation_score(freelancer_data, target_category, target_budg
     # Budget match (+20 points if client budget within freelancer range)
     min_budget = freelancer_data.get("min_budget", 0)
     max_budget = freelancer_data.get("max_budget", float('inf'))
-    if min_budget <= target_budget <= max_budget:
-        score += 20
+    
+    # SAFE COMPARISON: Handle None values
+    if min_budget is not None and max_budget is not None and target_budget is not None:
+        if min_budget <= target_budget <= max_budget:
+            score += 20
+    elif min_budget is not None and target_budget is not None:
+        if min_budget <= target_budget:
+            score += 20
     
     # Rating weight (rating * 10)
     rating = freelancer_data.get("rating", 0)
@@ -4304,72 +4463,94 @@ def calculate_recommendation_score(freelancer_data, target_category, target_budg
 @app.route("/freelancers/recommend", methods=["POST"])
 def recommend_freelancers():
     """NEW CODE: AI-powered freelancer recommendation engine"""
-    d = get_json()
-    missing = require_fields(d, ["category", "budget"])
-    if missing:
-        return jsonify({"success": False, "msg": "Missing fields"}), 400
-    
-    target_category = str(d["category"]).strip()
-    target_budget = float(d["budget"])
-    
-    # Fetch all freelancers with profile data
-    conn = freelancer_db()
-    cur = conn.cursor(cursor_factory=RealDictCursor)
-    
-    cur.execute("""
-        SELECT
-            f.id,
-            f.name,
-            fp.title,
-            fp.skills,
-            fp.experience,
-            fp.min_budget,
-            fp.max_budget,
-            fp.rating,
-            fp.total_projects,
-            fp.category,
-            fp.bio
-        FROM freelancer f
-        LEFT JOIN freelancer_profile fp ON fp.freelancer_id = f.id
-        WHERE fp.freelancer_id IS NOT NULL
-        ORDER BY f.id DESC
-    """)
-    
-    rows = cur.fetchall()
-    conn.close()
-    
-    if not rows:
-        return jsonify([])
-    
-    # Calculate scores for all freelancers
-    scored_freelancers = []
-    for row in rows:
-        freelancer_data = dict(row)
+    try:
+        d = get_json()
+        missing = require_fields(d, ["category", "budget"])
+        if missing:
+            return jsonify({"success": False, "msg": "Missing fields"}), 400
         
-        # Get completed jobs from stats (simulate calculation)
-        # For now, we'll estimate completed jobs as 80% of total projects
-        total_projects = freelancer_data.get("total_projects", 0)
-        completed_jobs = int(total_projects * 0.8) if total_projects > 0 else 0
-        freelancer_data["completed_jobs"] = completed_jobs
+        target_category = str(d["category"]).strip()
+        target_budget = float(d["budget"])
         
-        # Calculate recommendation score
-        score = calculate_recommendation_score(freelancer_data, target_category, target_budget)
+        # Fetch all freelancers with profile data
+        conn = freelancer_db()
+        cur = conn.cursor(cursor_factory=RealDictCursor)
         
-        scored_freelancers.append({
-            "freelancer_id": freelancer_data["id"],
-            "name": freelancer_data["name"],
-            "category": freelancer_data["category"] or "",
-            "rating": freelancer_data["rating"] or 0,
-            "experience": freelancer_data["experience"] or 0,
-            "budget_range": f"{freelancer_data.get('min_budget', 0)} - {freelancer_data.get('max_budget', 0)}",
-            "match_score": score
-        })
+        cur.execute("""
+            SELECT
+                f.id,
+                f.name,
+                fp.title,
+                fp.skills,
+                fp.experience,
+                fp.min_budget,
+                fp.max_budget,
+                fp.rating,
+                fp.total_projects,
+                fp.category,
+                fp.bio
+            FROM freelancer f
+            LEFT JOIN freelancer_profile fp ON fp.freelancer_id = f.id
+            WHERE fp.freelancer_id IS NOT NULL
+            ORDER BY f.id DESC
+        """)
+        
+        rows = cur.fetchall()
+        conn.close()
+        
+        if not rows:
+            return jsonify([])
+        
+        # Calculate scores for all freelancers
+        scored_freelancers = []
+        for row in rows:
+            freelancer_data = dict(row)
+            
+            # Get completed jobs from stats (simulate calculation)
+            # For now, we'll estimate completed jobs as 80% of total projects
+            total_projects = freelancer_data.get("total_projects", 0)
+            completed_jobs = int(total_projects * 0.8) if total_projects > 0 else 0
+            freelancer_data["completed_jobs"] = completed_jobs
+            
+            # PREVENT CRASH: Safe scoring calculation
+            try:
+                # Calculate recommendation score
+                score = calculate_recommendation_score(freelancer_data, target_category, target_budget)
+                
+                scored_freelancers.append({
+                    "freelancer_id": freelancer_data["id"],
+                    "name": freelancer_data["name"],
+                    "category": freelancer_data["category"] or "",
+                    "rating": freelancer_data["rating"] or 0,
+                    "experience": freelancer_data["experience"] or 0,
+                    "budget_range": f"{freelancer_data.get('min_budget') or 0} - {freelancer_data.get('max_budget') or 0}",
+                    "match_score": score
+                })
+            except Exception as e:
+                # Skip problematic freelancer but continue processing others
+                print(f"Warning: Skipping freelancer {freelancer_data.get('id', 'unknown')} due to error: {e}")
+                continue
+        
+        # Sort by score descending and return top 5
+        scored_freelancers.sort(key=lambda x: x["match_score"], reverse=True)
+        top_recommendations = scored_freelancers[:5]
+        
+        # BACKEND FIX: Ensure structured data with all required fields
+        for rec in top_recommendations:
+            rec["freelancer_id"] = rec.get("freelancer_id", 0)
+            rec["name"] = str(rec.get("name", "Unknown"))
+            rec["category"] = str(rec.get("category", "Not specified"))
+            rec["rating"] = float(rec.get("rating", 0))
+            rec["experience"] = int(rec.get("experience", 0))
+            rec["budget_range"] = str(rec.get("budget_range", "Not specified"))
+            rec["match_score"] = float(rec.get("match_score", 0))
+        
+        return jsonify(top_recommendations)
     
-    # Sort by score descending and return top 5
-    scored_freelancers.sort(key=lambda x: x["match_score"], reverse=True)
-    top_recommendations = scored_freelancers[:5]
-    
-    return jsonify(top_recommendations)
+    except Exception as e:
+        # FIX RESPONSE: Return safe response on error
+        print(f"Error in recommendation engine: {e}")
+        return jsonify({"success": True, "freelancers": []})
 
 # ============================================================
 # ============================================================
@@ -4839,10 +5020,22 @@ def freelancer_subscription_upgrade():
         try:
             conn = freelancer_db()
             cur = get_dict_cursor(conn)
+            
+            # Use enhanced notification message for subscription upgrade
+            context_data = {
+                "plan_name": plan_name
+            }
+            enhanced_message = enhance_notification_message(
+                f"Successfully upgraded to {plan_name}!",
+                title="Subscription Upgraded",
+                related_entity_type="subscription",
+                context_data=context_data
+            )
+            
             cur.execute("""
-                INSERT INTO notification (freelancer_id, message, created_at)
-                VALUES (%s, %s, %s)
-            """, (freelancer_id, f"Successfully upgraded to {plan_name}! Active until {expiry_date.strftime('%Y-%m-%d')}", int(time.time())))
+                INSERT INTO notification (freelancer_id, message, title, related_entity_type, created_at)
+                VALUES (%s, %s, %s, %s, %s)
+            """, (freelancer_id, enhanced_message, "Subscription Upgraded", "SUBSCRIPTION", int(time.time())))
             conn.commit()
             conn.close()
         except:
@@ -5248,11 +5441,42 @@ def client_rate():
     client_id = int(d["client_id"])
     freelancer_id = int(d["freelancer_id"])
     review_text = str(d.get("review", "")).strip()
+    hire_request_id = d.get("hire_request_id")
     
     conn = None
     try:
         conn = freelancer_db()
         cur = get_dict_cursor(conn)
+        
+        # VALIDATION 1: Check job ownership and completion status
+        if hire_request_id:
+            cur.execute("""
+                SELECT client_id, freelancer_id, status 
+                FROM hire_request 
+                WHERE id = %s
+            """, (hire_request_id,))
+            
+            job = cur.fetchone()
+            if not job:
+                return jsonify({"success": False, "msg": "Job not found"}), 400
+            
+            # Verify job ownership
+            if job.get("client_id") != client_id:
+                return jsonify({"success": False, "msg": "You can only rate your own jobs"}), 403
+            
+            # Ensure job is completed (PAID status)
+            if job.get("status") != 'PAID':
+                return jsonify({"success": False, "msg": "You can only rate after job completion"}), 400
+        
+        # VALIDATION 2: Prevent duplicate rating
+        cur.execute("""
+            SELECT id FROM review 
+            WHERE hire_request_id = %s AND client_id = %s AND freelancer_id = %s
+        """, (hire_request_id, client_id, freelancer_id))
+        
+        existing_review = cur.fetchone()
+        if existing_review:
+            return jsonify({"success": False, "msg": "You have already rated this freelancer"}), 400
         
         # Get current freelancer stats
         cur.execute("""
@@ -5296,11 +5520,11 @@ def client_rate():
                 WHERE freelancer_id = %s
             """, (new_average, new_total_projects, new_total_rating_sum, freelancer_id))
         
-        # Insert a dummy review for testing with unique ID
+        # Insert review with proper hire_request_id
         cur.execute("""
             INSERT INTO review (hire_request_id, client_id, freelancer_id, rating, review_text, created_at)
             VALUES (%s, %s, %s, %s, %s, %s)
-        """, (None, client_id, freelancer_id, rating, review_text, now_ts()))
+        """, (hire_request_id, client_id, freelancer_id, rating, review_text, now_ts()))
         
         conn.commit()
         conn.close()
@@ -5751,10 +5975,10 @@ def freelancer_profile_stats(freelancer_id):
 def call_start():
     """Start a voice or video call"""
     d = get_json()
-    print(f"DEBUG: Received data: {d}")
+    print(f"Received data: {d}")
     missing = require_fields(d, ["caller_id", "receiver_id", "call_type"])
     if missing:
-        print(f"DEBUG: Missing fields: {missing}")
+        print(f"Missing fields: {missing}")
         return jsonify({"success": False, "msg": "Missing fields"}), 400
     
     try:
@@ -5799,7 +6023,9 @@ def call_accept():
         result = cur.fetchone()
         conn.close()
         
-        meeting_url = f"https://meet.jit.si/{result['room_name']}" if result else None
+        meeting_url = None
+        if result and result.get('room_name'):
+            meeting_url = f"https://meet.jit.si/{result['room_name']}"
         
         return jsonify({
             "success": True, 

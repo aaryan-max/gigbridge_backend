@@ -4,9 +4,11 @@ Call Service for Voice/Video Calls using Jitsi Meet
 import uuid
 from database import freelancer_db, get_dict_cursor
 
-def generate_room_name():
+def generate_room_name(caller_id: int, receiver_id: int):
     """Generate unique room name for Jitsi Meet"""
-    return f"gigbridge-call-{uuid.uuid4().hex[:10]}"
+    import time
+    timestamp = int(time.time())
+    return f"gigbridge_{caller_id}*{receiver_id}*{timestamp}"
 
 def check_call_permission(caller_id: int, receiver_id: int):
     """Check if caller has permission to call receiver"""
@@ -49,7 +51,7 @@ def start_call(caller_id: int, receiver_id: int, call_type: str):
         if caller_id == receiver_id:
             return None, "Cannot call yourself"
         
-        room_name = generate_room_name()
+        room_name = generate_room_name(caller_id, receiver_id)
         meeting_url = f"https://meet.jit.si/{room_name}"
         
         conn = freelancer_db()
@@ -100,6 +102,9 @@ def update_call_status(call_id: int, status: str):
 def get_incoming_calls(user_id: int):
     """Get incoming calls for a user"""
     try:
+        if not user_id:
+            return []
+            
         conn = freelancer_db()
         cur = get_dict_cursor(conn)
         
@@ -119,19 +124,23 @@ def get_incoming_calls(user_id: int):
         
         result = []
         for call in calls:
+            room_name = call.get("room_name")
+            meeting_url = f"https://meet.jit.si/{room_name}" if room_name else None
+            
             result.append({
                 "call_id": call.get("call_id"),
                 "caller_id": call.get("caller_id"),
                 "receiver_id": call.get("receiver_id"),
                 "call_type": call.get("call_type"),
-                "room_name": call.get("room_name"),
+                "room_name": room_name,
                 "status": call.get("status"),
                 "created_at": call.get("created_at"),
                 "caller_name": call.get("caller_name") or call.get("client_name", "Unknown"),
-                "meeting_url": f"https://meet.jit.si/{call.get('room_name')}"
+                "meeting_url": meeting_url
             })
         
         return result
         
     except Exception as e:
+        print(f"Error in get_incoming_calls: {str(e)}")
         return []
