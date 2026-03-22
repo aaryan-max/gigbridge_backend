@@ -988,6 +988,34 @@ def get_client_profile(client_id: int):
         conn.close()
 
 
+# ============================================================
+# PAYMENT-BASED JOB COMPLETION LOGIC
+# ============================================================
+
+def mark_job_completed(job_id):
+    """Mark a job as completed based on successful payment"""
+    if not job_id:
+        return False, "Invalid job_id"
+
+    conn = freelancer_db()
+    cur = get_dict_cursor(conn)
+
+    # Prevent duplicate completion
+    cur.execute(
+        "UPDATE hire_request SET status='COMPLETED' WHERE id=%s AND status != 'COMPLETED'",
+        (job_id,)
+    )
+
+    if cur.rowcount == 0:
+        conn.close()
+        return False, "Job not found or already completed"
+
+    conn.commit()
+    conn.close()
+
+    return True, "Job marked as completed"
+
+
 def get_completed_project_count(freelancer_id: int):
     """Get the count of completed projects for a freelancer"""
     try:

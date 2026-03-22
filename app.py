@@ -1,7 +1,7 @@
 import psycopg2
 import psycopg2.errors
 from flask import Flask, request, jsonify
-from database import client_db, freelancer_db
+from database import client_db, freelancer_db, mark_job_completed
 from psycopg2.extras import RealDictCursor
 from postgres_config import get_postgres_connection, get_dict_cursor
 from booking_service import validate_hire_request_slot, format_time_slot_display
@@ -49,6 +49,54 @@ from call_service import start_call, update_call_status, get_incoming_calls
 from notification_utils import enhance_notification_message, get_notification_icon
 from notification_helper import notify_freelancer
 
+
+# ============================================================
+# PRICING DISPLAY HELPER FUNCTIONS
+# ============================================================
+
+def get_price_display(freelancer):
+    """Get formatted price display based on pricing type"""
+    pricing_type = (freelancer.get("pricing_type") or "").lower()
+    
+    if pricing_type == "hourly":
+        return f"₹{freelancer.get('hourly_rate', 0)} / hour"
+    
+    elif pricing_type == "per_person":
+        return f"₹{freelancer.get('per_person_rate', 0)} per person"
+    
+    elif pricing_type == "package":
+        return f"₹{freelancer.get('starting_price', 0)}"
+    
+    elif pricing_type == "project":
+        return f"₹{freelancer.get('fixed_price', 0)}"
+    
+    return "Not specified"
+
+def enhance_freelancer_with_pricing(freelancer):
+    """Enhance freelancer data with pricing display fields"""
+    # Add fallback pricing type logic
+    pricing_type = freelancer.get("pricing_type")
+    category = freelancer.get("category")
+    
+    if not pricing_type:
+        try:
+            pricing_type = get_pricing_type_for_category(category)
+        except:
+            pricing_type = "unknown"
+    
+    # Ensure pricing_type is set
+    freelancer["pricing_type"] = pricing_type
+    
+    # Add price display fields
+    freelancer["price_display"] = get_price_display(freelancer)
+    freelancer["price_label"] = {
+        "hourly": "Hourly Rate",
+        "per_person": "Per Person Rate", 
+        "package": "Starting Price",
+        "project": "Project Price"
+    }.get(pricing_type, "Price")
+    
+    return freelancer
 
 
 # ============================================================
@@ -1918,8 +1966,17 @@ def freelancers_search():
             "supports_hourly": _get("supports_hourly", _get(13)),
             "fixed_price": _get("fixed_price", _get(14)),
             "hourly_rate": _get("hourly_rate", _get(15)),
-            "overtime_rate_per_hour": _get("overtime_rate_per_hour", _get(16))
+            "overtime_rate_per_hour": _get("overtime_rate_per_hour", _get(16)),
+            # Add new pricing display fields
+            "pricing_type": _get("pricing_type"),
+            "per_person_rate": _get("per_person_rate"),
+            "starting_price": _get("starting_price")
         })
+    
+    # Enhance all freelancers with pricing display fields
+    for freelancer in enriched:
+        enhance_freelancer_with_pricing(freelancer)
+    
     # ============================================
     # GRID PRIORITY SYSTEM
     # ============================================
@@ -1998,7 +2055,12 @@ def freelancers_all():
             COALESCE(fp.rating, 0) as rating,
             COALESCE(fp.category, '') as category,
             COALESCE(fp.bio, '') as bio,
-            COALESCE(fp.availability_status, 'AVAILABLE') as availability_status
+            COALESCE(fp.availability_status, 'AVAILABLE') as availability_status,
+            COALESCE(fp.pricing_type, '') as pricing_type,
+            COALESCE(fp.hourly_rate, 0) as hourly_rate,
+            COALESCE(fp.per_person_rate, 0) as per_person_rate,
+            COALESCE(fp.starting_price, 0) as starting_price,
+            COALESCE(fp.fixed_price, 0) as fixed_price
         FROM freelancer f
         LEFT JOIN freelancer_profile fp ON fp.freelancer_id = f.id
         ORDER BY f.id DESC
@@ -2008,7 +2070,7 @@ def freelancers_all():
 
     out = []
     for r in rows:
-        out.append({
+        freelancer_data = {
             "freelancer_id": r["id"],
             "name": r["name"],
             "title": r["title"],
@@ -2019,7 +2081,16 @@ def freelancers_all():
             "category": r["category"],
             "bio": r["bio"],
             "availability_status": r["availability_status"],
-        })
+            # Add pricing fields
+            "pricing_type": r["pricing_type"],
+            "hourly_rate": r["hourly_rate"],
+            "per_person_rate": r["per_person_rate"],
+            "starting_price": r["starting_price"],
+            "fixed_price": r["fixed_price"]
+        }
+        # Enhance with pricing display fields
+        enhance_freelancer_with_pricing(freelancer_data)
+        out.append(freelancer_data)
     return jsonify({"success": True, "results": out})
 
 @app.route("/freelancers/<int:freelancer_id>", methods=["GET"])
@@ -2031,7 +2102,8 @@ def freelancer_details(freelancer_id: int):
     if not profile_data:
         return jsonify({"success": False, "msg": "Freelancer not found"}), 404
 
-    return jsonify({
+    # Create response data with all existing fields
+    response_data = {
         "success": True,
         "freelancer_id": profile_data["id"],
         "name": profile_data["name"],
@@ -2059,7 +2131,15 @@ def freelancer_details(freelancer_id: int):
         "hourly_rate": profile_data.get("hourly_rate"),
         "overtime_rate_per_hour": profile_data.get("overtime_rate_per_hour"),
         "pricing_type": profile_data.get("pricing_type"),
-    })
+        # Add additional pricing fields
+        "per_person_rate": profile_data.get("per_person_rate"),
+        "starting_price": profile_data.get("starting_price")
+    }
+    
+    # Enhance with pricing display fields
+    enhance_freelancer_with_pricing(response_data)
+    
+    return jsonify(response_data)
 
 @app.route("/freelancers/filter", methods=["GET"])
 def freelancers_filter():
@@ -5118,7 +5198,7 @@ def freelancer_subscription_status():
         return jsonify({"success": False, "msg": "Invalid freelancer_id"}), 400
     
     # Get subscription info
-    from database import get_freelancer_subscription, get_freelancer_job_applies, get_freelancer_plan
+    from database import freelancer_db, client_db, get_dict_cursor, get_freelancer_job_applies, get_freelancer_plan
     
     subscription = get_freelancer_subscription(freelancer_id)
     job_applies = get_freelancer_job_applies(freelancer_id)
@@ -6053,7 +6133,7 @@ def platform_stats():
         # Get gigs completed
         conn = freelancer_db()
         cur = get_dict_cursor(conn)
-        cur.execute("SELECT COUNT(*) as cnt FROM hire_request WHERE status='ACCEPTED'")
+        cur.execute("SELECT COUNT(*) as cnt FROM hire_request WHERE status='COMPLETED'")
         gigs_completed = (cur.fetchone() or {}).get("cnt", 0) or 0
         conn.close()
         
@@ -6083,11 +6163,11 @@ def freelancer_profile_stats(freelancer_id):
         # Get gigs completed
         conn = client_db()
         cur = get_dict_cursor(conn)
-        cur.execute("SELECT COUNT(*) as cnt FROM hire_request WHERE freelancer_id=%s AND status='ACCEPTED'", (freelancer_id,))
+        cur.execute("SELECT COUNT(*) as cnt FROM hire_request WHERE freelancer_id=%s AND status='COMPLETED'", (freelancer_id,))
         gigs_completed = (cur.fetchone() or {}).get("cnt", 0) or 0
         
         # Get earnings
-        cur.execute("SELECT SUM(proposed_budget) as total FROM hire_request WHERE freelancer_id=%s AND status='ACCEPTED'", (freelancer_id,))
+        cur.execute("SELECT SUM(proposed_budget) as total FROM hire_request WHERE freelancer_id=%s AND status='COMPLETED'", (freelancer_id,))
         earnings_row = cur.fetchone()
         earnings = (earnings_row.get("total") if isinstance(earnings_row, dict) else (earnings_row[0] if earnings_row else None)) or 0
         conn.close()

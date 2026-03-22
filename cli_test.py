@@ -28,6 +28,57 @@ current_client_id = None
 current_freelancer_id = None
 selected_package = None
 
+def display_freelancer(f):
+    """Display freelancer information with consistent formatting and dynamic pricing"""
+    print("\n--- Freelancer ---")
+    
+    # Handle both 'id' and 'freelancer_id' fields
+    freelancer_id = f.get('freelancer_id') or f.get('id')
+    print(f"ID: {freelancer_id}")
+    
+    print(f"Name: {f.get('name', '')}")
+    print(f"Category: {f.get('category', '').title()}")
+    print(f"Title: {f.get('title', '')}")
+
+    # PRICING TYPE (from backend)
+    pricing_type = (f.get("pricing_type") or "").lower()
+    print(f"Pricing Type: {pricing_type.upper()}")
+
+    if pricing_type == "hourly":
+        print(f"Hourly Rate: ₹{f.get('hourly_rate', 0)} / hour")
+
+    elif pricing_type == "per_person":
+        print(f"Per Person Rate: ₹{f.get('per_person_rate', 0)} per person")
+
+    elif pricing_type == "package":
+        print(f"Starting Price: ₹{f.get('starting_price', 0)}")
+
+    elif pricing_type == "project":
+        print(f"Project Price: ₹{f.get('fixed_price', 0)}")
+
+    else:
+        print("Price: Not specified")
+
+    # KEEP EXISTING FIELDS
+    print(f"Rating: ⭐ {f.get('rating', 0):.1f}")
+
+    status = f.get("availability_status", "UNKNOWN")
+    if status == "AVAILABLE":
+        print("Status: 🟢 AVAILABLE")
+    else:
+        print("Status: 🔴 NOT AVAILABLE")
+
+    print(f"Experience: {int(f.get('experience', 0))} years")
+
+    if f.get("skills"):
+        print(f"Skills: {f.get('skills')}")
+
+    if f.get("current_plan"):
+        print(f"Plan: {f.get('current_plan')}")
+
+    if f.get("distance") is not None:
+        print(f"Distance: {round(f.get('distance'), 1)} km")
+
 def clean_path(p):
     """Clean file path by removing quotes and trailing spaces"""
     return p.strip().strip('"').strip("'").strip()
@@ -926,24 +977,20 @@ def view_freelancer_details(fid):
         print("❌", data.get("msg"))
         return
 
-    # Safe dictionary access
-    print("\n--- FREELANCER DETAILS ---")
-    print("ID:", data.get("freelancer_id", fid))
-    print("Name:", data.get("name", "N/A"))
+    # Use the display_freelancer function for consistent formatting
+    display_freelancer(data)
+    
+    # Additional details not covered by display_freelancer
     print("Email:", data.get("email", "N/A"))
-    print("Category:", data.get("category", "N/A"))
-    print("Title:", data.get("title", "N/A"))
-    print("Skills:", data.get("skills", "N/A"))
     
     # Display formatted experience if available, otherwise show decimal
     if data.get("experience_formatted"):
         print("Experience:", data["experience_formatted"])
-    else:
-        print("Experience:", data.get("experience", "N/A"))
     
+    # Keep min/max budget for legacy compatibility
     print("Min Budget:", data.get("min_budget", "N/A"))
     print("Max Budget:", data.get("max_budget", "N/A"))
-    print("Rating:", data.get("rating", "N/A"))
+    
     print("Bio:", data.get("bio", "N/A"))
 
     pricing_type = data.get("pricing_type")
@@ -1773,21 +1820,11 @@ def client_ai_recommendations():
     
     print("\n--- AI RECOMMENDED FREELANCERS ---")
     for i, freelancer in enumerate(normalized_freelancers, 1):
-        # SAFE DISPLAY: Use .get() with defaults
-        name = freelancer.get("name", "Unknown")
-        match_score = freelancer.get("match_score", 0)
-        rating = freelancer.get("rating", 0)
-        experience = freelancer.get("experience", 0)
-        budget_range = freelancer.get("budget_range", "Not specified")
-        category = freelancer.get("category", "Not specified")
         freelancer_id = freelancer.get("freelancer_id")
+        match_score = freelancer.get("match_score", 0)
         
-        print(f"\n{i}. {name}")
-        print(f"   Match Score: {match_score}%")
-        print(f"   Rating: {rating}")
-        print(f"   Experience: {experience} years")
-        print(f"   Budget: {budget_range}")
-        print(f"   Category: {category}")
+        print(f"\n{i}. Match Score: {match_score}%")
+        display_freelancer(freelancer)
         
         print("1. View Details")
         print("2. Message")
@@ -1920,24 +1957,11 @@ def client_flow():
             current_index = 0
             while current_index < len(freelancers):
                 f = freelancers[current_index]
-                print("\n--- Freelancer ---")
-                print("ID:", f["freelancer_id"])
-                print("Name:", f["name"])
-                print("Category:", f.get("category", "Not specified"))
-                print("Title:", f.get("title", "Not specified"))
-                print("Budget Range:", f.get("budget_range", "Not specified"))
-                print("Rating:", f.get("rating", 0))
-                print("Status:", f.get("availability_status", "UNKNOWN"))
+                display_freelancer(f)
                 
-                # Additional hiring-relevant information
-                if f.get("experience"):
-                    print("Experience:", f["experience"], "years")
-                if f.get("skills"):
-                    print("Skills:", f["skills"])
+                # Additional information not covered by display_freelancer
                 if f.get("bio"):
                     print("Bio:", f["bio"][:100] + "..." if len(f["bio"]) > 100 else f["bio"])
-                if f.get("subscription_plan"):
-                    print("Plan:", f["subscription_plan"])
                 if f.get("distance") and f["distance"] != 999999.0:
                     print("Distance:", f"{f['distance']:.1f} km")
 
@@ -2151,26 +2175,11 @@ def client_flow():
                 current_index = 0
                 while current_index < len(freelancers):
                     f = freelancers[current_index]
-                    print("\n--- Freelancer ---")
-                    print("ID:", f["freelancer_id"])
-                    print("Name:", f["name"])
-                    print("Category:", f.get("category", "Not specified"))
-                    print("Title:", f.get("title", "Not specified"))
-                    print("Budget Range:", f.get("budget_range", "Not specified"))
-                    print("Rating:", f.get("rating", 0))
-                    print("Status:", f.get("availability_status", "UNKNOWN"))
+                    display_freelancer(f)
                     
-                    # Additional hiring-relevant information
-                    if f.get("experience"):
-                        print("Experience:", f["experience"], "years")
-                    if f.get("skills"):
-                        print("Skills:", f["skills"])
+                    # Additional information not covered by display_freelancer
                     if f.get("bio"):
                         print("Bio:", f["bio"][:100] + "..." if len(f["bio"]) > 100 else f["bio"])
-                    if f.get("subscription_plan"):
-                        print("Plan:", f["subscription_plan"])
-                    if f.get("distance") and f["distance"] != 999999.0:
-                        print("Distance:", f"{f['distance']:.1f} km")
                     
                     # Show selected package if applicable
                     if selected_package and selected_package.get('package_id'):

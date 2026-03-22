@@ -6,8 +6,7 @@ import time
 import hmac
 import hashlib
 from flask import Blueprint, request, jsonify
-from database import freelancer_db, client_db
-from postgres_config import get_dict_cursor
+from database import freelancer_db, client_db, get_dict_cursor, mark_job_completed
 from payment_config import (
     RAZORPAY_KEY_ID,
     RAZORPAY_KEY_SECRET,
@@ -60,6 +59,36 @@ def _verify_razorpay_signature(order_id, payment_id, signature):
 # ============================================================
 # HIRE PAYMENT FLOW
 # ============================================================
+
+@payment_bp.route("/payment/success", methods=["POST"])
+def payment_success():
+    """Handle successful payment and mark job as completed"""
+    data = request.get_json()
+
+    job_id = data.get("job_id")
+    amount = data.get("amount")
+
+    # Validate input
+    if not job_id:
+        return jsonify({"success": False, "msg": "job_id required"}), 400
+
+    try:
+        job_id = int(job_id)
+    except ValueError:
+        return jsonify({"success": False, "msg": "Invalid job_id"}), 400
+
+    # TODO: Add real payment verification here (Razorpay/Stripe)
+    # For now assume payment is successful
+    
+    success, msg = mark_job_completed(job_id)
+
+    if not success:
+        return jsonify({"success": False, "msg": msg}), 400
+
+    return jsonify({
+        "success": True,
+        "msg": "Payment successful and job completed"
+    })
 
 @payment_bp.route("/payment/hire/create-order", methods=["POST"])
 def payment_hire_create_order():
