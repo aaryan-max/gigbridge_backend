@@ -101,6 +101,26 @@ def create_tables():
     )
     """)
 
+    # Client Notifications Table
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS client_notifications (
+        id SERIAL PRIMARY KEY,
+        client_id INTEGER,
+        message TEXT,
+        title TEXT,
+        related_entity_type TEXT,
+        related_entity_id INTEGER,
+        created_at TIMESTAMP DEFAULT NOW(),
+        is_read BOOLEAN DEFAULT FALSE
+    )
+    """)
+
+    # Add index for client_notifications
+    try:
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_client_notifications_client_id ON client_notifications(client_id)")
+    except Exception:
+        pass
+
     # ==========================
     # MILESTONE TABLE
     # ==========================
@@ -352,6 +372,26 @@ def create_tables():
         created_at INTEGER
     )
     """)
+
+    # Freelancer Notifications Table
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS freelancer_notifications (
+        id SERIAL PRIMARY KEY,
+        freelancer_id INTEGER,
+        message TEXT,
+        title TEXT,
+        related_entity_type TEXT,
+        related_entity_id INTEGER,
+        created_at TIMESTAMP DEFAULT NOW(),
+        is_read BOOLEAN DEFAULT FALSE
+    )
+    """)
+
+    # Add index for freelancer_notifications
+    try:
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_freelancer_notifications_freelancer_id ON freelancer_notifications(freelancer_id)")
+    except Exception:
+        pass
 
     # Project posting tables
     cur.execute("""
