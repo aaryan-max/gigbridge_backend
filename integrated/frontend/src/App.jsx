@@ -33,9 +33,12 @@ import DashboardHeader from "./components/DashboardHeader.jsx";
 import DashboardSidebar from "./components/DashboardSidebar.jsx";
 import DashboardPlaceholder from "./components/DashboardPlaceholder.jsx";
 import NotificationsPage from "./pages/NotificationsPage.jsx";
+import FavoritesPage from "./pages/FavoritesPage.jsx";
 import VerificationPage from "./pages/VerificationPage.jsx";
 import SubscriptionPage from "./pages/SubscriptionPage.jsx";
 import SettingsPage from "./pages/SettingsPage.jsx";
+import MyProjects from "./pages/MyProjects.jsx";
+import ViewApplicants from "./pages/ViewApplicants.jsx";
 
 const StatsStrip = () => (
   <section className="stats">
@@ -135,6 +138,12 @@ const AppContent = () => {
         <Route path="/messages" element={
           <ProtectedClientRoute><ClientMessagesPage /></ProtectedClientRoute>
         } />
+        <Route path="/notifications" element={
+          <ProtectedClientRoute><NotificationsPage /></ProtectedClientRoute>
+        } />
+        <Route path="/favorites" element={
+          <ProtectedClientRoute><FavoritesPage /></ProtectedClientRoute>
+        } />
         <Route path="/profile" element={
           <ProtectedClientRoute><ClientProfile /></ProtectedClientRoute>
         } />
@@ -143,6 +152,12 @@ const AppContent = () => {
         } />
         <Route path="/payment" element={
           <ProtectedClientRoute><PaymentPage /></ProtectedClientRoute>
+        } />
+        <Route path="/my-projects" element={
+          <ProtectedClientRoute><MyProjects /></ProtectedClientRoute>
+        } />
+        <Route path="/project/:id/applicants" element={
+          <ProtectedClientRoute><ViewApplicants /></ProtectedClientRoute>
         } />
 
         <Route path="*" element={<Navigate to="/" replace />} />

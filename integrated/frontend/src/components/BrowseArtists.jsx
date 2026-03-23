@@ -1,5 +1,6 @@
 import { useMemo, useState, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
+import { useFavorites } from "../hooks/useFavorites";
 
 const VALID_CATEGORIES = [
   "Photographer",
@@ -51,6 +52,7 @@ const MOCK_API_RESPONSE = [
 
 export default function BrowseArtists() {
   const navigate = useNavigate();
+  const { toggleFavorite, isFavorite } = useFavorites();
   const [q, setQ] = useState("");
   const [sort, setSort] = useState("relevant");
   
@@ -238,7 +240,16 @@ export default function BrowseArtists() {
                     <button className="ba-view" onClick={() => setInviteId(a.id)}>Message</button>
                   </div>
                 </div>
-                <div className="ba-card-right">
+                <div className="ba-card-right" style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', justifyContent: 'space-between' }}>
+                  <button 
+                    onClick={() => toggleFavorite(a.id)}
+                    style={{ background: 'transparent', border: 'none', cursor: 'pointer', fontSize: '24px', padding: '0', margin: '0', transition: 'transform 0.2s' }}
+                    title={isFavorite(a.id) ? "Remove from favorites" : "Add to favorites"}
+                    onMouseOver={(e) => e.currentTarget.style.transform = 'scale(1.1)'}
+                    onMouseOut={(e) => e.currentTarget.style.transform = 'scale(1)'}
+                  >
+                    {isFavorite(a.id) ? "❤️" : "🤍"}
+                  </button>
                   <div className="ba-rating">⭐ {a.rating}</div>
                 </div>
               </article>

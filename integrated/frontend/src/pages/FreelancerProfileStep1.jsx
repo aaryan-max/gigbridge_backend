@@ -30,7 +30,6 @@ export default function FreelancerProfileStep1() {
     location: "",
     pincode: "",
     experience_years: "",
-    experience_months: "",
   });
   const [pinErr, setPinErr] = useState("");
 
@@ -57,14 +56,12 @@ export default function FreelancerProfileStep1() {
 
   const isValidPin = useMemo(() => /^\d{6}$/.test(form.pincode || ""), [form.pincode]);
   const yearsValid = useMemo(() => /^(?:\d|[1-3]\d|40)$/.test(form.experience_years || "0"), [form.experience_years]);
-  const monthsValid = useMemo(() => /^(?:\d|1\d?)$/.test(form.experience_months || "0") && Number(form.experience_months) <= 11, [form.experience_months]);
 
   const canContinue =
     form.category &&
     form.location &&
     isValidPin &&
-    yearsValid &&
-    monthsValid;
+    yearsValid;
 
   const continueToStep2 = (e) => {
     e.preventDefault();
@@ -118,30 +115,17 @@ export default function FreelancerProfileStep1() {
           </label>
         </div>
 
-        <div className="cp-row">
-          <label>
-            <span>Years of Experience</span>
-            <input
-              type="number"
-              min="0"
-              max="40"
-              placeholder="0–40"
-              value={form.experience_years}
-              onChange={onField("experience_years")}
-            />
-          </label>
-          <label>
-            <span>Months of Experience (0–11)</span>
-            <input
-              type="number"
-              min="0"
-              max="11"
-              placeholder="0–11"
-              value={form.experience_months}
-              onChange={onField("experience_months")}
-            />
-          </label>
-        </div>
+        <label>
+          <span>Years of Experience</span>
+          <input
+            type="number"
+            min="0"
+            max="40"
+            placeholder="0–40"
+            value={form.experience_years}
+            onChange={onField("experience_years")}
+          />
+        </label>
 
         <button className="cp-primary">
           Continue <span className="cp-arrow">→</span>

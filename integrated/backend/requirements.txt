@@ -1,0 +1,10 @@
+flask
+flask-cors
+requests
+werkzeug
+rapidfuzz
+numpy
+faiss-cpu
+sentence-transformers
+google-generativeai
+python-dotenv
