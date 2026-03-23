@@ -5006,15 +5006,47 @@ def freelancer_verification_upload():
     os.makedirs(upload_dir, exist_ok=True)
     
     if request.is_json:
-        # Save files from paths
-        government_id_path = os.path.join(upload_dir, os.path.basename(government_id_path))
-        pan_card_path = os.path.join(upload_dir, os.path.basename(pan_card_path))
-        artist_proof_path = os.path.join(upload_dir, os.path.basename(artist_proof_path)) if artist_proof_path else None
+        # Save files from paths - FIXED VERSION
+        import shutil
+        from werkzeug.utils import secure_filename
         
-        shutil.copy(government_id_path, upload_dir)
-        shutil.copy(pan_card_path, upload_dir)
-        if artist_proof_path:
-            shutil.copy(artist_proof_path, upload_dir)
+        # Clean and validate source paths
+        original_gov_path = government_id_path.strip().strip('"').strip("'")
+        original_pan_path = pan_card_path.strip().strip('"').strip("'")
+        original_artist_path = artist_proof_path.strip().strip('"').strip("'") if artist_proof_path else None
+        
+        # Validate files exist
+        if not os.path.exists(original_gov_path):
+            return jsonify({"success": False, "msg": f"Government ID file not found: {original_gov_path}"}), 400
+        if not os.path.exists(original_pan_path):
+            return jsonify({"success": False, "msg": f"PAN card file not found: {original_pan_path}"}), 400
+        if original_artist_path and not os.path.exists(original_artist_path):
+            return jsonify({"success": False, "msg": f"Artist proof file not found: {original_artist_path}"}), 400
+        
+        # Extract and secure filenames
+        gov_filename = secure_filename(os.path.basename(original_gov_path))
+        pan_filename = secure_filename(os.path.basename(original_pan_path))
+        artist_filename = secure_filename(os.path.basename(original_artist_path)) if original_artist_path else None
+        
+        # Create full destination paths (CRITICAL FIX)
+        government_id_path = os.path.join(upload_dir, gov_filename)
+        pan_card_path = os.path.join(upload_dir, pan_filename)
+        artist_proof_path = os.path.join(upload_dir, artist_filename) if artist_filename else None
+        
+        # Debug logs
+        print(f"DEBUG GOV SOURCE: {original_gov_path}")
+        print(f"DEBUG GOV DEST: {government_id_path}")
+        print(f"DEBUG PAN SOURCE: {original_pan_path}")
+        print(f"DEBUG PAN DEST: {pan_card_path}")
+        if original_artist_path:
+            print(f"DEBUG ARTIST SOURCE: {original_artist_path}")
+            print(f"DEBUG ARTIST DEST: {artist_proof_path}")
+        
+        # Copy files correctly (FIXED - using full destination paths)
+        shutil.copy(original_gov_path, government_id_path)
+        shutil.copy(original_pan_path, pan_card_path)
+        if original_artist_path and artist_proof_path:
+            shutil.copy(original_artist_path, artist_proof_path)
     else:
         # Save files from multipart form data
         government_id_file.save(os.path.join(upload_dir, government_id_file.filename))
